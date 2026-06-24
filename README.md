@@ -1,63 +1,63 @@
 # mcp-itop
 
-MCP (Model Context Protocol) server for **iTop ITSM** — analytics, tickets, comments, knowledge base, CI.
+MCP-сервер для **iTop ITSM** — аналитика, заявки, комментарии, база знаний, CI.
 
-Provides AI assistants (Claude Desktop, opencode, Cursor, etc.) with 19 tools for iTop:
-SLA analysis, agent workload, service quality, ticket lifecycle, KB search, CI impact.
+Предоставляет AI-ассистентам (opencode, Claude Desktop, Cursor) **19 инструментов** для работы с iTop:
+SLA-аналитика, нагрузка агентов, качество услуг, жизненный цикл заявок, поиск по БЗ, impact-анализ CI.
 
-## Features
+## Возможности
 
-### Analytics
-| Tool | Description |
-|------|-------------|
-| `itop_sla_report` | SLA report per service/period (TTO/TTR passed/breached/N/A, median resolution) |
-| `itop_agent_workload` | Agent workload: closed/open tickets, time_spent, backlog |
-| `itop_idle_agents` | Find tickets where agent is idle >N hours without action |
-| `itop_service_quality` | Detect similar tickets assigned to different services |
-| `itop_caller_quality` | Caller service selection accuracy analysis |
-| `itop_agent_correction_rate` | Which agents fix/ignore service misclassification |
-| `itop_ticket_summary` | Dashboard: created/resolved/open/SLA breaches |
+### Аналитика
+| Инструмент | Описание |
+|------------|----------|
+| `itop_sla_report` | SLA-отчёт по услуге за период (TTO/TTR passed/breached/N/A, медиана решения) |
+| `itop_agent_workload` | Загрузка агентов: закрытые/открытые заявки, time_spent, backlog |
+| `itop_idle_agents` | Поиск заявок, где агент бездействует >N часов без действий |
+| `itop_service_quality` | Поиск похожих заявок, назначенных на разные услуги |
+| `itop_caller_quality` | Качество выбора услуг пользователями |
+| `itop_agent_correction_rate` | Агенты, которые исправляют / не исправляют услуги |
+| `itop_ticket_summary` | Дашборд: создано/решено/открыто/SLA breaches |
 
-### Comments
-| Tool | Description |
-|------|-------------|
-| `itop_add_comment` | Add public/private comment to a ticket |
-| `itop_get_log` | Read ticket log entries (public_log, private_log) |
+### Комментарии
+| Инструмент | Описание |
+|------------|----------|
+| `itop_add_comment` | Добавить публичный или приватный комментарий к заявке |
+| `itop_get_log` | Прочитать историю комментариев (public_log, private_log) |
 
-### Knowledge Base
-| Tool | Description |
-|------|-------------|
-| `itop_search_kb` | Search KB articles (supports KBEntry and FAQ modules) |
-| `itop_get_kb_article` | Get full article content |
-| `itop_list_kb_categories` | List KB categories |
+### База знаний
+| Инструмент | Описание |
+|------------|----------|
+| `itop_search_kb` | Поиск статей БЗ (поддерживает KBEntry и FAQ) |
+| `itop_get_kb_article` | Полный текст статьи |
+| `itop_list_kb_categories` | Список рубрик БЗ |
 
-### CRUD + Lifecycle
-| Tool | Description |
-|------|-------------|
-| `itop_get` | Search objects (OQL / ID / JSON criteria) |
-| `itop_create` | Create object (enforces required fields + comment) |
-| `itop_update` | Update object fields |
-| `itop_delete` | Delete with simulate mode |
-| `itop_apply_stimulus` | Lifecycle: ev_assign, ev_resolve, ev_close, ev_reopen, etc. |
-| `itop_get_related` | CI impact/dependency analysis |
-| `itop_describe_class` | Discover fields by sampling an existing object |
+### CRUD + Жизненный цикл
+| Инструмент | Описание |
+|------------|----------|
+| `itop_get` | Поиск объектов (OQL / ID / JSON-критерии) |
+| `itop_create` | Создание объекта |
+| `itop_update` | Обновление полей объекта |
+| `itop_delete` | Удаление с simulate-режимом |
+| `itop_apply_stimulus` | Жизненный цикл: ev_assign, ev_resolve, ev_close, ev_reopen |
+| `itop_get_related` | Impact-анализ CI (impacts/depends on) |
+| `itop_describe_class` | Разведка полей класса по существующему объекту |
 
-## Quick Start
+## Быстрый старт
 
-### 1. Install
+### 1. Установка
 
 ```bash
 pip install mcp[fastmcp] httpx python-dotenv
 ```
 
-### 2. Configure (global)
+### 2. Настройка (глобальный конфиг)
 
 ```bash
 mkdir -p ~/.config/mcp-itop
 cat > ~/.config/mcp-itop/.env << 'CONFIG'
 ITOP_URL=https://your-itop.example.com
-# Use token OR user+password:
-ITOP_TOKEN=your_api_token_here
+# Токен или логин+пароль:
+ITOP_TOKEN=ваш_токен_здесь
 # ITOP_USER=admin
 # ITOP_PASSWORD=secret
 ITOP_VERSION=1.3
@@ -66,41 +66,39 @@ ITOP_TIMEOUT=30
 CONFIG
 ```
 
-### 3. Run
+### 3. Запуск
 
 ```bash
 python server.py
 ```
 
-Or via opencode (see below).
+## Интеграция
 
-## Integration
+### opencode (глобальный конфиг)
 
-### opencode (global config)
-
-Add to `~/.config/opencode/opencode.json`:
+Добавить в `~/.config/opencode/opencode.json`:
 
 ```json
 "itop": {
   "type": "local",
-  "command": ["python", "/path/to/mcp-itop/server.py"],
+  "command": ["python", "/путь/до/mcp-itop/server.py"],
   "enabled": true
 }
 ```
 
-### opencode (per-project)
+### opencode (на проект)
 
-Add to `opencode.json`:
+Добавить в `opencode.json` проекта:
 
 ```json
 {
   "mcpServers": {
     "itop": {
       "command": "python",
-      "args": ["/path/to/mcp-itop/server.py"],
+      "args": ["/путь/до/mcp-itop/server.py"],
       "env": {
         "ITOP_URL": "https://your-itop.example.com",
-        "ITOP_TOKEN": "your_token"
+        "ITOP_TOKEN": "ваш_токен"
       }
     }
   }
@@ -109,66 +107,66 @@ Add to `opencode.json`:
 
 ### Claude Desktop
 
-Add to `claude_desktop_config.json`:
+Добавить в `claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
     "itop": {
       "command": "python",
-      "args": ["/path/to/mcp-itop/server.py"]
+      "args": ["/путь/до/mcp-itop/server.py"]
     }
   }
 }
 ```
 
-## Example Queries
+## Примеры запросов
 
 ```
-Show SLA report for IT support service this month
-Which agents are overloaded?
-Find tickets idle more than 2 hours
-Find similar tickets assigned to different services
-Who calls often pick wrong service?
-Add comment to RQ-123
-Create a new ticket: Printer not working
-Assign RQ-456 to Ivanov
-Find CIs related to server srv-web-01
-Search KB for VPN setup
+Покажи SLA по услуге "Техподдержка" за этот месяц
+Кто из агентов перегружен?
+Какие заявки висят без движения больше 2 часов?
+Найди похожие заявки с разными услугами
+Кто из пользователей часто выбирает не ту услугу?
+Добавь комментарий к заявке RQ-123
+Создай новую заявку: Не работает принтер
+Назначь RQ-456 на Иванова
+Найди CI, связанные с сервером srv-web-01
+Поищи в БЗ по VPN
 ```
 
-## Compatibility
+## Совместимость
 
-Tested on:
+Протестировано на:
 
 - **iTop** 3.2.1-1-16749 (PHP 8.1.2, MariaDB 10.6)
-- Supports Russian locale (да/нет for SLA) and English (true/false)
-- Auto-detects KB module: KBEntry → FAQ
+- Поддерживает русскую локаль (да/нет для SLA) и английскую (true/false)
+- Автоопределение модуля БЗ: KBEntry → FAQ
 
-## Requirements
+## Требования
 
 - Python ≥ 3.10
 - `mcp[fastmcp]`
 - `httpx`
 - `python-dotenv`
 
-## Tests
+## Тесты
 
 ```bash
 python -m pytest tests/ -v
 ```
 
-## Architecture
+## Архитектура
 
 ```
-AI Client → MCP (stdio) → server.py → iTop REST API
+AI-клиент → MCP (stdio) → server.py → iTop REST API
 ```
 
-Configuration cascade:
-1. `~/.config/mcp-itop/.env` (global, highest priority)
-2. `.env` (project-local)
-3. Environment variables
+Приоритет конфигурации:
+1. `~/.config/mcp-itop/.env` (глобальный, наивысший приоритет)
+2. `.env` (локальный в папке проекта)
+3. Переменные окружения
 
-## License
+## Лицензия
 
 MIT
