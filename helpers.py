@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Tuple
+from typing import Any, Callable, Optional, Tuple
 
 from config import ITOP_URL
 
@@ -40,7 +40,7 @@ def sla_is_breached(val: str) -> bool:
 # -------------------------------------------------------------------------
 
 # iTop assigns a "ref" field (e.g. "R-000123") to all ticket-like classes.
-# Used by ensure_ref_field() and parse_key_for_ticket().
+# Used by ensure_ref_field(), parse_key_for_ticket(), and resolve_key().
 CLASSES_WITH_REF: frozenset[str] = frozenset({
     "UserRequest",
     "Incident",
@@ -98,6 +98,58 @@ def parse_key_for_ticket(obj_class: str, key: str) -> Any:
     ):
         return {"ref": parsed}
     return parsed
+
+
+async def resolve_key(
+    obj_class: str,
+    itop_request: Callable,
+    ref: Optional[str] = None,
+    key: Optional[str] = None,
+) -> Any:
+    """Resolve the correct iTop numeric key for a ticket-class object.
+
+    This is the universal key resolver for all mutation tools (update, delete,
+    apply_stimulus, add_comment, etc.). It guarantees the correct numeric key
+    is used even when the LLM supplies a wrong or guessed numeric ID alongside
+    a valid ref.
+
+    Resolution order:
+    1. If ref is provided and matches the ref pattern (e.g. "R-016271"):
+       - Perform a live core/get by {"ref": ref} and return the numeric key
+         from the iTop response. The LLM-supplied key/id is ignored entirely.
+    2. If only key is provided (no ref, or ref does not match the pattern):
+       - Fall back to parse_key_for_ticket(obj_class, key).
+
+    Args:
+        obj_class:    iTop class name (e.g. "UserRequest").
+        itop_request: The bound itop_request coroutine from the tool context.
+        ref:          Ticket ref string (e.g. "R-016271"), if available.
+        key:          Fallback key (numeric ID string, OQL, JSON), if no ref.
+
+    Returns:
+        The resolved key suitable for use as the iTop REST "key" field.
+    """
+    # If a valid ref is supplied, always resolve via live lookup
+    if ref and isinstance(ref, str) and obj_class in CLASSES_WITH_REF and _REF_PATTERN.match(ref.strip()):
+        result = await itop_request({
+            "operation": "core/get",
+            "class": obj_class,
+            "key": {"ref": ref.strip()},
+            "output_fields": "id",
+        })
+        objects = result.get("objects") or {}
+        if objects:
+            # Return the numeric key from the first (and only) match
+            numeric_key = next(iter(objects.values())).get("key")
+            if numeric_key is not None:
+                try:
+                    return int(numeric_key)
+                except (ValueError, TypeError):
+                    return numeric_key
+        # ref lookup returned nothing - fall through to key fallback
+    # Fall back to key (or ref as key if no key supplied)
+    fallback = key or ref or ""
+    return parse_key_for_ticket(obj_class, str(fallback))
 
 
 # -------------------------------------------------------------------------
