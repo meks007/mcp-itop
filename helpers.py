@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Tuple
 
 from config import ITOP_URL
 
@@ -40,33 +40,51 @@ def sla_is_breached(val: str) -> bool:
 # -------------------------------------------------------------------------
 
 # iTop assigns a "ref" field (e.g. "R-000123") to all ticket-like classes.
-# Used by ensure_ref_field(), parse_key_for_ticket(), and resolve_key().
+# Used by ensure_ref_field() and parse_key_for_ticket().
 CLASSES_WITH_REF: frozenset[str] = frozenset({
     "UserRequest",
     "Incident",
+    "Problem",
     "Change",
+    "ChangeRequest",
     "NormalChange",
+    "EmergencyChange",
+    "RoutineChange",
+    "ServiceRequest",
+    "RFC",
+    "RFI",
 })
 
 # Matches iTop ticket ref strings like "R-000123", "INC-42", "P-007".
 _REF_PATTERN = re.compile(r"^[A-Z]+-\d+$")
 
+# Fields injected by MCP output formatting that must never be sent to iTop.
+_SYNTHETIC_FIELDS: frozenset[str] = frozenset({"link"})
+
 
 def ensure_ref_field(obj_class: str, output_fields: str) -> str:
-    """Inject 'ref' and unconditionally strip 'id' for ticket classes.
+    """Inject 'ref' and strip synthetic/redundant fields for ticket classes.
 
     For classes in CLASSES_WITH_REF:
     - 'ref' is injected at the front if not already present.
-    - 'id' is always removed, even if the caller explicitly requested it.
-      The numeric DB key is redundant and confusing once ref is present.
+    - 'id' is always removed (redundant once ref is present).
+    - Synthetic MCP-injected fields (e.g. 'link') are always removed because
+      they do not exist as iTop attributes and would cause API errors.
 
     '*' and '*+' are passed through unchanged (iTop handles field expansion).
-    Non-ticket classes are not modified.
+    Non-ticket classes only have synthetic fields stripped.
     """
+    # Strip synthetic fields universally, even for non-ticket classes
+    if output_fields not in ("*", "*+"):
+        fields = [f.strip() for f in output_fields.split(",") if f.strip()]
+        fields = [f for f in fields if f not in _SYNTHETIC_FIELDS]
+        output_fields = ", ".join(fields)
+
     if output_fields in ("*", "*+"):
         return output_fields
     if obj_class not in CLASSES_WITH_REF:
         return output_fields
+
     fields = [f.strip() for f in output_fields.split(",") if f.strip()]
     # Always strip id for ticket classes - ref is the canonical identifier
     fields = [f for f in fields if f != "id"]
@@ -93,37 +111,25 @@ def parse_key_for_ticket(obj_class: str, key: str) -> Any:
     return parsed
 
 
-async def resolve_key(
-    obj_class: str,
-    itop_request: Callable,
-    ref: Optional[str] = None,
-    key: Optional[str] = None,
-) -> Any:
-    """Resolve the correct iTop numeric key for a ticket-class object.
+async def resolve_key(obj_class: str, ref: str | None, numeric_id: Any, itop_request) -> Any:
+    """Resolve a ticket identifier to a numeric key for mutation operations.
 
-    This is the universal key resolver for all mutation tools (update, delete,
-    apply_stimulus, add_comment, etc.). It guarantees the correct numeric key
-    is used even when the LLM supplies a wrong or guessed numeric ID alongside
-    a valid ref.
-
-    Resolution order:
-    1. If ref is provided and matches the ref pattern (e.g. "R-016271"):
-       - Perform a live core/get by {"ref": ref} and return the numeric key
-         from the iTop response. The LLM-supplied key/id is ignored entirely.
-    2. If only key is provided (no ref, or ref does not match the pattern):
-       - Fall back to parse_key_for_ticket(obj_class, key).
+    Preference order:
+    1. If ref is provided and looks like a ticket ref, look up the numeric key
+       via iTop and return it. This guarantees the correct object is targeted.
+    2. If ref is not a recognizable ref string, fall back to numeric_id.
+    3. If neither is usable, return numeric_id as-is.
 
     Args:
-        obj_class:    iTop class name (e.g. "UserRequest").
-        itop_request: The bound itop_request coroutine from the tool context.
-        ref:          Ticket ref string (e.g. "R-016271"), if available.
-        key:          Fallback key (numeric ID string, OQL, JSON), if no ref.
+        obj_class: iTop class (e.g. UserRequest).
+        ref: Ticket ref string (e.g. "R-016271") or None.
+        numeric_id: Numeric ID or string ID as fallback.
+        itop_request: Async callable for iTop REST requests.
 
     Returns:
-        The resolved key suitable for use as the iTop REST "key" field.
+        Numeric integer key for use in iTop mutation operations.
     """
-    # If a valid ref is supplied, always resolve via live lookup
-    if ref and isinstance(ref, str) and obj_class in CLASSES_WITH_REF and _REF_PATTERN.match(ref.strip()):
+    if ref and isinstance(ref, str) and _REF_PATTERN.match(ref.strip()):
         result = await itop_request({
             "operation": "core/get",
             "class": obj_class,
@@ -131,18 +137,20 @@ async def resolve_key(
             "output_fields": "id",
         })
         objects = result.get("objects") or {}
-        if objects:
-            # Return the numeric key from the first (and only) match
-            numeric_key = next(iter(objects.values())).get("key")
-            if numeric_key is not None:
+        for _k, obj_data in objects.items():
+            raw_id = obj_data.get("key") or (obj_data.get("fields") or {}).get("id")
+            if raw_id is not None:
                 try:
-                    return int(numeric_key)
+                    return int(raw_id)
                 except (ValueError, TypeError):
-                    return numeric_key
-        # ref lookup returned nothing - fall through to key fallback
-    # Fall back to key (or ref as key if no key supplied)
-    fallback = key or ref or ""
-    return parse_key_for_ticket(obj_class, str(fallback))
+                    pass
+    # Fallback to numeric_id
+    if numeric_id is not None:
+        try:
+            return int(numeric_id)
+        except (ValueError, TypeError):
+            return numeric_id
+    return numeric_id
 
 
 # -------------------------------------------------------------------------
