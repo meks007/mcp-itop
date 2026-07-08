@@ -9,6 +9,8 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Tuple
 
+from config import ITOP_URL
+
 
 # -------------------------------------------------------------------------
 # SLA helpers
@@ -163,10 +165,12 @@ def extract_objects(result: dict) -> list[dict]:
 def format_objects(result: dict) -> str:
     """Format iTop response objects into readable string.
 
-    When a 'ref' field is present in the object's fields, it is used as the
-    header label instead of the numeric key, and both 'ref' and 'id' entries
-    are omitted from the field list below (ref is in the header, id is
-    redundant for ticket classes).
+    For each object:
+    - If a 'ref' field is present, it is used as the header label instead of
+      the numeric key, and 'ref' is suppressed from the field list.
+    - 'id' is always suppressed when 'ref' is present (redundant).
+    - A 'link' line is injected using ITOP_URL + class + numeric key, giving
+      the LLM a direct URL to the object in the iTop UI.
     """
     if result.get("code", -1) != 0:
         return f"Error (code {result.get('code')}): {str_or(result, 'message', 'Unknown error')}"
@@ -182,6 +186,11 @@ def format_objects(result: dict) -> str:
         ref = fields.get("ref")
         label = ref if ref else oid
         lines.append(f"\n--- {cls}::{label} ---")
+        # Inject direct link to the iTop UI object page
+        if ITOP_URL and oid:
+            lines.append(
+                f"  link: {ITOP_URL}/pages/UI.php?operation=details&class={cls}&id={oid}"
+            )
         for fn, fv in fields.items():
             # ref is already in the header; id is redundant when ref is present
             if fn == "ref" or (ref and fn == "id"):
