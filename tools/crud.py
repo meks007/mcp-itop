@@ -29,10 +29,16 @@ def register(mcp, itop_request):
     ) -> str:
         """Search for objects in iTop.
 
+        For ticket classes (UserRequest, Incident, Problem, Change, etc.) always
+        prefer the ref value (e.g. "R-016271") as the key when available from a
+        previous tool result. A ref is resolved server-side and is unambiguous.
+        Numeric IDs may differ between environments and should be avoided.
+
         Args:
             obj_class: iTop class (e.g. Server, UserRequest, Person, Organization).
-            key: OQL query (e.g. "SELECT Server WHERE name LIKE '%web%'"),
-                 numeric ID, or JSON criteria.
+            key: Ticket ref (e.g. "R-016271"), OQL query
+                 (e.g. "SELECT UserRequest WHERE status='open'"),
+                 numeric ID string, or JSON criteria dict as string.
             output_fields: Comma-separated fields, or "*" for all, or "*+" for subclass fields.
             limit: Max results (0 = no limit).
             page: Page number (starts at 1).
@@ -40,7 +46,7 @@ def register(mcp, itop_request):
         op: dict = {
             "operation": "core/get",
             "class": obj_class,
-            "key": parse_key(key),
+            "key": parse_key_for_ticket(obj_class, key),
             "output_fields": ensure_ref_field(obj_class, output_fields),
         }
         if limit > 0:
@@ -92,12 +98,14 @@ def register(mcp, itop_request):
         Use this to modify fields on tickets, CI, etc.
         For lifecycle transitions (assign/resolve/close), use itop_apply_stimulus.
 
-        For ticket classes (UserRequest, Incident, etc.) the key can be a
-        ticket ref (e.g. "R-000123") and it will be resolved automatically.
+        For ticket classes (UserRequest, Incident, Problem, Change, etc.) always
+        use the ref value (e.g. "R-016271") as the key when available from a
+        previous tool result. Do NOT guess or invent a numeric ID.
 
         Args:
             obj_class: iTop class.
-            key: Object ID, ref (e.g. "R-000123"), OQL, or JSON criteria.
+            key: Ticket ref (e.g. "R-016271"), numeric ID string, OQL, or JSON
+                 criteria. Prefer ref for ticket classes.
             fields: JSON of fields to update.
             output_fields: Fields to return.
             comment: Optional comment for change tracking.
@@ -125,12 +133,14 @@ def register(mcp, itop_request):
     ) -> str:
         """Delete object(s) from iTop.
 
-        For ticket classes (UserRequest, Incident, etc.) the key can be a
-        ticket ref (e.g. "R-000123") and it will be resolved automatically.
+        For ticket classes (UserRequest, Incident, Problem, Change, etc.) always
+        use the ref value (e.g. "R-016271") as the key when available from a
+        previous tool result. Do NOT guess or invent a numeric ID.
 
         Args:
             obj_class: iTop class.
-            key: Object ID, ref (e.g. "R-000123"), OQL, or JSON criteria.
+            key: Ticket ref (e.g. "R-016271"), numeric ID string, OQL, or JSON
+                 criteria. Prefer ref for ticket classes.
             comment: Optional comment.
             simulate: If True, dry-run without deleting (default: True).
         """
@@ -162,12 +172,14 @@ def register(mcp, itop_request):
           - ev_reopen:   reopen ticket
           - ev_pending:  put on hold (fields={"pending_reason": "..."})
 
-        The key can be a ticket ref (e.g. "R-000123") and it will be resolved
-        automatically for ticket classes.
+        For ticket classes (UserRequest, Incident, Problem, Change, etc.) always
+        use the ref value (e.g. "R-016271") as the key when available from a
+        previous tool result. Do NOT guess or invent a numeric ID.
 
         Args:
             obj_class: iTop class (e.g. UserRequest, Incident).
-            key: Object ID, ref (e.g. "R-000123"), OQL, or JSON criteria.
+            key: Ticket ref (e.g. "R-016271"), numeric ID string, OQL, or JSON
+                 criteria. Prefer ref for ticket classes.
             stimulus: Stimulus code (e.g. ev_assign, ev_resolve).
             fields: JSON of fields required for the transition.
             output_fields: Fields to return.
