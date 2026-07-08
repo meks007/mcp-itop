@@ -1,104 +1,143 @@
 # mcp-itop
 
-MCP-сервер для **iTop ITSM** — аналитика, заявки, комментарии, база знаний, CI.
+MCP server for **iTop ITSM** - analytics, tickets, comments, knowledge base, CI.
 
-Предоставляет AI-ассистентам (opencode, Claude Desktop, Cursor) **19 инструментов** для работы с iTop:
-SLA-аналитика, нагрузка агентов, качество услуг, жизненный цикл заявок, поиск по БЗ, impact-анализ CI.
+Provides AI assistants (opencode, Claude Desktop, Cursor) with **19 tools**
+for working with iTop: SLA analytics, agent workload, service quality,
+ticket lifecycle, KB search, CI impact analysis.
 
-## Возможности
+Originally based on/inspired by [gest0r1/mcp-itop](https://github.com/gest0r1/mcp-itop) - thank you for the foundation this project builds on.
 
-### Аналитика
-| Инструмент | Описание |
-|------------|----------|
-| `itop_sla_report` | SLA-отчёт по услуге за период (TTO/TTR passed/breached/N/A, медиана решения) |
-| `itop_agent_workload` | Загрузка агентов: закрытые/открытые заявки, time_spent, backlog |
-| `itop_idle_agents` | Поиск заявок, где агент бездействует >N часов без действий |
-| `itop_service_quality` | Поиск похожих заявок, назначенных на разные услуги |
-| `itop_caller_quality` | Качество выбора услуг пользователями |
-| `itop_agent_correction_rate` | Агенты, которые исправляют / не исправляют услуги |
-| `itop_ticket_summary` | Дашборд: создано/решено/открыто/SLA breaches |
+## Features
 
-### Комментарии
-| Инструмент | Описание |
-|------------|----------|
-| `itop_add_comment` | Добавить публичный или приватный комментарий к заявке |
-| `itop_get_log` | Прочитать историю комментариев (public_log, private_log) |
+### Analytics
+| Tool | Description |
+|------|-------------|
+| `itop_sla_report` | SLA report for a service over a period (TTO/TTR passed/breached/N/A, median resolution) |
+| `itop_agent_workload` | Agent workload: closed/open tickets, time_spent, backlog |
+| `itop_idle_agents` | Find tickets where the agent has been idle for >N hours |
+| `itop_service_quality` | Find similar tickets assigned to different services |
+| `itop_caller_quality` | Quality of service selection by end users |
+| `itop_agent_correction_rate` | Agents who do/don't correct misassigned services |
+| `itop_ticket_summary` | Dashboard: created/resolved/open/SLA breaches |
 
-### База знаний
-| Инструмент | Описание |
-|------------|----------|
-| `itop_search_kb` | Поиск статей БЗ (поддерживает KBEntry и FAQ) |
-| `itop_get_kb_article` | Полный текст статьи |
-| `itop_list_kb_categories` | Список рубрик БЗ |
+### Comments
+| Tool | Description |
+|------|-------------|
+| `itop_add_comment` | Add a public or private comment to a ticket |
+| `itop_get_log` | Read comment history (public_log, private_log) |
 
-### CRUD + Жизненный цикл
-| Инструмент | Описание |
-|------------|----------|
-| `itop_get` | Поиск объектов (OQL / ID / JSON-критерии) |
-| `itop_create` | Создание объекта |
-| `itop_update` | Обновление полей объекта |
-| `itop_delete` | Удаление с simulate-режимом |
-| `itop_apply_stimulus` | Жизненный цикл: ev_assign, ev_resolve, ev_close, ev_reopen |
-| `itop_get_related` | Impact-анализ CI (impacts/depends on) |
-| `itop_describe_class` | Разведка полей класса по существующему объекту |
+### Knowledge base
+| Tool | Description |
+|------|-------------|
+| `itop_search_kb` | Search KB articles (supports KBEntry and FAQ) |
+| `itop_get_kb_article` | Full text of an article |
+| `itop_list_kb_categories` | List KB categories |
 
-## Быстрый старт
+### CRUD + Lifecycle
+| Tool | Description |
+|------|-------------|
+| `itop_get` | Search objects (OQL / ID / JSON criteria) |
+| `itop_create` | Create an object |
+| `itop_update` | Update object fields |
+| `itop_delete` | Delete with simulate mode |
+| `itop_apply_stimulus` | Lifecycle transitions: ev_assign, ev_resolve, ev_close, ev_reopen |
+| `itop_get_related` | CI impact analysis (impacts/depends on) |
+| `itop_describe_class` | Discover class fields from an existing object |
 
-### 1. Установка
+## Authentication
+
+The server no longer stores an iTop token in its own environment
+variables. Instead, each MCP client sends its own iTop token as a
+bearer token in the `Authorization: Bearer <itop_token>` HTTP header
+when it connects.
+
+The server verifies that a non-empty bearer token is present during the
+MCP handshake (`initialize`) - connections without one are rejected
+with 401 before the client can see the list of tools. That same token
+is then used for every iTop REST/JSON API call made on behalf of that
+client.
+
+### What changed
+
+Previously, iTop credentials (`ITOP_TOKEN` or `ITOP_USER`/`ITOP_PASSWORD`)
+were configured once as server-wide environment variables, shared by
+every connected client. This has been replaced with per-client bearer
+token authentication:
+
+- `ITOP_TOKEN`, `ITOP_USER`, and `ITOP_PASSWORD` env vars have been removed.
+- Each client now presents its own iTop token as a bearer token, validated
+  at the MCP handshake by a custom token verifier.
+- The validated token is forwarded to iTop as `auth_token` on every
+  REST/JSON API call for that client.
+- The transport changed from `stdio` to `streamable-http`, since per-request
+  HTTP Authorization headers are required to support per-client tokens.
+- The Docker image no longer bundles `mcp-proxy` / `entrypoint.sh`; the
+  container now runs `server.py` directly, since it is HTTP-native.
+
+## Quick start
+
+### 1. Install
 
 ```bash
 pip install mcp[fastmcp] httpx python-dotenv
 ```
 
-### 2. Настройка (глобальный конфиг)
+### 2. Configuration (global config)
 
 ```bash
 mkdir -p ~/.config/mcp-itop
 cat > ~/.config/mcp-itop/.env << 'CONFIG'
 ITOP_URL=https://your-itop.example.com
-# Токен или логин+пароль:
-ITOP_TOKEN=ваш_токен_здесь
-# ITOP_USER=admin
-# ITOP_PASSWORD=secret
 ITOP_VERSION=1.3
 ITOP_VERIFY_SSL=true
 ITOP_TIMEOUT=30
+
+# Optional: server bind address/port (streamable-http transport)
+# MCP_HOST=0.0.0.0
+# MCP_PORT=8096
 CONFIG
 ```
 
-### 3. Запуск
+No iTop token is set here - it is supplied by the client (see "Authentication" above).
+
+### 3. Run
 
 ```bash
 python server.py
 ```
 
-## Интеграция
+The server runs on the `streamable-http` transport (default
+`0.0.0.0:8096`), since HTTP is required to carry the client's bearer token.
 
-### opencode (глобальный конфиг)
+## Integration
 
-Добавить в `~/.config/opencode/opencode.json`:
+### opencode (global config)
+
+Add to `~/.config/opencode/opencode.json`:
 
 ```json
 "itop": {
-  "type": "local",
-  "command": ["python", "/путь/до/mcp-itop/server.py"],
+  "type": "remote",
+  "url": "http://localhost:8096/mcp",
+  "headers": {
+    "Authorization": "Bearer your_token"
+  },
   "enabled": true
 }
 ```
 
-### opencode (на проект)
+### opencode (per project)
 
-Добавить в `opencode.json` проекта:
+Add to the project's `opencode.json`:
 
 ```json
 {
   "mcpServers": {
     "itop": {
-      "command": "python",
-      "args": ["/путь/до/mcp-itop/server.py"],
-      "env": {
-        "ITOP_URL": "https://your-itop.example.com",
-        "ITOP_TOKEN": "ваш_токен"
+      "url": "http://localhost:8096/mcp",
+      "headers": {
+        "Authorization": "Bearer your_token"
       }
     }
   }
@@ -107,66 +146,61 @@ python server.py
 
 ### Claude Desktop
 
-Добавить в `claude_desktop_config.json`:
+Claude Desktop connects to remote MCP servers via a connector with a URL
+and an `Authorization: Bearer <your_token>` header. Point it at the
+running server, e.g. `http://localhost:8096/mcp`, and add your iTop
+token as the bearer token when configuring the connector.
 
-```json
-{
-  "mcpServers": {
-    "itop": {
-      "command": "python",
-      "args": ["/путь/до/mcp-itop/server.py"]
-    }
-  }
-}
-```
-
-## Примеры запросов
+## Example requests
 
 ```
-Покажи SLA по услуге "Техподдержка" за этот месяц
-Кто из агентов перегружен?
-Какие заявки висят без движения больше 2 часов?
-Найди похожие заявки с разными услугами
-Кто из пользователей часто выбирает не ту услугу?
-Добавь комментарий к заявке RQ-123
-Создай новую заявку: Не работает принтер
-Назначь RQ-456 на Иванова
-Найди CI, связанные с сервером srv-web-01
-Поищи в БЗ по VPN
+Show me the SLA for "Technical Support" this month
+Which agents are overloaded?
+Which tickets have been idle for more than 2 hours?
+Find similar tickets assigned to different services
+Which users often pick the wrong service?
+Add a comment to ticket RQ-123
+Create a new ticket: printer not working
+Assign RQ-456 to Smith
+Find CIs related to server srv-web-01
+Search the KB for VPN
 ```
 
-## Совместимость
+## Compatibility
 
-Протестировано на:
+Tested with:
 
 - **iTop** 3.2.1-1-16749 (PHP 8.1.2, MariaDB 10.6)
-- Поддерживает русскую локаль (да/нет для SLA) и английскую (true/false)
-- Автоопределение модуля БЗ: KBEntry → FAQ
+- Supports both localized (yes/no) and English (true/false) SLA values
+- Auto-detects the KB module: KBEntry -> FAQ
 
-## Требования
+## Requirements
 
-- Python ≥ 3.10
+- Python >= 3.10
 - `mcp[fastmcp]`
 - `httpx`
 - `python-dotenv`
 
-## Тесты
+## Tests
 
 ```bash
 python -m pytest tests/ -v
 ```
 
-## Архитектура
+## Architecture
 
 ```
-AI-клиент → MCP (stdio) → server.py → iTop REST API
+AI client --(HTTP + Authorization: Bearer <itop_token>)--> server.py (streamable-http) --> iTop REST API
 ```
 
-Приоритет конфигурации:
-1. `~/.config/mcp-itop/.env` (глобальный, наивысший приоритет)
-2. `.env` (локальный в папке проекта)
-3. Переменные окружения
+The client's token is validated by the server during the MCP handshake
+(`initialize`) and then forwarded on every iTop REST API call as `auth_token`.
 
-## Лицензия
+Configuration priority:
+1. `~/.config/mcp-itop/.env` (global, highest priority)
+2. `.env` (local, in the project folder)
+3. Environment variables
+
+## License
 
 MIT
