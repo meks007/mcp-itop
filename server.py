@@ -30,13 +30,23 @@ if os.path.isfile(_GLOBAL_ENV):
     load_dotenv(_GLOBAL_ENV, override=True)
 load_dotenv()  # project .env (lower priority)
 
+# ── Debug flag ───────────────────────────────────────────────────────────
+# Set MCP_DEBUG=true to log full request/response payloads for:
+#   - every MCP tool call between client <-> mcp (via FastMCP middleware)
+#   - every iTop REST/JSON API call between mcp <-> iTop
+# Auth credentials (token, password) are always redacted from log output.
+MCP_DEBUG = os.getenv("MCP_DEBUG", "false").lower() in ("true", "1", "yes")
+
 # ── Logging ──────────────────────────────────────────────────────────────
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG if MCP_DEBUG else logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     stream=sys.stderr,
 )
 logger = logging.getLogger("mcp-itop")
+
+if MCP_DEBUG:
+    logger.debug("MCP_DEBUG is enabled - request/response payloads will be logged (secrets redacted).")
 
 # ── Config ───────────────────────────────────────────────────────────────
 ITOP_URL = os.getenv("ITOP_URL", "").rstrip("/")
@@ -49,6 +59,16 @@ ITOP_TIMEOUT = float(os.getenv("ITOP_TIMEOUT", "30"))
 
 DEFAULT_COMMENT = "Modified via MCP"
 
+
+def _redact_form_data(data: dict) -> dict:
+    """Return a copy of the iTop form-data dict with auth secrets masked, for safe logging."""
+    redacted = dict(data)
+    for key in ("auth_token", "auth_pwd"):
+        if key in redacted and redacted[key]:
+            redacted[key] = "***REDACTED***"
+    return redacted
+
+
 # ── FastMCP ──────────────────────────────────────────────────────────────
 from mcp.server.fastmcp import FastMCP
 
@@ -60,6 +80,25 @@ mcp = FastMCP(
         "ticket lifecycle, KB search, and CI impact analysis."
     ),
 )
+
+if MCP_DEBUG:
+    # Log every MCP request/response exchanged between the client
+    # (Claude Desktop, opencode, mcp-proxy, MCP Inspector, etc.) and this
+    # server: tool calls, list_tools, initialize, etc.
+    try:
+        from fastmcp.server.middleware import Middleware, MiddlewareContext
+
+        class DebugLoggingMiddleware(Middleware):
+            async def on_message(self, context: MiddlewareContext, call_next):
+                logger.debug("CLIENT -> MCP  method=%s message=%s", context.method, getattr(context, "message", None))
+                result = await call_next(context)
+                logger.debug("CLIENT <- MCP  method=%s result=%s", context.method, result)
+                return result
+
+        mcp.add_middleware(DebugLoggingMiddleware())
+        logger.debug("Client<->MCP debug logging middleware attached.")
+    except ImportError:
+        logger.warning("MCP_DEBUG is set but fastmcp.server.middleware is unavailable; client<->mcp logging disabled.")
 
 # ── HTTP client ──────────────────────────────────────────────────────────
 _http_client: httpx.AsyncClient | None = None
@@ -114,19 +153,30 @@ async def _itop_request(operation: dict) -> dict:
     else:
         raise ValueError("No auth configured. Set ITOP_TOKEN or ITOP_USER+ITOP_PASSWORD.")
 
+    if MCP_DEBUG:
+        logger.debug("MCP -> iTop  POST %s  data=%s", url, _redact_form_data(data))
+
     try:
         resp = await _get_http_client().post(url, data=data)
         resp.raise_for_status()
         result: dict = resp.json()
     except httpx.HTTPStatusError as e:
         logger.warning("iTop HTTP %s for op=%s", e.response.status_code, operation.get("operation"))
+        if MCP_DEBUG:
+            logger.debug("MCP <- iTop  HTTP %s  body=%s", e.response.status_code, e.response.text[:2000])
         return {"code": e.response.status_code, "message": f"HTTP {e.response.status_code}: {e.response.text[:300]}"}
     except httpx.HTTPError as e:
         logger.warning("iTop network error: %s", e)
+        if MCP_DEBUG:
+            logger.debug("MCP <- iTop  network error: %s", e)
         return {"code": -1, "message": f"Network error: {e}"}
 
     if result.get("code", 0) != 0:
         logger.warning("iTop error code=%s op=%s msg=%s", result.get("code"), operation.get("operation"), result.get("message"))
+
+    if MCP_DEBUG:
+        logger.debug("MCP <- iTop  status=%s  response=%s", resp.status_code, json.dumps(result, ensure_ascii=False)[:4000])
+
     return result
 
 
@@ -199,8 +249,8 @@ SLA_ANALYSIS_FIELDS = (
     "last_update"
 )
 
-_SLA_PASSED_VALUES = {"true", "да", "yes", "1"}
-_SLA_BREACHED_VALUES = {"false", "нет", "no", "0"}
+_SLA_PASSED_VALUES = {"true", "yes", "1"}
+_SLA_BREACHED_VALUES = {"false", "no", "0"}
 
 
 def _sla_is_passed(val: str) -> bool:
@@ -404,7 +454,7 @@ async def itop_agent_workload(
         backlog = ", ".join(data["tickets_open"][:5])
         if len(data["tickets_open"]) > 5:
             backlog += f" ... +{len(data['tickets_open']) - 5} more"
-        flag = " ⚠️ перегружена" if data["open"] > 10 else ""
+        flag = " (overloaded)" if data["open"] > 10 else ""
         rows.append([
             agent,
             data["team"] or "-",
@@ -531,8 +581,7 @@ async def itop_service_quality(
         return "No tickets found."
 
     # Extract keywords from titles (simple approach: split and filter stop words)
-    STOP_WORDS = {"не", "на", "в", "с", "по", "и", "а", "но", "для", "о", "об", "от",
-                   "из", "у", "к", "до", "за", "без", "через", "после", "the", "a", "an",
+    STOP_WORDS = {"the", "a", "an",
                    "of", "in", "to", "for", "with", "on", "at", "is", "it", "as"}
 
     def extract_keywords(title: str) -> set:
@@ -658,11 +707,11 @@ async def itop_caller_quality(
         other = data["total"] - primary_count
 
         if primary_rate < 50:
-            flag = "❌ систематически ошибается"
+            flag = "systematically wrong"
         elif primary_rate < 70:
-            flag = "⚠️ часто ошибается"
+            flag = "often wrong"
         elif primary_rate < 90:
-            flag = "⚡ иногда ошибается"
+            flag = "sometimes wrong"
         else:
             flag = "✓"
 
@@ -747,11 +796,11 @@ async def itop_agent_correction_rate(
         # More services per ticket = more correction
         correction_score = total_services / data["total"] * 100 if data["total"] > 0 else 0
         if correction_score > 50:
-            flag = "✅ корректирует (много разных услуг)"
+            flag = "corrects often (many different services)"
         elif correction_score > 30:
-            flag = "⚡ иногда корректирует"
+            flag = "corrects sometimes"
         else:
-            flag = "➡️ редко меняет услуги"
+            flag = "rarely changes services"
 
         rows.append([
             agent,
