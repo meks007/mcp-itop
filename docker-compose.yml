@@ -1,0 +1,21 @@
+version: "3.8"
+
+services:
+  mcp-itop:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mcp-itop:latest
+    container_name: mcp-itop
+    restart: unless-stopped
+    ports:
+      - "8096:8096"
+    environment:
+      ITOP_URL: ${ITOP_URL}
+      ITOP_TOKEN: ${ITOP_TOKEN}
+      # Alternative to token auth (leave ITOP_TOKEN empty if using these):
+      ITOP_USER: ${ITOP_USER:-}
+      ITOP_PASSWORD: ${ITOP_PASSWORD:-}
+      ITOP_VERSION: ${ITOP_VERSION:-1.3}
+      ITOP_VERIFY_SSL: ${ITOP_VERIFY_SSL:-true}
+      ITOP_TIMEOUT: ${ITOP_TIMEOUT:-30}
