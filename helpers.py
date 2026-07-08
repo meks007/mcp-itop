@@ -58,22 +58,22 @@ _REF_PATTERN = re.compile(r"^[A-Z]+-\d+$")
 
 
 def ensure_ref_field(obj_class: str, output_fields: str) -> str:
-    """Inject 'ref' into output_fields and strip 'id' when the class supports it.
+    """Inject 'ref' and unconditionally strip 'id' for ticket classes.
 
-    Only modifies output_fields when:
-    - obj_class is in CLASSES_WITH_REF, and
-    - output_fields is an explicit field list (not '*' or '*+').
+    For classes in CLASSES_WITH_REF:
+    - 'ref' is injected at the front if not already present.
+    - 'id' is always removed, even if the caller explicitly requested it.
+      The numeric DB key is redundant and confusing once ref is present.
 
-    When ref is injected, 'id' is removed from the list because the numeric
-    key is redundant once the human-readable ref is present. If ref is already
-    in the list, only 'id' is stripped (no duplicate ref added).
+    '*' and '*+' are passed through unchanged (iTop handles field expansion).
+    Non-ticket classes are not modified.
     """
     if output_fields in ("*", "*+"):
         return output_fields
     if obj_class not in CLASSES_WITH_REF:
         return output_fields
     fields = [f.strip() for f in output_fields.split(",") if f.strip()]
-    # Strip id - ref makes it redundant in output
+    # Always strip id for ticket classes - ref is the canonical identifier
     fields = [f for f in fields if f != "id"]
     if "ref" not in fields:
         fields.insert(0, "ref")
@@ -164,8 +164,9 @@ def format_objects(result: dict) -> str:
     """Format iTop response objects into readable string.
 
     When a 'ref' field is present in the object's fields, it is used as the
-    header label instead of the numeric key, and the 'ref' entry is omitted
-    from the field list below (it is already visible in the header).
+    header label instead of the numeric key, and both 'ref' and 'id' entries
+    are omitted from the field list below (ref is in the header, id is
+    redundant for ticket classes).
     """
     if result.get("code", -1) != 0:
         return f"Error (code {result.get('code')}): {str_or(result, 'message', 'Unknown error')}"
@@ -177,13 +178,13 @@ def format_objects(result: dict) -> str:
         cls = str_or(obj_data, "class", "?")
         oid = str_or(obj_data, "key", "?")
         fields = obj_data.get("fields", {}) or {}
-        # Use ref as the header label when available; suppress ref from field list
+        # Use ref as the header label when available
         ref = fields.get("ref")
         label = ref if ref else oid
         lines.append(f"\n--- {cls}::{label} ---")
         for fn, fv in fields.items():
-            if fn == "ref":
-                # Already shown in header
+            # ref is already in the header; id is redundant when ref is present
+            if fn == "ref" or (ref and fn == "id"):
                 continue
             if isinstance(fv, (dict, list)):
                 fv = json.dumps(fv, indent=2, ensure_ascii=False)
