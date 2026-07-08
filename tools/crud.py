@@ -5,12 +5,15 @@ get_related, list_operations, describe_class.
 
 from __future__ import annotations
 
+from typing import Optional
+
 from helpers import (
     ensure_ref_field,
     format_objects,
     parse_json_arg,
     parse_key,
     parse_key_for_ticket,
+    resolve_key,
     str_or,
 )
 from config import DEFAULT_COMMENT
@@ -35,13 +38,12 @@ def register(mcp, itop_request):
         Numeric IDs may differ between environments and should be avoided.
 
         Args:
-            obj_class: iTop class (e.g. Server, UserRequest, Person, Organization).
-            key: Ticket ref (e.g. "R-016271"), OQL query
-                 (e.g. "SELECT UserRequest WHERE status='open'"),
-                 numeric ID string, or JSON criteria dict as string.
+            obj_class:     iTop class (e.g. Server, UserRequest, Person, Organization).
+            key:           Ticket ref (e.g. "R-016271"), OQL query, numeric ID string,
+                           or JSON criteria. Prefer ref for ticket classes.
             output_fields: Comma-separated fields, or "*" for all, or "*+" for subclass fields.
-            limit: Max results (0 = no limit).
-            page: Page number (starts at 1).
+            limit:         Max results (0 = no limit).
+            page:          Page number (starts at 1).
         """
         op: dict = {
             "operation": "core/get",
@@ -67,10 +69,10 @@ def register(mcp, itop_request):
         """Create a new object in iTop.
 
         Args:
-            obj_class: iTop class (e.g. UserRequest, Server, Person).
-            fields: JSON string of field values.
+            obj_class:     iTop class (e.g. UserRequest, Server, Person).
+            fields:        JSON string of field values.
             output_fields: Comma-separated fields to return.
-            comment: Optional comment for change tracking.
+            comment:       Optional comment for change tracking.
         """
         parsed = parse_json_arg(fields, "fields")
         if isinstance(parsed, str):
@@ -88,8 +90,9 @@ def register(mcp, itop_request):
     @mcp.tool()
     async def itop_update(
         obj_class: str,
-        key: str,
         fields: str,
+        key: Optional[str] = None,
+        ticket_ref: Optional[str] = None,
         output_fields: str = "id, friendlyname",
         comment: str = "",
     ) -> str:
@@ -98,26 +101,30 @@ def register(mcp, itop_request):
         Use this to modify fields on tickets, CI, etc.
         For lifecycle transitions (assign/resolve/close), use itop_apply_stimulus.
 
-        For ticket classes (UserRequest, Incident, Problem, Change, etc.) always
-        use the ref value (e.g. "R-016271") as the key when available from a
-        previous tool result. Do NOT guess or invent a numeric ID.
+        Supply ticket_ref (e.g. "R-016271") whenever available from a previous
+        tool result. If ticket_ref is present, the correct numeric key is
+        resolved automatically via a live iTop lookup - any key supplied
+        alongside it is ignored. Only fall back to key alone when no ref is known.
 
         Args:
-            obj_class: iTop class.
-            key: Ticket ref (e.g. "R-016271"), numeric ID string, OQL, or JSON
-                 criteria. Prefer ref for ticket classes.
-            fields: JSON of fields to update.
+            obj_class:     iTop class.
+            ticket_ref:    Ticket ref (e.g. "R-016271"). Always prefer this for
+                           ticket classes when available from a previous tool result.
+            key:           Fallback key: numeric ID string, OQL, or JSON criteria.
+                           Used only when ticket_ref is absent.
+            fields:        JSON of fields to update.
             output_fields: Fields to return.
-            comment: Optional comment for change tracking.
+            comment:       Optional comment for change tracking.
         """
         parsed = parse_json_arg(fields, "fields")
         if isinstance(parsed, str):
             return parsed
 
+        resolved = await resolve_key(obj_class, itop_request, ref=ticket_ref, key=key)
         result = await itop_request({
             "operation": "core/update",
             "class": obj_class,
-            "key": parse_key_for_ticket(obj_class, key),
+            "key": resolved,
             "fields": parsed,
             "output_fields": ensure_ref_field(obj_class, output_fields),
             "comment": comment or DEFAULT_COMMENT,
@@ -127,27 +134,32 @@ def register(mcp, itop_request):
     @mcp.tool()
     async def itop_delete(
         obj_class: str,
-        key: str,
+        key: Optional[str] = None,
+        ticket_ref: Optional[str] = None,
         comment: str = "",
         simulate: bool = True,
     ) -> str:
         """Delete object(s) from iTop.
 
-        For ticket classes (UserRequest, Incident, Problem, Change, etc.) always
-        use the ref value (e.g. "R-016271") as the key when available from a
-        previous tool result. Do NOT guess or invent a numeric ID.
+        Supply ticket_ref (e.g. "R-016271") whenever available from a previous
+        tool result. If ticket_ref is present, the correct numeric key is
+        resolved automatically via a live iTop lookup - any key supplied
+        alongside it is ignored. Only fall back to key alone when no ref is known.
 
         Args:
-            obj_class: iTop class.
-            key: Ticket ref (e.g. "R-016271"), numeric ID string, OQL, or JSON
-                 criteria. Prefer ref for ticket classes.
-            comment: Optional comment.
-            simulate: If True, dry-run without deleting (default: True).
+            obj_class:   iTop class.
+            ticket_ref:  Ticket ref (e.g. "R-016271"). Always prefer this for
+                         ticket classes when available from a previous tool result.
+            key:         Fallback key: numeric ID string, OQL, or JSON criteria.
+                         Used only when ticket_ref is absent.
+            comment:     Optional comment.
+            simulate:    If True, dry-run without deleting (default: True).
         """
+        resolved = await resolve_key(obj_class, itop_request, ref=ticket_ref, key=key)
         result = await itop_request({
             "operation": "core/delete",
             "class": obj_class,
-            "key": parse_key_for_ticket(obj_class, key),
+            "key": resolved,
             "simulate": simulate,
             "comment": comment or DEFAULT_COMMENT,
         })
@@ -156,8 +168,9 @@ def register(mcp, itop_request):
     @mcp.tool()
     async def itop_apply_stimulus(
         obj_class: str,
-        key: str,
         stimulus: str,
+        key: Optional[str] = None,
+        ticket_ref: Optional[str] = None,
         fields: str = "{}",
         output_fields: str = "id, friendlyname, status",
         comment: str = "",
@@ -172,27 +185,31 @@ def register(mcp, itop_request):
           - ev_reopen:   reopen ticket
           - ev_pending:  put on hold (fields={"pending_reason": "..."})
 
-        For ticket classes (UserRequest, Incident, Problem, Change, etc.) always
-        use the ref value (e.g. "R-016271") as the key when available from a
-        previous tool result. Do NOT guess or invent a numeric ID.
+        Supply ticket_ref (e.g. "R-016271") whenever available from a previous
+        tool result. If ticket_ref is present, the correct numeric key is
+        resolved automatically via a live iTop lookup - any key supplied
+        alongside it is ignored. Only fall back to key alone when no ref is known.
 
         Args:
-            obj_class: iTop class (e.g. UserRequest, Incident).
-            key: Ticket ref (e.g. "R-016271"), numeric ID string, OQL, or JSON
-                 criteria. Prefer ref for ticket classes.
-            stimulus: Stimulus code (e.g. ev_assign, ev_resolve).
-            fields: JSON of fields required for the transition.
+            obj_class:     iTop class (e.g. UserRequest, Incident).
+            stimulus:      Stimulus code (e.g. ev_assign, ev_resolve).
+            ticket_ref:    Ticket ref (e.g. "R-016271"). Always prefer this for
+                           ticket classes when available from a previous tool result.
+            key:           Fallback key: numeric ID string, OQL, or JSON criteria.
+                           Used only when ticket_ref is absent.
+            fields:        JSON of fields required for the transition.
             output_fields: Fields to return.
-            comment: Optional comment.
+            comment:       Optional comment.
         """
         parsed = parse_json_arg(fields, "fields")
         if isinstance(parsed, str):
             return parsed
 
+        resolved = await resolve_key(obj_class, itop_request, ref=ticket_ref, key=key)
         result = await itop_request({
             "operation": "core/apply_stimulus",
             "class": obj_class,
-            "key": parse_key_for_ticket(obj_class, key),
+            "key": resolved,
             "stimulus": stimulus,
             "fields": parsed,
             "output_fields": ensure_ref_field(obj_class, output_fields),
@@ -212,12 +229,12 @@ def register(mcp, itop_request):
         """Find CIs related to a given object via impact/dependency relations.
 
         Args:
-            obj_class: iTop class (e.g. Server, ApplicationSolution).
-            key: Object ID or OQL.
-            relation: "impacts" or "depends on".
-            depth: Traversal depth (max 20).
-            direction: "down" or "up".
-            redundancy: Account for redundancy in impact analysis.
+            obj_class:   iTop class (e.g. Server, ApplicationSolution).
+            key:         Object ID or OQL.
+            relation:    "impacts" or "depends on".
+            depth:       Traversal depth (max 20).
+            direction:   "down" or "up".
+            redundancy:  Account for redundancy in impact analysis.
         """
         result = await itop_request({
             "operation": "core/get_related",
