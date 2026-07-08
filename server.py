@@ -25,11 +25,13 @@ from __future__ import annotations
 
 import os
 import sys
+from urllib.parse import urlparse
 
 import uvicorn
 from pydantic import AnyHttpUrl
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from auth import ItopBearerVerifier, get_bearer_token
 from client import itop_request as _raw_itop_request
@@ -40,17 +42,46 @@ import tools.comments as _comments
 import tools.crud as _crud
 import tools.kb as _kb
 
-# -- MCP server URL (used for AuthSettings) --------------------------------
+# -- MCP server URL (used for AuthSettings and transport security) ----------
 # FastMCP requires issuer_url + resource_server_url when a token_verifier
 # is supplied. We use the server's own listen address for both since this
 # server is not a real OAuth issuer - it only validates that a non-empty
 # bearer token was presented (the token's validity is enforced by iTop).
+#
+# MCP_SERVER_URL must be set to the public-facing URL when running behind
+# a reverse proxy (e.g. https://mcp.your-domain.com). Without it the MCP
+# SDK's DNS rebinding protection will reject requests whose Host header
+# does not match localhost, returning 421 Misdirected Request.
 _MCP_HOST = os.getenv("MCP_HOST", "0.0.0.0")
 _MCP_PORT = int(os.getenv("MCP_PORT", "8096"))
 # Use localhost for the URL even when binding to 0.0.0.0
 _SERVER_URL = os.getenv(
     "MCP_SERVER_URL",
     f"http://{'localhost' if _MCP_HOST == '0.0.0.0' else _MCP_HOST}:{_MCP_PORT}",
+)
+
+# -- Transport security: allowed hosts ------------------------------------
+# Always permit localhost variants for health checks and local tooling.
+# When MCP_SERVER_URL is set to a public hostname (e.g. behind a reverse
+# proxy), add that hostname to the allowlist so the MCP SDK's DNS rebinding
+# protection does not reject incoming requests with 421.
+_parsed = urlparse(_SERVER_URL)
+_public_host = _parsed.hostname or ""
+_allowed_hosts: list[str] = [
+    "localhost",
+    "localhost:*",
+    "127.0.0.1",
+    "127.0.0.1:*",
+    "[::1]",
+    "[::1]:*",
+]
+if _public_host and _public_host not in ("localhost", "127.0.0.1", "::1"):
+    _allowed_hosts.append(_public_host)
+    _allowed_hosts.append(f"{_public_host}:*")
+
+_transport_security = TransportSecuritySettings(
+    enable_dns_rebinding_protection=True,
+    allowed_hosts=_allowed_hosts,
 )
 
 # -- MCP instance ---------------------------------------------------------
@@ -66,6 +97,7 @@ mcp = FastMCP(
         resource_server_url=AnyHttpUrl(_SERVER_URL),
     ),
     token_verifier=ItopBearerVerifier(),
+    transport_security=_transport_security,
 )
 
 
