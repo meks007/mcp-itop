@@ -19,6 +19,7 @@ Module layout:
     kb.py          - knowledge base search and retrieval
     crud.py        - generic CRUD + stimulus + impact tools
     comments.py    - ticket log read/write
+    attachments.py - download image attachments from iTop
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ from client import itop_request as _raw_itop_request
 from config import MCP_DEBUG, logger
 
 import tools.analytics as _analytics
+import tools.attachments as _attachments
 import tools.comments as _comments
 import tools.crud as _crud
 import tools.kb as _kb
@@ -107,8 +109,14 @@ async def itop_request(operation: dict) -> dict:
     return await _raw_itop_request(operation, lambda: get_bearer_token(mcp))
 
 
+def _get_token() -> str:
+    """Return the current per-request bearer token (for non-REST tools)."""
+    return get_bearer_token(mcp)
+
+
 # -- Register all tools ---------------------------------------------------
 _analytics.register(mcp, itop_request)
+_attachments.register(mcp, _get_token)
 _kb.register(mcp, itop_request)
 _crud.register(mcp, itop_request)
 _comments.register(mcp, itop_request)
