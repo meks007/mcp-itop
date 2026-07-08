@@ -14,4 +14,7 @@ EXPOSE 8096
 # mcp-proxy spawns `python server.py` as a child process and exposes
 # it over SSE at http://<host>:8096/sse, so the stdio-only MCP server
 # can run as a standalone, network-reachable service (e.g. in Portainer).
-CMD ["mcp-proxy", "--port", "8096", "--host", "0.0.0.0", "--", "python", "server.py"]
+# --pass-environment is required so ITOP_URL/ITOP_TOKEN/etc. set on the
+# container are forwarded to the server.py subprocess - without it,
+# server.py sees an empty environment and fails with "ITOP_URL is not set".
+CMD ["mcp-proxy", "--port", "8096", "--host", "0.0.0.0", "--pass-environment", "--", "python", "server.py"]
