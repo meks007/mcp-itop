@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import re
 
-from helpers import extract_objects, format_objects, str_or
+from helpers import extract_objects, format_objects, parse_key_for_ticket, str_or
 
 
 def register(mcp, itop_request):
@@ -15,7 +15,7 @@ def register(mcp, itop_request):
     @mcp.tool()
     async def itop_add_comment(
         ticket_class: str,
-        ticket_id: int,
+        ticket_ref: str,
         text: str,
         is_public: bool = True,
         format: str = "text",
@@ -27,17 +27,18 @@ def register(mcp, itop_request):
 
         Args:
             ticket_class: Ticket class (UserRequest, Incident, Problem).
-            ticket_id: Ticket ID number.
+            ticket_ref: Ticket ref (e.g. "R-016271") or numeric ID string (e.g. "16271").
             text: Comment text.
             is_public: True = public_log, False = private_log.
             format: "text" or "html" (default: text).
         """
         log_field = "public_log" if is_public else "private_log"
+        key = parse_key_for_ticket(ticket_class, ticket_ref)
 
         result = await itop_request({
             "operation": "core/update",
             "class": ticket_class,
-            "key": ticket_id,
+            "key": key,
             "fields": {
                 log_field: {
                     "add_item": {
@@ -54,14 +55,14 @@ def register(mcp, itop_request):
     @mcp.tool()
     async def itop_get_log(
         ticket_class: str,
-        ticket_id: int,
+        ticket_ref: str,
         log_type: str = "both",
     ) -> str:
         """Read log entries (comments) from a ticket.
 
         Args:
             ticket_class: Ticket class (UserRequest, Incident, Problem).
-            ticket_id: Ticket ID number.
+            ticket_ref: Ticket ref (e.g. "R-016271") or numeric ID string (e.g. "16271").
             log_type: "public", "private", or "both" (default: both).
         """
         fields = []
@@ -70,19 +71,21 @@ def register(mcp, itop_request):
         if log_type in ("private", "both"):
             fields.append("private_log")
 
+        key = parse_key_for_ticket(ticket_class, ticket_ref)
+
         result = await itop_request({
             "operation": "core/get",
             "class": ticket_class,
-            "key": f"SELECT {ticket_class} WHERE id={ticket_id}",
+            "key": key,
             "output_fields": ",".join(fields),
         })
 
         tickets = extract_objects(result)
         if not tickets:
-            return f"Ticket #{ticket_id} ({ticket_class}) not found."
+            return f"Ticket {ticket_ref!r} ({ticket_class}) not found."
 
         f = tickets[0]["fields"]
-        lines = [f"**Logs for {ticket_class} #{ticket_id}**", ""]
+        lines = [f"**Logs for {ticket_class} {ticket_ref}**", ""]
 
         for field in fields:
             if field not in f:
