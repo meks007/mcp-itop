@@ -19,3 +19,6 @@ services:
       ITOP_VERSION: ${ITOP_VERSION:-1.3}
       ITOP_VERIFY_SSL: ${ITOP_VERIFY_SSL:-true}
       ITOP_TIMEOUT: ${ITOP_TIMEOUT:-30}
+      # Set to true to log full client<->mcp<->iTop request/response
+      # payloads (auth secrets are always redacted). See DOCKER.md.
+      MCP_DEBUG: ${MCP_DEBUG:-false}
