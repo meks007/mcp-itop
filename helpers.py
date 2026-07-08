@@ -38,8 +38,7 @@ def sla_is_breached(val: str) -> bool:
 # -------------------------------------------------------------------------
 
 # iTop assigns a "ref" field (e.g. "R-000123") to all ticket-like classes.
-# When output_fields is an explicit list and the class is known to have ref,
-# we inject "ref" automatically so callers always get the ticket reference.
+# Used by ensure_ref_field() and parse_key_for_ticket().
 CLASSES_WITH_REF: frozenset[str] = frozenset({
     "UserRequest",
     "Incident",
@@ -54,25 +53,49 @@ CLASSES_WITH_REF: frozenset[str] = frozenset({
     "RFI",
 })
 
+# Matches iTop ticket ref strings like "R-000123", "INC-42", "P-007".
+_REF_PATTERN = re.compile(r"^[A-Z]+-\d+$")
+
 
 def ensure_ref_field(obj_class: str, output_fields: str) -> str:
-    """Inject 'ref' into output_fields when the class supports it.
+    """Inject 'ref' into output_fields and strip 'id' when the class supports it.
 
     Only modifies output_fields when:
     - obj_class is in CLASSES_WITH_REF, and
-    - output_fields is an explicit field list (not '*' or '*+'), and
-    - 'ref' is not already present.
+    - output_fields is an explicit field list (not '*' or '*+').
 
-    Returns the (possibly modified) output_fields string.
+    When ref is injected, 'id' is removed from the list because the numeric
+    key is redundant once the human-readable ref is present. If ref is already
+    in the list, only 'id' is stripped (no duplicate ref added).
     """
     if output_fields in ("*", "*+"):
         return output_fields
     if obj_class not in CLASSES_WITH_REF:
         return output_fields
-    fields = [f.strip() for f in output_fields.split(",")]
+    fields = [f.strip() for f in output_fields.split(",") if f.strip()]
+    # Strip id - ref makes it redundant in output
+    fields = [f for f in fields if f != "id"]
     if "ref" not in fields:
         fields.insert(0, "ref")
     return ", ".join(fields)
+
+
+def parse_key_for_ticket(obj_class: str, key: str) -> Any:
+    """Parse a key, resolving ref strings to JSON criteria for ticket classes.
+
+    For classes in CLASSES_WITH_REF, if the key looks like a ticket ref
+    (e.g. "R-000123", "INC-42"), it is converted to {"ref": "<value>"} so
+    iTop resolves it server-side. All other key forms (numeric ID, OQL,
+    JSON) are handled by the standard parse_key() logic.
+    """
+    parsed = parse_key(key)
+    if (
+        obj_class in CLASSES_WITH_REF
+        and isinstance(parsed, str)
+        and _REF_PATTERN.match(parsed)
+    ):
+        return {"ref": parsed}
+    return parsed
 
 
 # -------------------------------------------------------------------------
@@ -138,7 +161,12 @@ def extract_objects(result: dict) -> list[dict]:
 
 
 def format_objects(result: dict) -> str:
-    """Format iTop response objects into readable string."""
+    """Format iTop response objects into readable string.
+
+    When a 'ref' field is present in the object's fields, it is used as the
+    header label instead of the numeric key, and the 'ref' entry is omitted
+    from the field list below (it is already visible in the header).
+    """
     if result.get("code", -1) != 0:
         return f"Error (code {result.get('code')}): {str_or(result, 'message', 'Unknown error')}"
     objects = result.get("objects")
@@ -148,9 +176,15 @@ def format_objects(result: dict) -> str:
     for _obj_key, obj_data in objects.items():
         cls = str_or(obj_data, "class", "?")
         oid = str_or(obj_data, "key", "?")
-        fields = obj_data.get("fields", {})
-        lines.append(f"\n--- {cls}::{oid} ---")
+        fields = obj_data.get("fields", {}) or {}
+        # Use ref as the header label when available; suppress ref from field list
+        ref = fields.get("ref")
+        label = ref if ref else oid
+        lines.append(f"\n--- {cls}::{label} ---")
         for fn, fv in fields.items():
+            if fn == "ref":
+                # Already shown in header
+                continue
             if isinstance(fv, (dict, list)):
                 fv = json.dumps(fv, indent=2, ensure_ascii=False)
             lines.append(f"  {fn}: {fv}")
