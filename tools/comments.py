@@ -5,7 +5,7 @@ Comment tools: add and read ticket log entries.
 from __future__ import annotations
 
 import re
-from typing import Optional
+from typing import Optional, Union
 
 from helpers import extract_objects, format_objects, resolve_key, str_or
 
@@ -18,7 +18,7 @@ def register(mcp, itop_request):
         ticket_class: str,
         text: str,
         ticket_ref: Optional[str] = None,
-        ticket_id: Optional[str] = None,
+        ticket_id: Optional[Union[int, str]] = None,
         is_public: bool = True,
         format: str = "text",
     ) -> str:
@@ -36,16 +36,20 @@ def register(mcp, itop_request):
         Args:
             ticket_class: Ticket class (UserRequest, Incident, Problem).
             ticket_ref:   Ticket ref (e.g. "R-016271"). Always prefer this.
-            ticket_id:    Numeric ID string. Used only when ticket_ref is absent.
+            ticket_id:    Numeric ID. Used only when ticket_ref is absent.
             text:         Comment text.
             is_public:    True = public_log, False = private_log.
             format:       "text" or "html" (default: text).
         """
-        if not ticket_ref and not ticket_id:
+        if not ticket_ref and ticket_id is None:
             return "Error: supply ticket_ref (e.g. 'R-016271') or ticket_id."
 
         log_field = "public_log" if is_public else "private_log"
-        key = await resolve_key(ticket_class, itop_request, ref=ticket_ref, key=ticket_id)
+        key = await resolve_key(
+            ticket_class, itop_request,
+            ref=ticket_ref,
+            key=str(ticket_id) if ticket_id is not None else None,
+        )
 
         result = await itop_request({
             "operation": "core/update",
@@ -68,7 +72,7 @@ def register(mcp, itop_request):
     async def itop_get_log(
         ticket_class: str,
         ticket_ref: Optional[str] = None,
-        ticket_id: Optional[str] = None,
+        ticket_id: Optional[Union[int, str]] = None,
         log_type: str = "both",
     ) -> str:
         """Read log entries (comments) from a ticket.
@@ -82,10 +86,10 @@ def register(mcp, itop_request):
         Args:
             ticket_class: Ticket class (UserRequest, Incident, Problem).
             ticket_ref:   Ticket ref (e.g. "R-016271"). Always prefer this.
-            ticket_id:    Numeric ID string. Used only when ticket_ref is absent.
+            ticket_id:    Numeric ID. Used only when ticket_ref is absent.
             log_type:     "public", "private", or "both" (default: both).
         """
-        if not ticket_ref and not ticket_id:
+        if not ticket_ref and ticket_id is None:
             return "Error: supply ticket_ref (e.g. 'R-016271') or ticket_id."
 
         fields = []
@@ -94,7 +98,11 @@ def register(mcp, itop_request):
         if log_type in ("private", "both"):
             fields.append("private_log")
 
-        key = await resolve_key(ticket_class, itop_request, ref=ticket_ref, key=ticket_id)
+        key = await resolve_key(
+            ticket_class, itop_request,
+            ref=ticket_ref,
+            key=str(ticket_id) if ticket_id is not None else None,
+        )
 
         result = await itop_request({
             "operation": "core/get",
@@ -104,7 +112,7 @@ def register(mcp, itop_request):
         })
 
         tickets = extract_objects(result)
-        label = ticket_ref or ticket_id
+        label = ticket_ref or str(ticket_id)
         if not tickets:
             return f"Ticket {label!r} ({ticket_class}) not found."
 
