@@ -68,30 +68,6 @@ mcp = FastMCP(
     token_verifier=ItopBearerVerifier(),
 )
 
-# -- Debug middleware ------------------------------------------------------
-if MCP_DEBUG:
-    try:
-        from fastmcp.server.middleware import Middleware, MiddlewareContext
-
-        class DebugLoggingMiddleware(Middleware):
-            async def on_message(self, context: MiddlewareContext, call_next):
-                logger.debug(
-                    "CLIENT -> MCP  method=%s message=%s",
-                    context.method,
-                    getattr(context, "message", None),
-                )
-                result = await call_next(context)
-                logger.debug("CLIENT <- MCP  method=%s result=%s", context.method, result)
-                return result
-
-        mcp.add_middleware(DebugLoggingMiddleware())
-        logger.debug("Client<->MCP debug logging middleware attached.")
-    except ImportError:
-        logger.warning(
-            "MCP_DEBUG is set but fastmcp.server.middleware is unavailable; "
-            "client<->mcp logging disabled."
-        )
-
 
 # -- Bind bearer token to itop_request ------------------------------------
 async def itop_request(operation: dict) -> dict:
@@ -119,6 +95,9 @@ def main():
     <itop_token>" header (see auth.py) - no ITOP_TOKEN / ITOP_USER /
     ITOP_PASSWORD environment variables are read for authentication
     purposes anymore.
+
+    MCP_DEBUG=true enables verbose logging of all iTop REST/JSON API
+    request/response payloads (auth secrets are always redacted).
     """
     from config import ITOP_URL
 
