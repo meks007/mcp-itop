@@ -4,6 +4,7 @@ Authentication: bearer token verifier and per-request token accessor.
 
 from __future__ import annotations
 
+from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import AccessToken, TokenVerifier
 
 from config import logger
@@ -29,11 +30,11 @@ def get_bearer_token(mcp) -> str:
     """Return the iTop auth_token supplied by the connected client.
 
     Each client authenticates to this MCP server with its own iTop REST
-    API token via "Authorization: Bearer <itop_token>". FastMCP verifies
-    a token was presented at handshake time (see ItopBearerVerifier) and
-    exposes it here, per request, via the access-token context.
+    API token via "Authorization: Bearer <itop_token>". The SDK's
+    AuthContextMiddleware stores the verified token in a contextvar;
+    get_access_token() retrieves it for the current request.
     """
-    access_token = mcp.get_context().request_context.access_token
+    access_token = get_access_token()
     if access_token is None or not access_token.token:
         raise ValueError(
             "No iTop auth token found on this connection. Connect with an "
