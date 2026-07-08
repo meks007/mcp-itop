@@ -86,6 +86,35 @@ _comments.register(mcp, itop_request)
 app = mcp.streamable_http_app()
 
 
+# -- Debug logging middleware (Starlette-level) ----------------------------
+if MCP_DEBUG:
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.requests import Request as StarletteRequest
+
+    class DebugLoggingMiddleware(BaseHTTPMiddleware):
+        """Log every HTTP request/response between MCP client and this server."""
+
+        async def dispatch(self, request: StarletteRequest, call_next):
+            body = await request.body()
+            logger.debug(
+                "CLIENT -> MCP  %s %s  body=%s",
+                request.method,
+                request.url.path,
+                body[:2000].decode(errors="replace") if body else "(empty)",
+            )
+            response = await call_next(request)
+            logger.debug(
+                "CLIENT <- MCP  %s %s  status=%s",
+                request.method,
+                request.url.path,
+                response.status_code,
+            )
+            return response
+
+    app.add_middleware(DebugLoggingMiddleware)
+    logger.debug("Client<->MCP HTTP debug logging middleware attached.")
+
+
 # -- Entry point ----------------------------------------------------------
 def main():
     """Run the iTop MCP server.
@@ -96,8 +125,9 @@ def main():
     ITOP_PASSWORD environment variables are read for authentication
     purposes anymore.
 
-    MCP_DEBUG=true enables verbose logging of all iTop REST/JSON API
-    request/response payloads (auth secrets are always redacted).
+    MCP_DEBUG=true enables verbose logging of all client<->MCP HTTP
+    traffic and iTop REST/JSON API request/response payloads (auth
+    secrets are always redacted).
     """
     from config import ITOP_URL
 
