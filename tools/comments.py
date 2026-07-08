@@ -27,12 +27,12 @@ def register(mcp, itop_request):
 
         Always use the ref value (e.g. "R-016271") from a previous tool result
         as ticket_ref. Do NOT guess or invent a numeric ID - use the ref shown
-        in the "link" or header of the ticket response.
+        in the header of the ticket response.
 
         Args:
             ticket_class: Ticket class (UserRequest, Incident, Problem).
             ticket_ref: Ticket ref (e.g. "R-016271") or numeric ID string.
-                        Prefer ref when available from a previous tool result.
+                        Always prefer the ref from a previous tool result.
             text: Comment text.
             is_public: True = public_log, False = private_log.
             format: "text" or "html" (default: text).
@@ -71,7 +71,7 @@ def register(mcp, itop_request):
         Args:
             ticket_class: Ticket class (UserRequest, Incident, Problem).
             ticket_ref: Ticket ref (e.g. "R-016271") or numeric ID string.
-                        Prefer ref when available from a previous tool result.
+                        Always prefer the ref from a previous tool result.
             log_type: "public", "private", or "both" (default: both).
         """
         fields = []
