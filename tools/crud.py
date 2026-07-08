@@ -5,7 +5,14 @@ get_related, list_operations, describe_class.
 
 from __future__ import annotations
 
-from helpers import ensure_ref_field, format_objects, parse_json_arg, parse_key, str_or
+from helpers import (
+    ensure_ref_field,
+    format_objects,
+    parse_json_arg,
+    parse_key,
+    parse_key_for_ticket,
+    str_or,
+)
 from config import DEFAULT_COMMENT
 
 
@@ -85,9 +92,12 @@ def register(mcp, itop_request):
         Use this to modify fields on tickets, CI, etc.
         For lifecycle transitions (assign/resolve/close), use itop_apply_stimulus.
 
+        For ticket classes (UserRequest, Incident, etc.) the key can be a
+        ticket ref (e.g. "R-000123") and it will be resolved automatically.
+
         Args:
             obj_class: iTop class.
-            key: Object ID, OQL, or JSON criteria (must match exactly one).
+            key: Object ID, ref (e.g. "R-000123"), OQL, or JSON criteria.
             fields: JSON of fields to update.
             output_fields: Fields to return.
             comment: Optional comment for change tracking.
@@ -99,7 +109,7 @@ def register(mcp, itop_request):
         result = await itop_request({
             "operation": "core/update",
             "class": obj_class,
-            "key": parse_key(key),
+            "key": parse_key_for_ticket(obj_class, key),
             "fields": parsed,
             "output_fields": ensure_ref_field(obj_class, output_fields),
             "comment": comment or DEFAULT_COMMENT,
@@ -115,16 +125,19 @@ def register(mcp, itop_request):
     ) -> str:
         """Delete object(s) from iTop.
 
+        For ticket classes (UserRequest, Incident, etc.) the key can be a
+        ticket ref (e.g. "R-000123") and it will be resolved automatically.
+
         Args:
             obj_class: iTop class.
-            key: Object ID, OQL, or JSON criteria.
+            key: Object ID, ref (e.g. "R-000123"), OQL, or JSON criteria.
             comment: Optional comment.
             simulate: If True, dry-run without deleting (default: True).
         """
         result = await itop_request({
             "operation": "core/delete",
             "class": obj_class,
-            "key": parse_key(key),
+            "key": parse_key_for_ticket(obj_class, key),
             "simulate": simulate,
             "comment": comment or DEFAULT_COMMENT,
         })
@@ -149,9 +162,12 @@ def register(mcp, itop_request):
           - ev_reopen:   reopen ticket
           - ev_pending:  put on hold (fields={"pending_reason": "..."})
 
+        The key can be a ticket ref (e.g. "R-000123") and it will be resolved
+        automatically for ticket classes.
+
         Args:
             obj_class: iTop class (e.g. UserRequest, Incident).
-            key: Object ID (must match exactly one).
+            key: Object ID, ref (e.g. "R-000123"), OQL, or JSON criteria.
             stimulus: Stimulus code (e.g. ev_assign, ev_resolve).
             fields: JSON of fields required for the transition.
             output_fields: Fields to return.
@@ -164,7 +180,7 @@ def register(mcp, itop_request):
         result = await itop_request({
             "operation": "core/apply_stimulus",
             "class": obj_class,
-            "key": parse_key(key),
+            "key": parse_key_for_ticket(obj_class, key),
             "stimulus": stimulus,
             "fields": parsed,
             "output_fields": ensure_ref_field(obj_class, output_fields),
