@@ -48,8 +48,11 @@ def register(mcp, get_token):
         if not url or "ajax.document.php" not in url:
             return "Error: url must be an iTop ajax.document.php attachment URL."
 
+        # iTop ajax.document.php authenticates via auth_token query parameter,
+        # not via HTTP Authorization header.
         token = get_token()
-        headers = {"Authorization": f"Bearer {token}"}
+        sep = "&" if "?" in url else "?"
+        auth_url = f"{url}{sep}auth_token={token}"
 
         if MCP_DEBUG:
             logger.debug("itop_get_attachment HEAD %s", url)
@@ -57,7 +60,7 @@ def register(mcp, get_token):
         async with _get_http_client() as client:
             # Step 1: HEAD to check content-type without downloading body
             try:
-                head_resp = await client.head(url, headers=headers, follow_redirects=True)
+                head_resp = await client.head(auth_url, follow_redirects=True)
                 head_resp.raise_for_status()
             except httpx.HTTPStatusError as e:
                 return f"Error: HEAD request failed with HTTP {e.response.status_code}."
@@ -78,7 +81,7 @@ def register(mcp, get_token):
             # Step 2: GET with size cap
             try:
                 async with client.stream(
-                    "GET", url, headers=headers, follow_redirects=True
+                    "GET", auth_url, follow_redirects=True
                 ) as resp:
                     resp.raise_for_status()
                     chunks: list[bytes] = []
