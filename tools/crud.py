@@ -5,7 +5,7 @@ get_related, list_operations, describe_class.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Union
 
 from helpers import (
     ensure_ref_field,
@@ -91,8 +91,8 @@ def register(mcp, itop_request):
     async def itop_update(
         obj_class: str,
         fields: str,
-        key: Optional[str] = None,
         ticket_ref: Optional[str] = None,
+        key: Optional[Union[int, str]] = None,
         output_fields: str = "id, friendlyname",
         comment: str = "",
     ) -> str:
@@ -110,7 +110,7 @@ def register(mcp, itop_request):
             obj_class:     iTop class.
             ticket_ref:    Ticket ref (e.g. "R-016271"). Always prefer this for
                            ticket classes when available from a previous tool result.
-            key:           Fallback key: numeric ID string, OQL, or JSON criteria.
+            key:           Fallback key: numeric ID, OQL, or JSON criteria.
                            Used only when ticket_ref is absent.
             fields:        JSON of fields to update.
             output_fields: Fields to return.
@@ -120,7 +120,11 @@ def register(mcp, itop_request):
         if isinstance(parsed, str):
             return parsed
 
-        resolved = await resolve_key(obj_class, itop_request, ref=ticket_ref, key=key)
+        resolved = await resolve_key(
+            obj_class, itop_request,
+            ref=ticket_ref,
+            key=str(key) if key is not None else None,
+        )
         result = await itop_request({
             "operation": "core/update",
             "class": obj_class,
@@ -134,8 +138,8 @@ def register(mcp, itop_request):
     @mcp.tool()
     async def itop_delete(
         obj_class: str,
-        key: Optional[str] = None,
         ticket_ref: Optional[str] = None,
+        key: Optional[Union[int, str]] = None,
         comment: str = "",
         simulate: bool = True,
     ) -> str:
@@ -150,12 +154,16 @@ def register(mcp, itop_request):
             obj_class:   iTop class.
             ticket_ref:  Ticket ref (e.g. "R-016271"). Always prefer this for
                          ticket classes when available from a previous tool result.
-            key:         Fallback key: numeric ID string, OQL, or JSON criteria.
+            key:         Fallback key: numeric ID, OQL, or JSON criteria.
                          Used only when ticket_ref is absent.
             comment:     Optional comment.
             simulate:    If True, dry-run without deleting (default: True).
         """
-        resolved = await resolve_key(obj_class, itop_request, ref=ticket_ref, key=key)
+        resolved = await resolve_key(
+            obj_class, itop_request,
+            ref=ticket_ref,
+            key=str(key) if key is not None else None,
+        )
         result = await itop_request({
             "operation": "core/delete",
             "class": obj_class,
@@ -169,8 +177,8 @@ def register(mcp, itop_request):
     async def itop_apply_stimulus(
         obj_class: str,
         stimulus: str,
-        key: Optional[str] = None,
         ticket_ref: Optional[str] = None,
+        key: Optional[Union[int, str]] = None,
         fields: str = "{}",
         output_fields: str = "id, friendlyname, status",
         comment: str = "",
@@ -195,7 +203,7 @@ def register(mcp, itop_request):
             stimulus:      Stimulus code (e.g. ev_assign, ev_resolve).
             ticket_ref:    Ticket ref (e.g. "R-016271"). Always prefer this for
                            ticket classes when available from a previous tool result.
-            key:           Fallback key: numeric ID string, OQL, or JSON criteria.
+            key:           Fallback key: numeric ID, OQL, or JSON criteria.
                            Used only when ticket_ref is absent.
             fields:        JSON of fields required for the transition.
             output_fields: Fields to return.
@@ -205,7 +213,11 @@ def register(mcp, itop_request):
         if isinstance(parsed, str):
             return parsed
 
-        resolved = await resolve_key(obj_class, itop_request, ref=ticket_ref, key=key)
+        resolved = await resolve_key(
+            obj_class, itop_request,
+            ref=ticket_ref,
+            key=str(key) if key is not None else None,
+        )
         result = await itop_request({
             "operation": "core/apply_stimulus",
             "class": obj_class,
