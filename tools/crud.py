@@ -99,28 +99,18 @@ def register(mcp, itop_request):
     ) -> str:
         """Update data fields on an existing iTop object.
 
-        IMPORTANT - DO NOT use this tool to change ticket status or trigger
-        lifecycle transitions (assign, resolve, close, reopen, etc.).
-        Status is controlled by iTop's workflow engine and can only be changed
-        via itop_apply_stimulus. Attempting to set 'status' directly here will
-        be rejected and will not work.
+        IMPORTANT: Do NOT set 'status' here - it is workflow-controlled and
+        will be rejected. Use itop_apply_stimulus for all state transitions:
+          ev_assign, ev_resolve, ev_reopen, ev_pending.
 
-        Use itop_apply_stimulus for any of these actions:
-          - Assigning a ticket (ev_assign)
-          - Resolving a ticket (ev_resolve)
-          - Reopening a ticket (ev_reopen)
-          - Putting a ticket on hold (ev_pending)
-
-        Always supply ticket_ref (e.g. "R-016271") from a previous tool result.
-        Do NOT guess or invent a numeric ID. If ticket_ref is provided it takes
-        priority over key and the correct numeric ID is resolved automatically.
+        ticket_ref (e.g. "R-016271") takes priority over key. The correct
+        numeric ID is resolved automatically. Do NOT invent a numeric ID.
 
         Args:
             obj_class: iTop class (e.g. UserRequest, Incident, Server).
             fields: JSON of fields to update. Must NOT contain "status".
-            ticket_ref: Ticket ref (e.g. "R-016271"). Preferred for ticket classes.
-            key: Numeric ID string, OQL, or JSON criteria. Fallback when ticket_ref
-                 is not available.
+            ticket_ref: Ticket ref. Preferred for ticket classes.
+            key: Fallback: numeric ID, OQL, or JSON criteria.
             output_fields: Fields to return.
             comment: Optional comment for change tracking.
         """
@@ -162,15 +152,13 @@ def register(mcp, itop_request):
     ) -> str:
         """Delete object(s) from iTop.
 
-        Always supply ticket_ref (e.g. "R-016271") from a previous tool result.
-        Do NOT guess or invent a numeric ID. If ticket_ref is provided it takes
-        priority over key and the correct numeric ID is resolved automatically.
+        ticket_ref (e.g. "R-016271") takes priority over key. The correct
+        numeric ID is resolved automatically. Do NOT invent a numeric ID.
 
         Args:
             obj_class: iTop class.
-            ticket_ref: Ticket ref (e.g. "R-016271"). Preferred for ticket classes.
-            key: Numeric ID string, OQL, or JSON criteria. Fallback when ticket_ref
-                 is not available.
+            ticket_ref: Ticket ref. Preferred for ticket classes.
+            key: Fallback: numeric ID, OQL, or JSON criteria.
             comment: Optional comment.
             simulate: If True, dry-run without deleting (default: True).
         """
@@ -197,38 +185,26 @@ def register(mcp, itop_request):
     ) -> str:
         """Apply a lifecycle stimulus to an iTop object (ticket state transition).
 
-        This is the ONLY correct way to change ticket status. iTop enforces
-        workflow rules - only stimuli valid for the current state will succeed.
-        Do NOT attempt to set status via itop_update.
+        This is the ONLY correct way to change ticket status. Do NOT set status
+        via itop_update.
 
-        WORKFLOW RULE - "close" means ev_resolve:
-        When a user asks to close or finish a ticket, ALWAYS use ev_resolve.
-        ev_close must NEVER be used - it is not part of this workflow.
-        Resolving a ticket IS the final step. Do not attempt ev_close under
-        any circumstances, even if the user says "close".
+        RULE: To close/finish a ticket, ALWAYS use ev_resolve (with solution in
+        fields). ev_close is not permitted and will be rejected.
 
-        Common stimuli for UserRequest/Incident:
-          - ev_assign:   assign to agent (fields={"agent_id": <id>, "team_id": <id>})
-          - ev_reassign: reassign to another agent
-          - ev_resolve:  resolve/close ticket (fields={"solution": "..."}) - use this
-                         whenever the user wants to close or finish a ticket
-          - ev_reopen:   reopen a resolved ticket
-          - ev_pending:  put on hold (fields={"pending_reason": "..."})
+        Stimuli for UserRequest/Incident:
+          ev_assign:   assign (fields={"agent_id":..,"team_id":..})
+          ev_reassign: reassign to another agent
+          ev_resolve:  resolve/close (fields={"solution":"..."})
+          ev_reopen:   reopen a resolved ticket
+          ev_pending:  put on hold (fields={"pending_reason":"..."})
 
-        If the stimulus is rejected by iTop, the ticket is not in a state that
-        allows that transition. Check the current status first with itop_get and
-        use the appropriate stimulus for that state.
-
-        Always supply ticket_ref (e.g. "R-016271") from a previous tool result.
-        Do NOT guess or invent a numeric ID. If ticket_ref is provided it takes
-        priority over key and the correct numeric ID is resolved automatically.
+        ticket_ref (e.g. "R-016271") takes priority over key. Do NOT invent IDs.
 
         Args:
             obj_class: iTop class (e.g. UserRequest, Incident).
-            stimulus: Stimulus code (e.g. ev_assign, ev_resolve). Never ev_close.
-            ticket_ref: Ticket ref (e.g. "R-016271"). Preferred for ticket classes.
-            key: Numeric ID string, OQL, or JSON criteria. Fallback when ticket_ref
-                 is not available.
+            stimulus: Stimulus code. Never use ev_close.
+            ticket_ref: Ticket ref. Preferred for ticket classes.
+            key: Fallback: numeric ID, OQL, or JSON.
             fields: JSON of fields required for the transition.
             output_fields: Fields to return.
             comment: Optional comment.
