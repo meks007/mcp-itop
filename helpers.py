@@ -34,6 +34,48 @@ def sla_is_breached(val: str) -> bool:
 
 
 # -------------------------------------------------------------------------
+# Classes that carry a human-readable "ref" ticket number in iTop
+# -------------------------------------------------------------------------
+
+# iTop assigns a "ref" field (e.g. "R-000123") to all ticket-like classes.
+# When output_fields is an explicit list and the class is known to have ref,
+# we inject "ref" automatically so callers always get the ticket reference.
+CLASSES_WITH_REF: frozenset[str] = frozenset({
+    "UserRequest",
+    "Incident",
+    "Problem",
+    "Change",
+    "ChangeRequest",
+    "NormalChange",
+    "EmergencyChange",
+    "RoutineChange",
+    "ServiceRequest",
+    "RFC",
+    "RFI",
+})
+
+
+def ensure_ref_field(obj_class: str, output_fields: str) -> str:
+    """Inject 'ref' into output_fields when the class supports it.
+
+    Only modifies output_fields when:
+    - obj_class is in CLASSES_WITH_REF, and
+    - output_fields is an explicit field list (not '*' or '*+'), and
+    - 'ref' is not already present.
+
+    Returns the (possibly modified) output_fields string.
+    """
+    if output_fields in ("*", "*+"):
+        return output_fields
+    if obj_class not in CLASSES_WITH_REF:
+        return output_fields
+    fields = [f.strip() for f in output_fields.split(",")]
+    if "ref" not in fields:
+        fields.insert(0, "ref")
+    return ", ".join(fields)
+
+
+# -------------------------------------------------------------------------
 # Generic helpers
 # -------------------------------------------------------------------------
 
