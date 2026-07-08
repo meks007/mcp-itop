@@ -25,9 +25,14 @@ def register(mcp, itop_request):
         Public comments are visible to end users on the portal.
         Private comments are visible only to agents.
 
+        Always use the ref value (e.g. "R-016271") from a previous tool result
+        as ticket_ref. Do NOT guess or invent a numeric ID - use the ref shown
+        in the "link" or header of the ticket response.
+
         Args:
             ticket_class: Ticket class (UserRequest, Incident, Problem).
-            ticket_ref: Ticket ref (e.g. "R-016271") or numeric ID string (e.g. "16271").
+            ticket_ref: Ticket ref (e.g. "R-016271") or numeric ID string.
+                        Prefer ref when available from a previous tool result.
             text: Comment text.
             is_public: True = public_log, False = private_log.
             format: "text" or "html" (default: text).
@@ -60,9 +65,13 @@ def register(mcp, itop_request):
     ) -> str:
         """Read log entries (comments) from a ticket.
 
+        Always use the ref value (e.g. "R-016271") from a previous tool result
+        as ticket_ref. Do NOT guess or invent a numeric ID.
+
         Args:
             ticket_class: Ticket class (UserRequest, Incident, Problem).
-            ticket_ref: Ticket ref (e.g. "R-016271") or numeric ID string (e.g. "16271").
+            ticket_ref: Ticket ref (e.g. "R-016271") or numeric ID string.
+                        Prefer ref when available from a previous tool result.
             log_type: "public", "private", or "both" (default: both).
         """
         fields = []
