@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MCP server for iTop ITSM — analytics, tickets, KB, assets.
+MCP server for iTop ITSM - analytics, tickets, KB, assets.
 
 Provides AI assistants (Claude Desktop, opencode, etc.) with tools to:
   - Analyse SLA compliance, agent workload, service quality
@@ -30,14 +30,14 @@ if os.path.isfile(_GLOBAL_ENV):
     load_dotenv(_GLOBAL_ENV, override=True)
 load_dotenv()  # project .env (lower priority)
 
-# ── Debug flag ───────────────────────────────────────────────────────────
+# -- Debug flag -----------------------------------------------------------
 # Set MCP_DEBUG=true to log full request/response payloads for:
 #   - every MCP tool call between client <-> mcp (via FastMCP middleware)
 #   - every iTop REST/JSON API call between mcp <-> iTop
 # Auth credentials (token, password) are always redacted from log output.
 MCP_DEBUG = os.getenv("MCP_DEBUG", "false").lower() in ("true", "1", "yes")
 
-# ── Logging ──────────────────────────────────────────────────────────────
+# -- Logging --------------------------------------------------------------
 logging.basicConfig(
     level=logging.DEBUG if MCP_DEBUG else logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -48,11 +48,15 @@ logger = logging.getLogger("mcp-itop")
 if MCP_DEBUG:
     logger.debug("MCP_DEBUG is enabled - request/response payloads will be logged (secrets redacted).")
 
-# ── Config ───────────────────────────────────────────────────────────────
+# -- Config ---------------------------------------------------------------
+# NOTE: iTop authentication is no longer configured via environment
+# variables. Each client must supply its own iTop REST API token as an
+# HTTP "Authorization: Bearer <itop_token>" header when connecting to
+# this MCP server. The server validates only that a non-empty bearer
+# token was presented at connection time (MCP "initialize" handshake);
+# the token's actual validity is enforced by iTop itself on every
+# REST call (see _itop_request / ItopBearerVerifier below).
 ITOP_URL = os.getenv("ITOP_URL", "").rstrip("/")
-ITOP_USER = os.getenv("ITOP_USER", "")
-ITOP_PASSWORD = os.getenv("ITOP_PASSWORD", "")
-ITOP_TOKEN = os.getenv("ITOP_TOKEN", "")
 ITOP_VERSION = os.getenv("ITOP_VERSION", "1.3")
 ITOP_VERIFY_SSL = os.getenv("ITOP_VERIFY_SSL", "true").lower() not in ("false", "0", "no")
 ITOP_TIMEOUT = float(os.getenv("ITOP_TIMEOUT", "30"))
@@ -69,8 +73,26 @@ def _redact_form_data(data: dict) -> dict:
     return redacted
 
 
-# ── FastMCP ──────────────────────────────────────────────────────────────
+# -- FastMCP --------------------------------------------------------------
+from mcp.server.auth.provider import AccessToken, TokenVerifier
 from mcp.server.fastmcp import FastMCP
+
+
+class ItopBearerVerifier(TokenVerifier):
+    """Validates presence of a bearer token at MCP handshake time.
+
+    The token itself is the caller's iTop REST/JSON API auth_token. We do
+    not (and cannot, without calling iTop) verify it is a valid iTop
+    token here - only that the client presented a non-empty bearer value.
+    An invalid/expired token will simply be rejected by iTop on the first
+    real REST call made through itop_* tools.
+    """
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        if not token or not token.strip():
+            return None  # causes MCP handshake to fail with 401
+        return AccessToken(token=token, client_id="itop-client", scopes=[])
+
 
 mcp = FastMCP(
     "iTop",
@@ -79,11 +101,12 @@ mcp = FastMCP(
         "Provides SLA reports, agent workload analysis, service quality checks, "
         "ticket lifecycle, KB search, and CI impact analysis."
     ),
+    token_verifier=ItopBearerVerifier(),
 )
 
 if MCP_DEBUG:
     # Log every MCP request/response exchanged between the client
-    # (Claude Desktop, opencode, mcp-proxy, MCP Inspector, etc.) and this
+    # (Claude Desktop, opencode, MCP Inspector, etc.) and this
     # server: tool calls, list_tools, initialize, etc.
     try:
         from fastmcp.server.middleware import Middleware, MiddlewareContext
@@ -100,7 +123,7 @@ if MCP_DEBUG:
     except ImportError:
         logger.warning("MCP_DEBUG is set but fastmcp.server.middleware is unavailable; client<->mcp logging disabled.")
 
-# ── HTTP client ──────────────────────────────────────────────────────────
+# -- HTTP client ----------------------------------------------------------
 _http_client: httpx.AsyncClient | None = None
 
 
@@ -111,7 +134,7 @@ def _get_http_client() -> httpx.AsyncClient:
     return _http_client
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────
+# -- Helpers --------------------------------------------------------------
 def _str_or(d: dict, key: str, default: str = "") -> str:
     v = d.get(key)
     return str(v) if v is not None else default
@@ -135,23 +158,36 @@ def _parse_json_arg(raw: str, arg_name: str) -> dict | str:
         return f"Invalid JSON in '{arg_name}': {e.msg} at position {e.pos}"
 
 
+def _get_bearer_token() -> str:
+    """Return the iTop auth_token supplied by the connected client.
+
+    Each client authenticates to this MCP server with its own iTop REST
+    API token via "Authorization: Bearer <itop_token>". FastMCP verifies
+    a token was presented at handshake time (see ItopBearerVerifier) and
+    exposes it here, per request, via the access-token context.
+    """
+    access_token = mcp.get_context().request_context.access_token
+    if access_token is None or not access_token.token:
+        raise ValueError(
+            "No iTop auth token found on this connection. Connect with an "
+            "'Authorization: Bearer <itop_token>' header."
+        )
+    return access_token.token
+
+
 async def _itop_request(operation: dict) -> dict:
     """Send request to iTop REST/JSON API."""
     if not ITOP_URL:
         raise ValueError("ITOP_URL is not configured. Set it in .env or environment.")
 
+    token = _get_bearer_token()
+
     url = f"{ITOP_URL}/webservices/rest.php"
     data: dict[str, str] = {
         "version": ITOP_VERSION,
         "json_data": json.dumps(operation),
+        "auth_token": token,
     }
-    if ITOP_TOKEN:
-        data["auth_token"] = ITOP_TOKEN
-    elif ITOP_USER and ITOP_PASSWORD:
-        data["auth_user"] = ITOP_USER
-        data["auth_pwd"] = ITOP_PASSWORD
-    else:
-        raise ValueError("No auth configured. Set ITOP_TOKEN or ITOP_USER+ITOP_PASSWORD.")
 
     if MCP_DEBUG:
         logger.debug("MCP -> iTop  POST %s  data=%s", url, _redact_form_data(data))
@@ -260,9 +296,9 @@ def _sla_is_passed(val: str) -> bool:
 def _sla_is_breached(val: str) -> bool:
     return val.strip().lower() in _SLA_BREACHED_VALUES if val else False
 
-# ════════════════════════════════════════════════════════════════════════
+# ========================================================================
 # ANALYTICS TOOLS
-# ════════════════════════════════════════════════════════════════════════
+# ========================================================================
 
 
 @mcp.tool()
@@ -348,7 +384,7 @@ async def itop_sla_report(
             except (ValueError, TypeError):
                 pass
 
-    lines = [f"📊 **SLA Report**", f"Period: {s[:10]} – {e[:10]}"]
+    lines = [f"**SLA Report**", f"Period: {s[:10]} - {e[:10]}"]
     if service_name:
         lines.append(f"Service: {service_name}")
     lines.extend([
@@ -464,7 +500,7 @@ async def itop_agent_workload(
             backlog + flag,
         ])
 
-    lines = [f"**Agent Workload** ({s[:10]} – {e[:10]})", ""]
+    lines = [f"**Agent Workload** ({s[:10]} - {e[:10]})", ""]
     lines.append(_format_table(header, rows))
     return "\n".join(lines)
 
@@ -531,7 +567,7 @@ async def itop_idle_agents(
             })
 
     if not idle_list:
-        return f"No truly idle agents found — all tickets have recent activity."
+        return f"No truly idle agents found - all tickets have recent activity."
 
     header = ["Ticket", "Title", "Agent", "Team", "Assigned", "Last Action"]
     rows = []
@@ -628,7 +664,7 @@ async def itop_service_quality(
         # Group keywords
         kw_sample = ticket_kw[g[0]][1]
         kw_str = ", ".join(sorted(kw_sample)[:5])
-        out_lines.append(f"📌 **Similar tickets (keywords: {kw_str})**")
+        out_lines.append(f"**Similar tickets (keywords: {kw_str})**")
         header = ["Ticket", "Caller", "Service", "Agent", "Status"]
         rows = []
         for idx in g:
@@ -667,7 +703,7 @@ async def itop_caller_quality(
     s = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
     e = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-    # We need to detect if service was changed — iTop REST doesn't expose
+    # We need to detect if service was changed - iTop REST doesn't expose
     # change history via core/get. We'll use a heuristic:
     # if the ticket has been resolved/closed and has service_name,
     # we assume the final service is the one set by agent.
@@ -713,7 +749,7 @@ async def itop_caller_quality(
         elif primary_rate < 90:
             flag = "sometimes wrong"
         else:
-            flag = "✓"
+            flag = "OK"
 
         total_services = len(data["services"])
         rows.append([
@@ -726,10 +762,10 @@ async def itop_caller_quality(
         ])
 
     if not rows:
-        return f"No callers with ≥{min_tickets} tickets in the last {days} days."
+        return f"No callers with >={min_tickets} tickets in the last {days} days."
 
     header = ["Caller", "Tickets", "Services Used", "Primary Service", "Primary Rate", "Assessment"]
-    out = [f"**Caller Service Selection Quality** (last {days} days, ≥{min_tickets} tickets)", ""]
+    out = [f"**Caller Service Selection Quality** (last {days} days, >={min_tickets} tickets)", ""]
     out.append(_format_table(header, rows))
     return "\n".join(out)
 
@@ -772,7 +808,7 @@ async def itop_agent_correction_rate(
     # For each agent, how many services they handle across tickets.
     # Agents handling many different services = likely making corrections.
     # Agents with few services = sticking to their lane.
-    # A better approach would need audit log — this is a proxy.
+    # A better approach would need audit log - this is a proxy.
     agents: dict[str, dict] = {}
     for t in tickets:
         f = t["fields"]
@@ -812,12 +848,12 @@ async def itop_agent_correction_rate(
         ])
 
     if not rows:
-        return f"No agents with ≥{min_tickets} tickets in the last {days} days."
+        return f"No agents with >={min_tickets} tickets in the last {days} days."
 
     header = ["Agent", "Tickets", "Services", "Primary Rate", "Diversity Score", "Assessment"]
     out = [
-        f"**Agent Service Correction Analysis** (last {days} days, ≥{min_tickets} tickets)",
-        "Note: Diversity score = unique services / total tickets × 100. Higher = more correction.",
+        f"**Agent Service Correction Analysis** (last {days} days, >={min_tickets} tickets)",
+        "Note: Diversity score = unique services / total tickets x 100. Higher = more correction.",
         "",
     ]
     out.append(_format_table(header, rows))
@@ -880,7 +916,7 @@ async def itop_ticket_summary(
         status_lines.append(f"  {st}: {cnt}")
 
     lines = [
-        f"📊 **Ticket Summary** (last {days} days)",
+        f"**Ticket Summary** (last {days} days)",
         "",
         f"Created:      {total}",
         f"Resolved:     {sum(cnt for st, cnt in by_status.items() if st in ('resolved', 'closed'))}",
@@ -904,9 +940,9 @@ async def itop_ticket_summary(
     return "\n".join(lines)
 
 
-# ════════════════════════════════════════════════════════════════════════
+# ========================================================================
 # KNOWLEDGE BASE TOOLS
-# ════════════════════════════════════════════════════════════════════════
+# ========================================================================
 
 
 # KB_CLASS and KB_CATEGORY_CLASS are auto-detected: try KBEntry/KBCategory
@@ -1056,9 +1092,9 @@ async def itop_list_kb_categories() -> str:
     return "\n".join(out)
 
 
-# ════════════════════════════════════════════════════════════════════════
+# ========================================================================
 # BASE CRUD TOOLS (from josephstreeter/mcp_itop)
-# ════════════════════════════════════════════════════════════════════════
+# ========================================================================
 
 
 @mcp.tool()
@@ -1298,14 +1334,14 @@ async def itop_describe_class(obj_class: str) -> str:
     objects = result.get("objects") or {}
     if not objects:
         return (
-            f"Class '{obj_class}' has zero instances — cannot sample fields.\n"
+            f"Class '{obj_class}' has zero instances - cannot sample fields.\n"
             f"Create a test object first with minimal fields; iTop will report missing required fields."
         )
 
     _obj_key, obj_data = next(iter(objects.items()))
     fields = obj_data.get("fields", {}) or {}
 
-    lines = [f"Class {obj_class} — attributes sampled from {_obj_key}:"]
+    lines = [f"Class {obj_class} - attributes sampled from {_obj_key}:"]
     for name in sorted(fields.keys()):
         value = fields[name]
         if isinstance(value, list):
@@ -1322,9 +1358,9 @@ async def itop_describe_class(obj_class: str) -> str:
     return "\n".join(lines)
 
 
-# ════════════════════════════════════════════════════════════════════════
+# ========================================================================
 # COMMENT TOOLS
-# ════════════════════════════════════════════════════════════════════════
+# ========================================================================
 
 
 @mcp.tool()
@@ -1426,9 +1462,9 @@ async def itop_get_log(
     return "\n".join(lines)
 
 
-# ════════════════════════════════════════════════════════════════════════
+# ========================================================================
 # UTILITY
-# ════════════════════════════════════════════════════════════════════════
+# ========================================================================
 
 
 def _format_duration(seconds: float) -> str:
@@ -1448,19 +1484,25 @@ def _format_duration(seconds: float) -> str:
     return f"{d}d {h}h"
 
 
-# ════════════════════════════════════════════════════════════════════════
+# ========================================================================
 
 def main():
-    """Run the iTop MCP server."""
+    """Run the iTop MCP server.
+
+    Runs as a network-reachable Streamable HTTP server. iTop
+    authentication is supplied per-client via an "Authorization: Bearer
+    <itop_token>" header (see ItopBearerVerifier / _get_bearer_token) -
+    no ITOP_TOKEN / ITOP_USER / ITOP_PASSWORD environment variables are
+    read for authentication purposes anymore.
+    """
     if not ITOP_URL:
         print("Error: ITOP_URL is not set.", file=sys.stderr)
-        print("Create .env file with ITOP_URL, ITOP_USER, ITOP_PASSWORD", file=sys.stderr)
-        sys.exit(1)
-    if not ITOP_TOKEN and not (ITOP_USER and ITOP_PASSWORD):
-        print("Error: Neither ITOP_TOKEN nor ITOP_USER+ITOP_PASSWORD are set.", file=sys.stderr)
+        print("Create .env file with ITOP_URL (see .env.example)", file=sys.stderr)
         sys.exit(1)
 
-    mcp.run(transport="stdio")
+    host = os.getenv("MCP_HOST", "0.0.0.0")
+    port = int(os.getenv("MCP_PORT", "8096"))
+    mcp.run(transport="streamable-http", host=host, port=port)
 
 
 if __name__ == "__main__":
