@@ -201,17 +201,19 @@ def register(mcp, itop_request):
         workflow rules - only stimuli valid for the current state will succeed.
         Do NOT attempt to set status via itop_update.
 
-        Supported stimuli for UserRequest/Incident:
+        WORKFLOW RULE - "close" means ev_resolve:
+        When a user asks to close or finish a ticket, ALWAYS use ev_resolve.
+        ev_close must NEVER be used - it is not part of this workflow.
+        Resolving a ticket IS the final step. Do not attempt ev_close under
+        any circumstances, even if the user says "close".
+
+        Common stimuli for UserRequest/Incident:
           - ev_assign:   assign to agent (fields={"agent_id": <id>, "team_id": <id>})
           - ev_reassign: reassign to another agent
-          - ev_resolve:  resolve ticket (fields={"solution": "..."})
-          - ev_reopen:   reopen ticket
+          - ev_resolve:  resolve/close ticket (fields={"solution": "..."}) - use this
+                         whenever the user wants to close or finish a ticket
+          - ev_reopen:   reopen a resolved ticket
           - ev_pending:  put on hold (fields={"pending_reason": "..."})
-
-        IMPORTANT - "closing" a ticket means resolving it (ev_resolve).
-        ev_close must NEVER be used - it is not part of the supported workflow.
-        When a user asks to close a ticket, always use ev_resolve instead and
-        include a solution in the fields.
 
         If the stimulus is rejected by iTop, the ticket is not in a state that
         allows that transition. Check the current status first with itop_get and
@@ -235,13 +237,12 @@ def register(mcp, itop_request):
         if isinstance(parsed, str):
             return parsed
 
-        # Guard: ev_close is not part of the supported workflow
+        # Guard: ev_close is not permitted in this workflow - redirect to ev_resolve
         if stimulus == "ev_close":
             return (
-                "Error: ev_close is not permitted. "
-                "To close a ticket, use ev_resolve with a solution instead:\n"
-                "  stimulus: ev_resolve\n"
-                "  fields: {\"solution\": \"<description of resolution>\"}"
+                "Error: ev_close is not permitted in this workflow. "
+                "To close a ticket, use ev_resolve with a solution in fields, "
+                "e.g. fields={\"solution\": \"...\"}. Resolving is the final step."
             )
 
         resolved = await resolve_key(obj_class, ticket_ref or None, key or None, itop_request)
