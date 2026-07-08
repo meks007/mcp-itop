@@ -97,10 +97,20 @@ def register(mcp, itop_request):
         output_fields: str = "ref, friendlyname, status",
         comment: str = "",
     ) -> str:
-        """Update an existing object in iTop.
+        """Update data fields on an existing iTop object.
 
-        Use this to modify fields on tickets, CI, etc.
-        For lifecycle transitions (assign/resolve/close), use itop_apply_stimulus.
+        IMPORTANT - DO NOT use this tool to change ticket status or trigger
+        lifecycle transitions (assign, resolve, close, reopen, etc.).
+        Status is controlled by iTop's workflow engine and can only be changed
+        via itop_apply_stimulus. Attempting to set 'status' directly here will
+        be rejected and will not work.
+
+        Use itop_apply_stimulus for any of these actions:
+          - Assigning a ticket (ev_assign)
+          - Resolving a ticket (ev_resolve)
+          - Closing a ticket (ev_close)
+          - Reopening a ticket (ev_reopen)
+          - Putting a ticket on hold (ev_pending)
 
         Always supply ticket_ref (e.g. "R-016271") from a previous tool result.
         Do NOT guess or invent a numeric ID. If ticket_ref is provided it takes
@@ -108,7 +118,7 @@ def register(mcp, itop_request):
 
         Args:
             obj_class: iTop class (e.g. UserRequest, Incident, Server).
-            fields: JSON of fields to update.
+            fields: JSON of fields to update. Must NOT contain "status".
             ticket_ref: Ticket ref (e.g. "R-016271"). Preferred for ticket classes.
             key: Numeric ID string, OQL, or JSON criteria. Fallback when ticket_ref
                  is not available.
@@ -118,6 +128,19 @@ def register(mcp, itop_request):
         parsed = parse_json_arg(fields, "fields")
         if isinstance(parsed, str):
             return parsed
+
+        # Guard: status must never be set via update - it is workflow-controlled
+        if isinstance(parsed, dict) and "status" in parsed:
+            return (
+                "Error: 'status' cannot be set via itop_update. "
+                "iTop enforces status transitions through its workflow engine. "
+                "Use itop_apply_stimulus with the appropriate stimulus instead:\n"
+                "  ev_assign   - assign ticket\n"
+                "  ev_resolve  - resolve ticket (include solution in fields)\n"
+                "  ev_close    - close ticket\n"
+                "  ev_reopen   - reopen ticket\n"
+                "  ev_pending  - put ticket on hold"
+            )
 
         resolved = await resolve_key(obj_class, ticket_ref or None, key or None, itop_request)
 
@@ -176,6 +199,10 @@ def register(mcp, itop_request):
     ) -> str:
         """Apply a lifecycle stimulus to an iTop object (ticket state transition).
 
+        This is the ONLY correct way to change ticket status. iTop enforces
+        workflow rules - only stimuli valid for the current state will succeed.
+        Do NOT attempt to set status via itop_update.
+
         Common stimuli for UserRequest/Incident:
           - ev_assign:   assign to agent (fields={"agent_id": <id>, "team_id": <id>})
           - ev_reassign: reassign to another agent
@@ -184,13 +211,17 @@ def register(mcp, itop_request):
           - ev_reopen:   reopen ticket
           - ev_pending:  put on hold (fields={"pending_reason": "..."})
 
+        If the stimulus is rejected by iTop, the ticket is not in a state that
+        allows that transition. Check the current status first with itop_get and
+        use the appropriate stimulus for that state.
+
         Always supply ticket_ref (e.g. "R-016271") from a previous tool result.
         Do NOT guess or invent a numeric ID. If ticket_ref is provided it takes
         priority over key and the correct numeric ID is resolved automatically.
 
         Args:
             obj_class: iTop class (e.g. UserRequest, Incident).
-            stimulus: Stimulus code (e.g. ev_assign, ev_resolve).
+            stimulus: Stimulus code (e.g. ev_assign, ev_resolve, ev_close).
             ticket_ref: Ticket ref (e.g. "R-016271"). Preferred for ticket classes.
             key: Numeric ID string, OQL, or JSON criteria. Fallback when ticket_ref
                  is not available.
