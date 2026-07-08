@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import sys
 
+import uvicorn
 from pydantic import AnyHttpUrl
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
@@ -105,11 +106,15 @@ _crud.register(mcp, itop_request)
 _comments.register(mcp, itop_request)
 
 
+# -- ASGI app (for uvicorn) -----------------------------------------------
+app = mcp.streamable_http_app()
+
+
 # -- Entry point ----------------------------------------------------------
 def main():
     """Run the iTop MCP server.
 
-    Runs as a network-reachable Streamable HTTP server. iTop
+    Runs as a network-reachable Streamable HTTP server via uvicorn. iTop
     authentication is supplied per-client via an "Authorization: Bearer
     <itop_token>" header (see auth.py) - no ITOP_TOKEN / ITOP_USER /
     ITOP_PASSWORD environment variables are read for authentication
@@ -122,7 +127,7 @@ def main():
         print("Create .env file with ITOP_URL (see .env.example)", file=sys.stderr)
         sys.exit(1)
 
-    mcp.run(transport="streamable-http", host=_MCP_HOST, port=_MCP_PORT)
+    uvicorn.run(app, host=_MCP_HOST, port=_MCP_PORT)
 
 
 if __name__ == "__main__":
