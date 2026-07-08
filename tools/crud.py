@@ -5,7 +5,7 @@ get_related, list_operations, describe_class.
 
 from __future__ import annotations
 
-from helpers import format_objects, parse_json_arg, parse_key, str_or
+from helpers import ensure_ref_field, format_objects, parse_json_arg, parse_key, str_or
 from config import DEFAULT_COMMENT
 
 
@@ -34,7 +34,7 @@ def register(mcp, itop_request):
             "operation": "core/get",
             "class": obj_class,
             "key": parse_key(key),
-            "output_fields": output_fields,
+            "output_fields": ensure_ref_field(obj_class, output_fields),
         }
         if limit > 0:
             op["limit"] = str(limit)
@@ -67,7 +67,7 @@ def register(mcp, itop_request):
             "operation": "core/create",
             "class": obj_class,
             "fields": parsed,
-            "output_fields": output_fields,
+            "output_fields": ensure_ref_field(obj_class, output_fields),
             "comment": comment or DEFAULT_COMMENT,
         })
         return format_objects(result)
@@ -101,7 +101,7 @@ def register(mcp, itop_request):
             "class": obj_class,
             "key": parse_key(key),
             "fields": parsed,
-            "output_fields": output_fields,
+            "output_fields": ensure_ref_field(obj_class, output_fields),
             "comment": comment or DEFAULT_COMMENT,
         })
         return format_objects(result)
@@ -167,7 +167,7 @@ def register(mcp, itop_request):
             "key": parse_key(key),
             "stimulus": stimulus,
             "fields": parsed,
-            "output_fields": output_fields,
+            "output_fields": ensure_ref_field(obj_class, output_fields),
             "comment": comment or DEFAULT_COMMENT,
         })
         return format_objects(result)
