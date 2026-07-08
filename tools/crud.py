@@ -108,7 +108,6 @@ def register(mcp, itop_request):
         Use itop_apply_stimulus for any of these actions:
           - Assigning a ticket (ev_assign)
           - Resolving a ticket (ev_resolve)
-          - Closing a ticket (ev_close)
           - Reopening a ticket (ev_reopen)
           - Putting a ticket on hold (ev_pending)
 
@@ -137,7 +136,6 @@ def register(mcp, itop_request):
                 "Use itop_apply_stimulus with the appropriate stimulus instead:\n"
                 "  ev_assign   - assign ticket\n"
                 "  ev_resolve  - resolve ticket (include solution in fields)\n"
-                "  ev_close    - close ticket\n"
                 "  ev_reopen   - reopen ticket\n"
                 "  ev_pending  - put ticket on hold"
             )
@@ -203,13 +201,17 @@ def register(mcp, itop_request):
         workflow rules - only stimuli valid for the current state will succeed.
         Do NOT attempt to set status via itop_update.
 
-        Common stimuli for UserRequest/Incident:
+        Supported stimuli for UserRequest/Incident:
           - ev_assign:   assign to agent (fields={"agent_id": <id>, "team_id": <id>})
           - ev_reassign: reassign to another agent
           - ev_resolve:  resolve ticket (fields={"solution": "..."})
-          - ev_close:    close ticket
           - ev_reopen:   reopen ticket
           - ev_pending:  put on hold (fields={"pending_reason": "..."})
+
+        IMPORTANT - "closing" a ticket means resolving it (ev_resolve).
+        ev_close must NEVER be used - it is not part of the supported workflow.
+        When a user asks to close a ticket, always use ev_resolve instead and
+        include a solution in the fields.
 
         If the stimulus is rejected by iTop, the ticket is not in a state that
         allows that transition. Check the current status first with itop_get and
@@ -221,7 +223,7 @@ def register(mcp, itop_request):
 
         Args:
             obj_class: iTop class (e.g. UserRequest, Incident).
-            stimulus: Stimulus code (e.g. ev_assign, ev_resolve, ev_close).
+            stimulus: Stimulus code (e.g. ev_assign, ev_resolve). Never ev_close.
             ticket_ref: Ticket ref (e.g. "R-016271"). Preferred for ticket classes.
             key: Numeric ID string, OQL, or JSON criteria. Fallback when ticket_ref
                  is not available.
@@ -232,6 +234,15 @@ def register(mcp, itop_request):
         parsed = parse_json_arg(fields, "fields")
         if isinstance(parsed, str):
             return parsed
+
+        # Guard: ev_close is not part of the supported workflow
+        if stimulus == "ev_close":
+            return (
+                "Error: ev_close is not permitted. "
+                "To close a ticket, use ev_resolve with a solution instead:\n"
+                "  stimulus: ev_resolve\n"
+                "  fields: {\"solution\": \"<description of resolution>\"}"
+            )
 
         resolved = await resolve_key(obj_class, ticket_ref or None, key or None, itop_request)
 
