@@ -7,7 +7,7 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-from helpers import extract_objects, format_objects, parse_key_for_ticket, str_or
+from helpers import extract_objects, format_objects, resolve_key, str_or
 
 
 def register(mcp, itop_request):
@@ -27,24 +27,25 @@ def register(mcp, itop_request):
         Public comments are visible to end users on the portal.
         Private comments are visible only to agents.
 
-        Always use ticket_ref with the ref value (e.g. "R-016271") from a
-        previous tool result. Do NOT guess or invent a numeric ID.
+        Supply ticket_ref (e.g. "R-016271") whenever available from a previous
+        tool result. If ticket_ref is present, the correct numeric key is
+        resolved automatically via a live iTop lookup - any ticket_id supplied
+        alongside it is ignored. Only fall back to ticket_id alone when no ref
+        is known.
 
         Args:
             ticket_class: Ticket class (UserRequest, Incident, Problem).
-            ticket_ref: Ticket ref (e.g. "R-016271"). Preferred - use this
-                        when available from a previous tool result.
-            ticket_id: Numeric ID string fallback (deprecated, use ticket_ref).
-            text: Comment text.
-            is_public: True = public_log, False = private_log.
-            format: "text" or "html" (default: text).
+            ticket_ref:   Ticket ref (e.g. "R-016271"). Always prefer this.
+            ticket_id:    Numeric ID string. Used only when ticket_ref is absent.
+            text:         Comment text.
+            is_public:    True = public_log, False = private_log.
+            format:       "text" or "html" (default: text).
         """
-        ref = ticket_ref or ticket_id
-        if not ref:
-            return "Error: ticket_ref is required (e.g. 'R-016271')."
+        if not ticket_ref and not ticket_id:
+            return "Error: supply ticket_ref (e.g. 'R-016271') or ticket_id."
 
         log_field = "public_log" if is_public else "private_log"
-        key = parse_key_for_ticket(ticket_class, str(ref))
+        key = await resolve_key(ticket_class, itop_request, ref=ticket_ref, key=ticket_id)
 
         result = await itop_request({
             "operation": "core/update",
@@ -72,19 +73,20 @@ def register(mcp, itop_request):
     ) -> str:
         """Read log entries (comments) from a ticket.
 
-        Always use ticket_ref with the ref value (e.g. "R-016271") from a
-        previous tool result. Do NOT guess or invent a numeric ID.
+        Supply ticket_ref (e.g. "R-016271") whenever available from a previous
+        tool result. If ticket_ref is present, the correct numeric key is
+        resolved automatically via a live iTop lookup - any ticket_id supplied
+        alongside it is ignored. Only fall back to ticket_id alone when no ref
+        is known.
 
         Args:
             ticket_class: Ticket class (UserRequest, Incident, Problem).
-            ticket_ref: Ticket ref (e.g. "R-016271"). Preferred - use this
-                        when available from a previous tool result.
-            ticket_id: Numeric ID string fallback (deprecated, use ticket_ref).
-            log_type: "public", "private", or "both" (default: both).
+            ticket_ref:   Ticket ref (e.g. "R-016271"). Always prefer this.
+            ticket_id:    Numeric ID string. Used only when ticket_ref is absent.
+            log_type:     "public", "private", or "both" (default: both).
         """
-        ref = ticket_ref or ticket_id
-        if not ref:
-            return "Error: ticket_ref is required (e.g. 'R-016271')."
+        if not ticket_ref and not ticket_id:
+            return "Error: supply ticket_ref (e.g. 'R-016271') or ticket_id."
 
         fields = []
         if log_type in ("public", "both"):
@@ -92,7 +94,7 @@ def register(mcp, itop_request):
         if log_type in ("private", "both"):
             fields.append("private_log")
 
-        key = parse_key_for_ticket(ticket_class, str(ref))
+        key = await resolve_key(ticket_class, itop_request, ref=ticket_ref, key=ticket_id)
 
         result = await itop_request({
             "operation": "core/get",
@@ -102,11 +104,12 @@ def register(mcp, itop_request):
         })
 
         tickets = extract_objects(result)
+        label = ticket_ref or ticket_id
         if not tickets:
-            return f"Ticket {ref!r} ({ticket_class}) not found."
+            return f"Ticket {label!r} ({ticket_class}) not found."
 
         f = tickets[0]["fields"]
-        lines = [f"**Logs for {ticket_class} {ref}**", ""]
+        lines = [f"**Logs for {ticket_class} {label}**", ""]
 
         for field in fields:
             if field not in f:
