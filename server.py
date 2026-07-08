@@ -26,6 +26,8 @@ from __future__ import annotations
 import os
 import sys
 
+from pydantic import AnyHttpUrl
+from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 
 from auth import ItopBearerVerifier, get_bearer_token
@@ -37,6 +39,19 @@ import tools.comments as _comments
 import tools.crud as _crud
 import tools.kb as _kb
 
+# -- MCP server URL (used for AuthSettings) --------------------------------
+# FastMCP requires issuer_url + resource_server_url when a token_verifier
+# is supplied. We use the server's own listen address for both since this
+# server is not a real OAuth issuer - it only validates that a non-empty
+# bearer token was presented (the token's validity is enforced by iTop).
+_MCP_HOST = os.getenv("MCP_HOST", "0.0.0.0")
+_MCP_PORT = int(os.getenv("MCP_PORT", "8096"))
+# Use localhost for the URL even when binding to 0.0.0.0
+_SERVER_URL = os.getenv(
+    "MCP_SERVER_URL",
+    f"http://{'localhost' if _MCP_HOST == '0.0.0.0' else _MCP_HOST}:{_MCP_PORT}",
+)
+
 # -- MCP instance ---------------------------------------------------------
 mcp = FastMCP(
     "iTop",
@@ -44,6 +59,10 @@ mcp = FastMCP(
         "MCP server for iTop IT Service Management with analytics. "
         "Provides SLA reports, agent workload analysis, service quality checks, "
         "ticket lifecycle, KB search, and CI impact analysis."
+    ),
+    auth=AuthSettings(
+        issuer_url=AnyHttpUrl(_SERVER_URL),
+        resource_server_url=AnyHttpUrl(_SERVER_URL),
     ),
     token_verifier=ItopBearerVerifier(),
 )
@@ -103,9 +122,7 @@ def main():
         print("Create .env file with ITOP_URL (see .env.example)", file=sys.stderr)
         sys.exit(1)
 
-    host = os.getenv("MCP_HOST", "0.0.0.0")
-    port = int(os.getenv("MCP_PORT", "8096"))
-    mcp.run(transport="streamable-http", host=host, port=port)
+    mcp.run(transport="streamable-http", host=_MCP_HOST, port=_MCP_PORT)
 
 
 if __name__ == "__main__":
