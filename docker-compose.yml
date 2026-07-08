@@ -18,10 +18,10 @@ services:
       # Optional: bind address/port used by the streamable-http transport.
       MCP_HOST: ${MCP_HOST:-0.0.0.0}
       MCP_PORT: ${MCP_PORT:-8096}
-      # Public base URL of this MCP server. Must match the Host header sent
-      # by clients (e.g. when running behind a reverse proxy). The MCP
-      # transport_security middleware rejects requests whose Host header does
-      # not match this URL, returning 421 Misdirected Request.
+      # Public base URL of this MCP server. Required when running behind a
+      # reverse proxy. The hostname is extracted and added to the MCP SDK's
+      # DNS rebinding protection allowlist so clients connecting via the
+      # public hostname are not rejected with 421 Misdirected Request.
       # Example: MCP_SERVER_URL=https://mcp.your-domain.com
       MCP_SERVER_URL: ${MCP_SERVER_URL:-}
       # Set to true to log full client<->mcp<->iTop request/response
