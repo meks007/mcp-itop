@@ -44,15 +44,8 @@ def sla_is_breached(val: str) -> bool:
 CLASSES_WITH_REF: frozenset[str] = frozenset({
     "UserRequest",
     "Incident",
-    "Problem",
     "Change",
-    "ChangeRequest",
     "NormalChange",
-    "EmergencyChange",
-    "RoutineChange",
-    "ServiceRequest",
-    "RFC",
-    "RFI",
 })
 
 # Matches iTop ticket ref strings like "R-000123", "INC-42", "P-007".
