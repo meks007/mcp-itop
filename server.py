@@ -11,9 +11,11 @@ Based on josephstreeter/mcp_itop (CRUD + stimulus) with extended analytics.
 
 Module layout:
   config.py        - env vars, logging, constants
-  auth.py          - bearer token verifier and accessor
+  auth.py          - OIDC JWT verifier and iTop token resolver
   client.py        - iTop REST/JSON HTTP client
   helpers.py       - shared formatting and parsing utilities
+  oauth_config.py  - OAuth provider configuration loader
+  token_store.py   - UPN-to-iTop-token mapping store
   tools/
     analytics.py   - SLA, workload, idle agents, service/caller quality
     kb.py          - knowledge base search and retrieval
@@ -34,9 +36,10 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from auth import ItopBearerVerifier, get_bearer_token
+from auth import OAuthTokenVerifier, get_itop_token
 from client import itop_request as _raw_itop_request
 from config import MCP_DEBUG, logger
+from oauth_config import oauth_cfg
 
 import tools.analytics as _analytics
 import tools.attachments as _attachments
@@ -45,11 +48,6 @@ import tools.crud as _crud
 import tools.kb as _kb
 
 # -- MCP server URL (used for AuthSettings and transport security) ----------
-# FastMCP requires issuer_url + resource_server_url when a token_verifier
-# is supplied. We use the server's own listen address for both since this
-# server is not a real OAuth issuer - it only validates that a non-empty
-# bearer token was presented (the token's validity is enforced by iTop).
-#
 # MCP_SERVER_URL must be set to the public-facing URL when running behind
 # a reverse proxy (e.g. https://mcp.your-domain.com). Without it the MCP
 # SDK's DNS rebinding protection will reject requests whose Host header
@@ -87,6 +85,11 @@ _transport_security = TransportSecuritySettings(
 )
 
 # -- MCP instance ---------------------------------------------------------
+# issuer_url points at the external OAuth provider (Keycloak, Entra, ...).
+# This is advertised via /.well-known/oauth-protected-resource so that
+# MCP clients can discover the correct authorization server.
+_ISSUER_URL = oauth_cfg.issuer_url if oauth_cfg else _SERVER_URL
+
 mcp = FastMCP(
     "iTop",
     instructions=(
@@ -95,23 +98,23 @@ mcp = FastMCP(
         "ticket lifecycle, KB search, and CI impact analysis."
     ),
     auth=AuthSettings(
-        issuer_url=AnyHttpUrl(_SERVER_URL),
+        issuer_url=AnyHttpUrl(_ISSUER_URL),
         resource_server_url=AnyHttpUrl(_SERVER_URL),
     ),
-    token_verifier=ItopBearerVerifier(),
+    token_verifier=OAuthTokenVerifier(),
     transport_security=_transport_security,
 )
 
 
-# -- Bind bearer token to itop_request ------------------------------------
+# -- Bind iTop token resolution to itop_request ---------------------------
 async def itop_request(operation: dict) -> dict:
-    """Wrapper that injects the per-request bearer token into the HTTP client."""
-    return await _raw_itop_request(operation, lambda: get_bearer_token(mcp))
+    """Wrapper that resolves the per-request iTop token and calls the HTTP client."""
+    return await _raw_itop_request(operation, get_itop_token)
 
 
 def _get_token() -> str:
-    """Return the current per-request bearer token (for non-REST tools)."""
-    return get_bearer_token(mcp)
+    """Return the current per-request iTop token (for non-REST tools)."""
+    return get_itop_token()
 
 
 # -- Register all tools ---------------------------------------------------
@@ -159,11 +162,10 @@ if MCP_DEBUG:
 def main():
     """Run the iTop MCP server.
 
-    Runs as a network-reachable Streamable HTTP server via uvicorn. iTop
-    authentication is supplied per-client via an "Authorization: Bearer
-    <itop_token>" header (see auth.py) - no ITOP_TOKEN / ITOP_USER /
-    ITOP_PASSWORD environment variables are read for authentication
-    purposes anymore.
+    Runs as a network-reachable Streamable HTTP server via uvicorn.
+    Authentication uses OIDC JWTs validated against the provider configured
+    in oauth_config.yaml. The resolved UPN is mapped to an iTop REST API
+    token via token_store.yaml (see auth.py and oauth_config.py).
 
     MCP_DEBUG=true enables verbose logging of all client<->MCP HTTP
     traffic and iTop REST/JSON API request/response payloads (auth
