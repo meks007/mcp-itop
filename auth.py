@@ -4,7 +4,8 @@ Authentication: OIDC JWT verifier and per-request iTop token resolver.
 Flow:
   1. MCP client sends Authorization: Bearer <JWT> (issued by Keycloak/Entra/...).
   2. OAuthTokenVerifier.verify_token() validates the JWT:
-       - fetches/caches JWKS from the provider's well-known endpoint
+       - fetches the OIDC discovery document to resolve the real JWKS URI
+       - fetches/caches signing keys from that JWKS URI via PyJWKClient
        - verifies signature, iss, aud, exp
        - extracts UPN from the configured claim
   3. The UPN is stored in AccessToken.client_id (SDK convention for passing
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import ssl
 
+import httpx
 import jwt
 from jwt import PyJWKClient
 
@@ -29,12 +31,35 @@ from oauth_config import oauth_cfg
 from token_store import TokenStore
 
 # -- Shared JWKS client (singleton) ---------------------------------------
-# PyJWKClient fetches and caches the provider's public keys.
-# JWKS URI is derived from the OIDC discovery document automatically by
-# PyJWT when you pass the issuer URL with the openid-configuration path.
+# PyJWKClient expects the JWKS URI directly (the endpoint that returns
+# {"keys": [...]}). We resolve it by fetching the OIDC discovery document
+# at <issuer_url>/.well-known/openid-configuration and reading its
+# "jwks_uri" field. This works for any OIDC-compliant provider
+# (Keycloak, Entra ID, etc.) without hardcoding provider-specific paths.
 
 _jwks_client: PyJWKClient | None = None
 _token_store: TokenStore | None = None
+
+
+def _resolve_jwks_uri(issuer_url: str, verify_ssl: bool) -> str:
+    """Fetch the OIDC discovery document and return the jwks_uri value."""
+    discovery_url = f"{issuer_url}/.well-known/openid-configuration"
+    try:
+        response = httpx.get(discovery_url, verify=verify_ssl, timeout=10)
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise RuntimeError(
+            f"Failed to fetch OIDC discovery document from {discovery_url}: {exc}"
+        ) from exc
+
+    doc = response.json()
+    jwks_uri = doc.get("jwks_uri", "")
+    if not jwks_uri:
+        raise RuntimeError(
+            f"OIDC discovery document at {discovery_url} does not contain a 'jwks_uri' field."
+        )
+    logger.info("Resolved JWKS URI from discovery doc: %s", jwks_uri)
+    return jwks_uri
 
 
 def _get_jwks_client() -> PyJWKClient:
@@ -44,7 +69,7 @@ def _get_jwks_client() -> PyJWKClient:
             raise RuntimeError(
                 "OAuth configuration not loaded. Check oauth_config.yaml."
             )
-        jwks_uri = f"{oauth_cfg.issuer_url}/.well-known/openid-configuration"
+        jwks_uri = _resolve_jwks_uri(oauth_cfg.issuer_url, oauth_cfg.verify_ssl)
         ssl_context = ssl.create_default_context() if oauth_cfg.verify_ssl else False
         _jwks_client = PyJWKClient(
             jwks_uri,
