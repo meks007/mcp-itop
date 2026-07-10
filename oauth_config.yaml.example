@@ -1,0 +1,44 @@
+# oauth_config.yaml.example
+#
+# Copy to oauth_config.yaml and fill in your values.
+# Supports Keycloak, Entra ID, or any OIDC-compliant provider.
+# This file is loaded by oauth_config.py at server startup.
+#
+# Path resolution order:
+#   1. Path in env var OAUTH_CONFIG_FILE (absolute or relative to cwd)
+#   2. ~/.config/mcp-itop/oauth_config.yaml
+#   3. ./oauth_config.yaml (project root, next to server.py)
+
+oauth:
+  # OIDC issuer URL. The server appends /.well-known/openid-configuration
+  # to discover JWKS URI, authorization endpoint, and token endpoint.
+  #
+  # Keycloak example:
+  #   issuer_url: https://keycloak.example.com/realms/mcp-itop
+  #
+  # Entra ID (Azure AD) example:
+  #   issuer_url: https://login.microsoftonline.com/<tenant-id>/v2.0
+  issuer_url: https://your-idp.example.com/realms/your-realm
+
+  # The audience value the MCP server expects in the JWT "aud" claim.
+  # In Keycloak this is typically the client ID of the mcp-itop client.
+  # In Entra ID this is the Application ID URI (e.g. api://<client-id>).
+  audience: mcp-itop
+
+  # JWT claim that carries the caller's identity for iTop token lookup.
+  # Keycloak: "preferred_username" or "upn"
+  # Entra ID: "upn" or "preferred_username"
+  # Must match exactly the key used in token_store.yaml.
+  upn_claim: preferred_username
+
+  # How long (seconds) to cache Keycloak JWKS keys before re-fetching.
+  # PyJWT's PyJWKClient handles this automatically; this value is passed
+  # as lifespan to PyJWKClient.
+  jwks_cache_ttl: 300
+
+  # If true, SSL certificate of the OIDC provider is verified.
+  verify_ssl: true
+
+# Token store file path (absolute or relative to this config file).
+# See token_store.yaml.example for format.
+token_store_path: token_store.yaml
