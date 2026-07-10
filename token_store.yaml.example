@@ -1,0 +1,15 @@
+# token_store.yaml.example
+#
+# Maps identity provider UPN / preferred_username values to iTop REST API tokens.
+# Copy to token_store.yaml (chmod 600) and fill in real values.
+# This file is read on every token verification (cached in memory for
+# the duration of the process -- restart the server after changes).
+#
+# The key must match exactly what the JWT upn_claim contains
+# (case-sensitive). Check with: jwt.io or "openssl base64 -d" on the
+# JWT payload.
+
+users:
+  john.doe@example.com: itop_rest_token_for_john
+  jane.smith@example.com: itop_rest_token_for_jane
+  svc-automation@example.com: itop_rest_token_for_svc
