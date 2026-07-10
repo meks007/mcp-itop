@@ -22,3 +22,7 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# OAuth runtime secrets (never commit real configs)
+oauth_config.yaml
+token_store.yaml
