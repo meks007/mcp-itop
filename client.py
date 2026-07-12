@@ -20,6 +20,14 @@ from config import (
 _http_client: httpx.AsyncClient | None = None
 
 
+def _redact_secret(value: object, visible_chars: int = 6) -> str:
+    """Mask a secret while retaining its final characters for identification."""
+    secret = str(value)
+    if len(secret) <= visible_chars:
+        return "***REDACTED***"
+    return f"***REDACTED***{secret[-visible_chars:]}"
+
+
 def _get_http_client() -> httpx.AsyncClient:
     global _http_client
     if _http_client is None:
@@ -32,7 +40,7 @@ def _redact_form_data(data: dict) -> dict:
     redacted = dict(data)
     for key in ("auth_token", "auth_pwd"):
         if key in redacted and redacted[key]:
-            redacted[key] = "***REDACTED***"
+            redacted[key] = _redact_secret(redacted[key])
     return redacted
 
 
