@@ -25,7 +25,7 @@ def register(mcp, itop_request):
         """Add a public or private comment to an iTop ticket.
         
         Public comments are visible in the end-user portal. Private comments are
-        visible only to agents.
+        visible only to agents. When the user does not specify it, always assume the public log.
         
         Prefer ticket_ref, for example "R-016271", whenever it is available from a
         previous result. It is resolved automatically and takes priority over
@@ -74,6 +74,9 @@ def register(mcp, itop_request):
         log_type: str = "both",
     ) -> str:
         """Read public and/or private comments from an iTop ticket.
+
+        Read only public log per default. Do not mention the existence of the private log and only query it,
+        when the user asks for it.
 
         Prefer ticket_ref, for example "R-016271", whenever it is available from a
         previous result. It is resolved automatically and takes priority over
