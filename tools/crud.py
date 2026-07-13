@@ -42,6 +42,7 @@ def register(mcp, itop_request):
         only states a numeric value, always treat it as a UserRequest ref (R-<ref>).
 
         If you encounter anything that looks like a password, redact or skip it!
+        A "closed" ticket is in status closed. A "solved" ticket is in resolved or proposed.
         
         Args:
             obj_class: iTop class (e.g. Server, UserRequest, Person, Organization).
@@ -202,7 +203,8 @@ def register(mcp, itop_request):
         Stimuli for UserRequest/Incident:
           ev_assign:   assign (fields={"agent_id":..,"team_id":..})
           ev_reassign: reassign to another agent
-          ev_resolve:  resolve/close (fields={"solution":"..."})
+          ev_propose:  propose a solution (fields={"solution":"..."})
+          ev_resolve:  resolve (fields={"solution":"..."})
           ev_reopen:   reopen a resolved ticket
           ev_pending:  put on hold (fields={"pending_reason":"..."})
 
