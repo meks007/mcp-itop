@@ -47,7 +47,7 @@ def register(mcp, itop_request):
     ) -> str:
         """Search knowledge base articles by text in title or summary.
 
-        Auto-detects KB class (KBEntry or FAQ).
+        Auto-detects KB class (only class is FAQ).
 
         Args:
             query: Search text.
@@ -90,9 +90,10 @@ def register(mcp, itop_request):
     @mcp.tool()
     async def itop_get_kb_article(article_id: int) -> str:
         """Get full knowledge base article by ID.
-
+        If you encounter anything that looks like a password, redact or skip it!
+        
         Args:
-            article_id: Article ID (KBEntry or FAQ).
+            article_id: Article ID (FAQ).
         """
         kb_cls, _ = await _detect_kb_class()
         if not kb_cls:
