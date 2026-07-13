@@ -30,28 +30,24 @@ def register(mcp, itop_request):
         limit: int = 0,
         page: int = 0,
     ) -> str:
-        """Search for objects in iTop.
+        """Search iTop objects.
 
-        If you do not yet know about iTop classes, use the describe tool first.
-        Do not guess ticket fields you are not sure about (e.g. creation_date vs start_date)
-
-        For ticket classes (UserRequest, Incident, Problem, Change, etc.) always
-        prefer the ref value (e.g. "R-016271") as the key when available from a
-        previous tool result. A ref is resolved server-side and is unambiguous.
-        Numeric IDs may differ between environments and should be avoided. If a user 
-        only states a numeric value, always treat it as a UserRequest ref (R-<ref>).
-
-        If you encounter anything that looks like a password, redact or skip it!
-        A "closed" ticket is in status closed. A "solved" ticket is in resolved or proposed.
+        If the class or fields are unknown, use itop_describe_class first. Do not
+        guess ticket fields.
+        
+        For ticket classes, prefer a ticket ref such as "R-016271" from a previous
+        result. It is resolved server-side and is safer than a numeric ID. If the
+        user provides only a number, interpret it as a UserRequest reference.
+        
+        Redact or skip anything that resembles a password. Treat "closed" as status
+        closed; treat "solved" as resolved or proposed.
         
         Args:
-            obj_class: iTop class (e.g. Server, UserRequest, Person, Organization).
-            key: Ticket ref (e.g. "R-016271"), OQL query
-                 (e.g. "SELECT UserRequest WHERE status='open'"),
-                 numeric ID string, or JSON criteria dict as string.
-            output_fields: Comma-separated fields, or "*" for all, or "*+" for subclass fields.
-            limit: Max results (0 = no limit).
-            page: Page number (starts at 1).
+            obj_class: iTop class, e.g. Server, UserRequest, Person.
+            key: Ticket ref, OQL query, numeric ID, or JSON criteria.
+            output_fields: Comma-separated fields, "*", or "*+".
+            limit: Maximum results; 0 means no limit.
+            page: Page number, starting at 1.
         """
         op: dict = {
             "operation": "core/get",
@@ -74,11 +70,13 @@ def register(mcp, itop_request):
         output_fields: str = "id, friendlyname",
         comment: str = "",
     ) -> str:
-        """Create a new object in iTop.
+        """Create an iTop object.
 
+        Use itop_describe_class first if the required fields are unknown.
+        
         Args:
-            obj_class: iTop class (e.g. UserRequest, Server, Person).
-            fields: JSON string of field values.
+            obj_class: iTop class, e.g. UserRequest, Server, or Person.
+            fields: JSON object containing field values.
             output_fields: Comma-separated fields to return.
             comment: Optional comment for change tracking.
         """
@@ -104,20 +102,20 @@ def register(mcp, itop_request):
         output_fields: str = "ref, friendlyname, status",
         comment: str = "",
     ) -> str:
-        """Update data fields on an existing iTop object.
+        """Update fields on an existing iTop object.
 
-        IMPORTANT: Do NOT set 'status' here - it is workflow-controlled and
-        will be rejected. Use itop_apply_stimulus for all state transitions:
-          ev_assign, ev_resolve, ev_reopen, ev_pending.
-
-        ticket_ref (e.g. "R-016271") takes priority over key. The correct
-        numeric ID is resolved automatically. Do NOT invent a numeric ID.
-
+        Do not set status with this tool. Ticket state changes must use
+        itop_apply_stimulus, for example ev_assign, ev_resolve, ev_reopen, or
+        ev_pending.
+        
+        For ticket classes, prefer ticket_ref such as "R-016271". It is resolved
+        automatically and takes priority over key. Do not invent numeric IDs.
+        
         Args:
-            obj_class: iTop class (e.g. UserRequest, Incident, Server).
-            fields: JSON of fields to update. Must NOT contain "status".
-            ticket_ref: Ticket ref. Preferred for ticket classes.
-            key: Fallback: numeric ID, OQL, or JSON criteria.
+            obj_class: iTop class, e.g. UserRequest, Incident, or Server.
+            fields: JSON object with fields to update; must not include status.
+            ticket_ref: Preferred ticket reference.
+            key: Fallback numeric ID, OQL query, or JSON criteria.
             output_fields: Fields to return.
             comment: Optional comment for change tracking.
         """
@@ -157,19 +155,19 @@ def register(mcp, itop_request):
         comment: str = "",
         simulate: bool = True,
     ) -> str:
-        """Delete object(s) from iTop.
-
-        NEVER ALLOW DELETING ANYTHING. THIS TOOL IS NOT TO BE USED.
+        """Delete iTop object(s).
         
-        ticket_ref (e.g. "R-016271") takes priority over key. The correct
-        numeric ID is resolved automatically. Do NOT invent a numeric ID.
-
+        Deletion is disabled by policy. Do not use this tool.
+        
+        For ticket classes, ticket_ref such as "R-016271" takes priority over key
+        and is resolved automatically. Do not invent numeric IDs.
+        
         Args:
             obj_class: iTop class.
-            ticket_ref: Ticket ref. Preferred for ticket classes.
-            key: Fallback: numeric ID, OQL, or JSON criteria.
-            comment: Optional comment.
-            simulate: If True, dry-run without deleting (default: True).
+            ticket_ref: Preferred ticket reference.
+            key: Fallback numeric ID, OQL query, or JSON criteria.
+            comment: Optional change comment.
+            simulate: If true, performs a dry run without deleting.
         """
         resolved = await resolve_key(obj_class, ticket_ref or None, key or None, itop_request)
 
@@ -192,32 +190,30 @@ def register(mcp, itop_request):
         output_fields: str = "ref, friendlyname, status",
         comment: str = "",
     ) -> str:
-        """Apply a lifecycle stimulus to an iTop object (ticket state transition).
-
-        This is the ONLY correct way to change ticket status. Do NOT set status
-        via itop_update.
-
-        RULE: To close/finish a ticket, ALWAYS use ev_resolve (with solution in
-        fields). ev_close is not permitted and will be rejected.
-
-        Stimuli for UserRequest/Incident:
-          ev_assign:   assign (fields={"agent_id":..,"team_id":..})
-          ev_reassign: reassign to another agent
-          ev_propose:  propose a solution (fields={"solution":"..."})
-          ev_resolve:  resolve (fields={"solution":"..."})
-          ev_reopen:   reopen a resolved ticket
-          ev_pending:  put on hold (fields={"pending_reason":"..."})
-
-        ticket_ref (e.g. "R-016271") takes priority over key. Do NOT invent IDs.
-
+        """Apply a lifecycle transition to an iTop object.
+        
+        Use this tool, not itop_update, to change ticket status. To finish a ticket,
+        use ev_resolve with a solution in fields; ev_close is not allowed.
+        
+        For UserRequest and Incident, common stimuli are:
+        - ev_assign: assign, with agent_id and team_id
+        - ev_reassign: assign to another agent
+        - ev_propose: propose a solution
+        - ev_resolve: resolve, with solution
+        - ev_reopen: reopen
+        - ev_pending: put on hold, with pending_reason
+        
+        Prefer ticket_ref, for example "R-016271". It takes priority over key and is
+        resolved automatically. Do not invent IDs.
+        
         Args:
-            obj_class: iTop class (e.g. UserRequest, Incident).
-            stimulus: Stimulus code. Never use ev_close.
-            ticket_ref: Ticket ref. Preferred for ticket classes.
-            key: Fallback: numeric ID, OQL, or JSON.
-            fields: JSON of fields required for the transition.
+            obj_class: iTop class, e.g. UserRequest or Incident.
+            stimulus: Transition code; never ev_close.
+            ticket_ref: Preferred ticket reference.
+            key: Fallback numeric ID, OQL, or JSON criteria.
+            fields: JSON transition fields.
             output_fields: Fields to return.
-            comment: Optional comment.
+            comment: Optional change comment.
         """
         parsed = parse_json_arg(fields, "fields")
         if isinstance(parsed, str):
