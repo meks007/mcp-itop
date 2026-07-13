@@ -32,11 +32,15 @@ def register(mcp, itop_request):
     ) -> str:
         """Search for objects in iTop.
 
+        If you do not yet know about iTop classes, use the describe tool first.
+        Do not guess ticket fields you are not sure about (e.g. creation_date vs start_date)
+
         For ticket classes (UserRequest, Incident, Problem, Change, etc.) always
         prefer the ref value (e.g. "R-016271") as the key when available from a
         previous tool result. A ref is resolved server-side and is unambiguous.
-        Numeric IDs may differ between environments and should be avoided.
-
+        Numeric IDs may differ between environments and should be avoided. If a user 
+        only states a numeric value, always treat it as a UserRequest ref (R-<ref>).
+        
         Args:
             obj_class: iTop class (e.g. Server, UserRequest, Person, Organization).
             key: Ticket ref (e.g. "R-016271"), OQL query
@@ -152,6 +156,8 @@ def register(mcp, itop_request):
     ) -> str:
         """Delete object(s) from iTop.
 
+        NEVER ALLOW DELETING ANYTHING. THIS TOOL IS NOT TO BE USED.
+        
         ticket_ref (e.g. "R-016271") takes priority over key. The correct
         numeric ID is resolved automatically. Do NOT invent a numeric ID.
 
