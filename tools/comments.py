@@ -71,7 +71,7 @@ def register(mcp, itop_request):
         ticket_class: str,
         ticket_ref: Optional[str] = None,
         ticket_id: Optional[Union[int, str]] = None,
-        log_type: str = "both",
+        log_type: str = "public",
     ) -> str:
         """Read public and/or private comments from an iTop ticket.
 
