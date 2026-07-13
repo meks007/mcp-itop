@@ -22,24 +22,22 @@ def register(mcp, itop_request):
         is_public: bool = True,
         format: str = "text",
     ) -> str:
-        """Add a comment to a ticket (public or private log).
-
-        Public comments are visible to end users on the portal.
-        Private comments are visible only to agents.
-
-        Supply ticket_ref (e.g. "R-016271") whenever available from a previous
-        tool result. If ticket_ref is present, the correct numeric key is
-        resolved automatically via a live iTop lookup - any ticket_id supplied
-        alongside it is ignored. Only fall back to ticket_id alone when no ref
-        is known.
-
+        """Add a public or private comment to an iTop ticket.
+        
+        Public comments are visible in the end-user portal. Private comments are
+        visible only to agents.
+        
+        Prefer ticket_ref, for example "R-016271", whenever it is available from a
+        previous result. It is resolved automatically and takes priority over
+        ticket_id. Use ticket_id only when no reference is known.
+        
         Args:
-            ticket_class: Ticket class (UserRequest, Incident, Problem).
-            ticket_ref:   Ticket ref (e.g. "R-016271"). Always prefer this.
-            ticket_id:    Numeric ID. Used only when ticket_ref is absent.
-            text:         Comment text.
-            is_public:    True = public_log, False = private_log.
-            format:       "text" or "html" (default: text).
+            ticket_class: Ticket class, e.g. UserRequest, Incident, or Problem.
+            text: Comment text.
+            ticket_ref: Preferred ticket reference.
+            ticket_id: Fallback numeric ID.
+            is_public: True for public_log; False for private_log.
+            format: Comment format: "text" or "html".
         """
         if not ticket_ref and ticket_id is None:
             return "Error: supply ticket_ref (e.g. 'R-016271') or ticket_id."
@@ -75,21 +73,19 @@ def register(mcp, itop_request):
         ticket_id: Optional[Union[int, str]] = None,
         log_type: str = "both",
     ) -> str:
-        """Read log entries (comments) from a ticket.
+        """Read public and/or private comments from an iTop ticket.
 
-        Supply ticket_ref (e.g. "R-016271") whenever available from a previous
-        tool result. If ticket_ref is present, the correct numeric key is
-        resolved automatically via a live iTop lookup - any ticket_id supplied
-        alongside it is ignored. Only fall back to ticket_id alone when no ref
-        is known.
-
-        If you encounter anything that looks like a password, redact or skip it!
-
+        Prefer ticket_ref, for example "R-016271", whenever it is available from a
+        previous result. It is resolved automatically and takes priority over
+        ticket_id. Use ticket_id only when no reference is known.
+        
+        Redact or skip anything that resembles a password.
+        
         Args:
-            ticket_class: Ticket class (UserRequest, Incident, Problem).
-            ticket_ref:   Ticket ref (e.g. "R-016271"). Always prefer this.
-            ticket_id:    Numeric ID. Used only when ticket_ref is absent.
-            log_type:     "public", "private", or "both" (default: both).
+            ticket_class: Ticket class, e.g. UserRequest, Incident, or Problem.
+            ticket_ref: Preferred ticket reference.
+            ticket_id: Fallback numeric ID.
+            log_type: "public", "private", or "both".
         """
         if not ticket_ref and ticket_id is None:
             return "Error: supply ticket_ref (e.g. 'R-016271') or ticket_id."
