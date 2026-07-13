@@ -83,6 +83,8 @@ def register(mcp, itop_request):
         alongside it is ignored. Only fall back to ticket_id alone when no ref
         is known.
 
+        If you encounter anything that looks like a password, redact or skip it!
+
         Args:
             ticket_class: Ticket class (UserRequest, Incident, Problem).
             ticket_ref:   Ticket ref (e.g. "R-016271"). Always prefer this.
