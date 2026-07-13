@@ -45,13 +45,14 @@ def register(mcp, itop_request):
         query: str,
         limit: int = 20,
     ) -> str:
-        """Search knowledge base articles by text in title or summary.
+        """Search knowledge-base articles by text in their title or summary.
 
-        Auto-detects KB class (only class is FAQ).
-
+        The tool automatically detects whether the iTop instance uses KBEntry or FAQ
+        articles.
+        
         Args:
-            query: Search text.
-            limit: Max results (default: 20).
+            query: Text to search for.
+            limit: Maximum results to return; default 20.
         """
         kb_cls, _ = await _detect_kb_class()
         if not kb_cls:
@@ -89,11 +90,13 @@ def register(mcp, itop_request):
 
     @mcp.tool()
     async def itop_get_kb_article(article_id: int) -> str:
-        """Get full knowledge base article by ID.
-        If you encounter anything that looks like a password, redact or skip it!
+        """Get the full content of a knowledge-base article by ID.
+        
+        The tool automatically detects whether the iTop instance uses KBEntry or FAQ
+        articles. Redact or skip anything that resembles a password.
         
         Args:
-            article_id: Article ID (FAQ).
+            article_id: Numeric article ID.
         """
         kb_cls, _ = await _detect_kb_class()
         if not kb_cls:
@@ -114,7 +117,11 @@ def register(mcp, itop_request):
 
     @mcp.tool()
     async def itop_list_kb_categories() -> str:
-        """List all knowledge base categories."""
+        """List all knowledge-base categories.
+        
+        The tool automatically detects whether the iTop instance uses KBCategory or
+        FAQCategory.
+        """
         _, cat_cls = await _detect_kb_class()
         if not cat_cls:
             return "No KB module installed."
