@@ -27,7 +27,7 @@ def register(mcp, itop_request):
         obj_class: str,
         key: str,
         output_fields: str = "*",
-        limit: int = 0,
+        limit: int = 25,
         page: int = 0,
     ) -> str:
         """Search iTop objects.
