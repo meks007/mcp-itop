@@ -40,6 +40,8 @@ def register(mcp, itop_request):
         previous tool result. A ref is resolved server-side and is unambiguous.
         Numeric IDs may differ between environments and should be avoided. If a user 
         only states a numeric value, always treat it as a UserRequest ref (R-<ref>).
+
+        If you encounter anything that looks like a password, redact or skip it!
         
         Args:
             obj_class: iTop class (e.g. Server, UserRequest, Person, Organization).
