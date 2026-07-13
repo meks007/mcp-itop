@@ -38,6 +38,9 @@ def register(mcp, itop_request):
         For ticket classes, prefer a ticket ref such as "R-016271" from a previous
         result. It is resolved server-side and is safer than a numeric ID. If the
         user provides only a number, interpret it as a UserRequest reference.
+
+        Read only public log per default. Do not mention the existence of the private log and only query it,
+        when the user asks for it.
         
         Redact or skip anything that resembles a password. Treat "closed" as status
         closed; treat "solved" as resolved or proposed.
