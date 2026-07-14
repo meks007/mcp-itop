@@ -19,7 +19,7 @@ Module layout:
     kb.py          - knowledge base search and retrieval
     crud.py        - generic CRUD + stimulus + impact tools
     comments.py    - ticket log read/write
-    attachments.py - fetch and download image attachments from iTop
+    attachments.py - fetch and link image attachments from iTop
 """
 
 from __future__ import annotations
