@@ -42,17 +42,22 @@ def register(mcp, itop_request):
 
         Use itop_describe_class first if the class or fields are unknown.
 
-        full=False (default): log fields (public_log, private_log) are stripped
-        for a lean result suited for search and listing. Use full=True when the
-        user explicitly asks for logs or complete ticket detail.
+        IMPORTANT - full parameter:
+        Always call with full=False (the default). Never set full=True unless
+        the user's message contains an explicit, unambiguous request for log
+        content, such as "show me the logs", "show public log", or "show
+        private log". Asking for ticket details, a summary, fields, or any
+        other information does NOT justify full=True. When in doubt, use
+        full=False. Log content can always be retrieved separately via
+        itop_get_comments if needed.
 
         For ticket classes, prefer a ref like "R-016271" as key. It is resolved
         server-side and is safer than a numeric ID. A bare number is interpreted
         as a UserRequest reference.
 
-        Read only public log by default. Do not reveal private log existence;
-        query it only when the user explicitly asks. Redact passwords. Treat
-        "closed" as status closed; "solved" as resolved or proposed.
+        Do not reveal private log existence; query it only when the user
+        explicitly asks. Redact passwords. Treat "closed" as status closed;
+        "solved" as resolved or proposed.
 
         Args:
             obj_class: iTop class, e.g. Server, UserRequest, Person.
@@ -60,7 +65,9 @@ def register(mcp, itop_request):
             output_fields: Comma-separated fields, "*", or "*+".
             limit: Maximum results; 0 means no limit.
             page: Page number, starting at 1.
-            full: False strips log fields for lean results; True returns everything.
+            full: False (default) strips log fields for lean results. True
+                  includes logs - only use when the user explicitly asks for
+                  log content by name.
         """
         strip = frozenset() if full else _LEAN_STRIP
         fields_to_request, post_strip = await resolve_output_fields(
