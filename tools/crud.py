@@ -51,9 +51,15 @@ def register(mcp, itop_request, get_token):
         full=False. Log content can always be retrieved separately via
         itop_get_comments if needed.
 
-        For ticket classes, prefer a ref like "R-016271" as key. It is resolved
-        server-side and is safer than a numeric ID. A bare number is interpreted
-        as a UserRequest reference.
+        Key interpretation for ticket classes (UserRequest, Incident, etc.):
+        - A fully-formed ref like "R-016271" is used directly as a ref lookup.
+        - A bare number like "15525" or 15525 is treated as a ticket ref number
+          and automatically converted to the canonical ref format with the
+          class-specific prefix and 6-digit zero-padding, e.g. "R-015525".
+          Never pass a bare number as a database ID for ticket classes -- the
+          ref lookup is always preferred because ticket numbers and database IDs
+          differ in iTop.
+        - An OQL query string or JSON criteria dict is passed through as-is.
 
         Do not reveal private log existence; query it only when the user
         explicitly asks. Redact passwords. Treat "closed" as status closed;
@@ -70,7 +76,7 @@ def register(mcp, itop_request, get_token):
 
         Args:
             obj_class: iTop class, e.g. Server, UserRequest, Person.
-            key: Ticket ref, OQL query, numeric ID, or JSON criteria.
+            key: Ticket ref ("R-016271"), bare number (15525), OQL, or JSON.
             output_fields: Comma-separated fields, "*", or "*+".
             limit: Maximum results; 0 means no limit.
             page: Page number, starting at 1.
