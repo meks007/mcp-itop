@@ -57,7 +57,7 @@ def _is_image(content_type: str) -> bool:
 def _download_url(attachment_id: str | int) -> str:
     """Build the ajax.document.php download URL for a given attachment ID."""
     return (
-        f"{ITOP_URL}/pages/ajax.document.php"
+        f"{ITOP_URL}/webservices/ajax.document.php"
         f"?operation=download_document&id={attachment_id}"
     )
 
