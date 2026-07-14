@@ -10,7 +10,6 @@ from typing import Union
 from helpers import (
     apply_field_strip,
     ensure_ref_field,
-    extract_objects,
     format_objects,
     is_bare_number,
     parse_json_arg,
@@ -27,7 +26,7 @@ from config import DEFAULT_COMMENT
 _LEAN_STRIP: frozenset[str] = frozenset({"private_log"})
 
 
-def register(mcp, itop_request, get_token):
+def register(mcp, itop_request):
     """Register all CRUD tools on the given mcp instance."""
 
     @mcp.tool()
@@ -50,8 +49,6 @@ def register(mcp, itop_request, get_token):
         For tickets, a full ref (R-016271) is direct. A bare number (15525) is resolved through Ticket to the real class and ref; use obj_class="Ticket" if unknown. OQL and JSON criteria pass through unchanged.
 
         Redact passwords. Treat "closed" as closed and "solved" as resolved or proposed.
-
-        If output includes Images, show every image's filename, MIME type, available size, and clickable download URL. Do not download, omit, or summarize image attachments.
         """
         # Resolve bare numbers and unknown class via Ticket base class lookup
         obj_class, resolved_key = await resolve_ticket_ref(obj_class, key, itop_request)
@@ -77,28 +74,7 @@ def register(mcp, itop_request, get_token):
         if post_strip:
             apply_field_strip(result, post_strip)
 
-        output = format_objects(result)
-
-        # Append image links for ticket classes so the user can open them
-        # directly. Images are not downloaded by the LLM.
-        if obj_class in CLASSES_WITH_REF and result.get("code", -1) == 0:
-            from tools.attachments import fetch_image_links
-            token = get_token()
-            for obj in extract_objects(result):
-                obj_id = obj["key"]
-                links = await fetch_image_links(obj_class, obj_id, token, itop_request)
-                if links:
-                    ref = (obj["fields"].get("ref") or obj_id)
-                    output += "\n\n--- Images for " + str(ref) + " ---"
-                    for lnk in links:
-                        output += (
-                            "\n  [" + lnk["source"] + "] "
-                            + lnk["filename"]
-                            + " (" + lnk["mimetype"] + ")"
-                            + "\n    " + lnk["url"]
-                        )
-
-        return output
+        return format_objects(result)
 
     @mcp.tool()
     async def itop_create(
