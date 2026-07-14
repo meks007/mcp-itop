@@ -80,19 +80,24 @@ def registry_get_fields(cls: str) -> frozenset:
 
 
 def _seed_field_cache(cls: str, fields: dict) -> None:
-    """Grow the field inventory for a class from a live response fields dict."""
+    """Grow the field inventory for a class from a live response fields dict.
+
+    Already-known fields are always kept (union, never removed).
+    Only genuinely new fields (not yet in the registry) are added and logged.
+    """
     entry = _registry_entry(cls)
     if fields:
-        before = len(entry["fields"])
-        entry["fields"] = entry["fields"] | frozenset(fields.keys())
+        incoming = frozenset(fields.keys())
+        before_set = entry["fields"]                  # snapshot before update
+        new = incoming - before_set                   # truly new fields only
+        entry["fields"] = before_set | incoming       # union: existing + incoming
         entry["exists"] = True
-        after = len(entry["fields"])
         logger.debug(
             "[registry] seed_field_cache cls=%r fields_before=%d fields_after=%d new=%r",
             cls,
-            before,
-            after,
-            sorted(frozenset(fields.keys()) - (entry["fields"] - frozenset(fields.keys()))),
+            len(before_set),
+            len(entry["fields"]),
+            sorted(new),
         )
 
 
