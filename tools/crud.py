@@ -46,6 +46,11 @@ def register(mcp, itop_request):
         explicitly mentioned. Keep full=False for brief or summary queries.
         Do not reveal private logs without an explicit user request even when full=True.
 
+        READING TICKET LOGS: public_log and private_log are part of the full
+        record. To read comments or log entries, call itop_get with full=True.
+        There is no separate log tool -- do NOT attempt to call itop_get_log or
+        any other log-specific tool; use itop_get with full=True instead.
+
         For tickets, a full ref (R-016271) is direct. A bare number (15525) is resolved through Ticket to the real class and ref; use obj_class="Ticket" if unknown. OQL and JSON criteria pass through unchanged.
 
         Redact passwords. Treat "closed" as closed and "solved" as resolved or proposed.
