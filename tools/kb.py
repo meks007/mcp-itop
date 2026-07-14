@@ -4,74 +4,110 @@ Knowledge base tools: search, get article, list categories.
 
 from __future__ import annotations
 
-from helpers import extract_objects, format_objects, format_table, str_or
+from helpers import (
+    ensure_class_exists,
+    extract_objects,
+    format_objects,
+    format_table,
+    registry_get_meta,
+    registry_set_meta,
+    str_or,
+)
 
-# Auto-detected KB class (KBEntry or FAQ) - cached after first detection
-_KB_CLASS: str | None = None
-_KB_CATEGORY_CLASS: str | None = None
+# Candidate class pairs: (article_class, category_class)
+_KB_CANDIDATES = ["KBEntry", "FAQ"]
+_KB_CAT_MAP = {"KBEntry": "KBCategory", "FAQ": "FAQCategory"}
+_KB_TEXT_FIELD_CANDIDATES = ["description", "summary", "contents", "solution", "document"]
 
 
 def register(mcp, itop_request):
     """Register all KB tools on the given mcp instance."""
 
-    async def _detect_kb_class() -> tuple[str, str]:
-        """Detect available KB class (KBEntry or FAQ)."""
-        global _KB_CLASS, _KB_CATEGORY_CLASS
-        if _KB_CLASS is not None:
-            return _KB_CLASS, _KB_CATEGORY_CLASS  # type: ignore
+    async def _kb_class() -> str:
+        """Return the confirmed KB article class, probing once if needed."""
+        return await ensure_class_exists(_KB_CANDIDATES, itop_request)
 
-        for cls, cat_cls in [("KBEntry", "KBCategory"), ("FAQ", "FAQCategory")]:
+    async def _kb_text_field(kb_cls: str) -> str:
+        """Return the confirmed text body field for kb_cls.
+
+        Result is stored in the universal class registry under meta key
+        'text_field' so the probe runs at most once per server lifetime.
+        """
+        cached = registry_get_meta(kb_cls, "text_field")
+        if cached:
+            return cached
+        for field in _KB_TEXT_FIELD_CANDIDATES:
             r = await itop_request({
                 "operation": "core/get",
-                "class": cls,
-                "key": f"SELECT {cls}",
-                "output_fields": "id",
+                "class": kb_cls,
+                "key": f"SELECT {kb_cls}",
+                "output_fields": field,
                 "limit": "1",
             })
             if r.get("code") == 0:
-                _KB_CLASS = cls
-                _KB_CATEGORY_CLASS = cat_cls
-                return cls, cat_cls
+                registry_set_meta(kb_cls, "text_field", field)
+                return field
+        # Last resort -- keeps title search working even if body probe fails
+        registry_set_meta(kb_cls, "text_field", "description")
+        return "description"
 
-        _KB_CLASS = ""
-        _KB_CATEGORY_CLASS = ""
-        return "", ""
-
-    def _get_kb_fields() -> str:
-        return "id,title,summary,category_name,status"
+    def _kb_list_fields(text_field: str) -> str:
+        return f"id,title,{text_field},category_name,status"
 
     @mcp.tool()
     async def itop_search_kb(
         query: str,
+        oql: str = "",
         limit: int = 20,
     ) -> str:
-        """Search knowledge-base articles by text in their title or summary.
+        """Search knowledge-base articles by text in title or body.
 
-        The tool automatically detects whether the iTop instance uses KBEntry or FAQ
-        articles.
-        
+        Auto-detects KBEntry vs FAQ and probes which field holds the article
+        body (description, summary, contents, solution, document). Single
+        quotes in query are stripped -- iTop OQL has no backslash-escape support.
+
+        Supply oql to bypass the auto-built LIKE query entirely (same pattern
+        as itop_get). When oql is provided, query is used only in the header.
+        Call itop_describe_class with the KB class first if the exact fields
+        are known.
+
         Args:
-            query: Text to search for.
-            limit: Maximum results to return; default 20.
+            query: Search text. Single quotes stripped before OQL use.
+            oql: Optional full OQL override, e.g. "SELECT KBEntry WHERE title LIKE '%vpn%'".
+            limit: Maximum results; default 20.
         """
-        kb_cls, _ = await _detect_kb_class()
+        kb_cls = await _kb_class()
         if not kb_cls:
             return "No KB module installed (tried KBEntry, FAQ)."
 
-        safe = query.replace("'", "\\'")
-        oql = f"SELECT {kb_cls} WHERE title LIKE '%{safe}%' OR summary LIKE '%{safe}%'"
+        text_field = await _kb_text_field(kb_cls)
+
+        if oql:
+            effective_oql = oql
+        else:
+            safe = query.replace("'", "")
+            effective_oql = (
+                f"SELECT {kb_cls} WHERE title LIKE '%{safe}%'"
+                f" OR {text_field} LIKE '%{safe}%'"
+            )
 
         result = await itop_request({
             "operation": "core/get",
             "class": kb_cls,
-            "key": oql,
-            "output_fields": _get_kb_fields(),
+            "key": effective_oql,
+            "output_fields": _kb_list_fields(text_field),
             "limit": str(limit),
         })
 
         articles = extract_objects(result)
         if not articles:
-            return f"No KB articles found for query '{query}'."
+            return (
+                f"No KB articles found for query '{query}'.\n"
+                f"OQL used: {effective_oql}\n"
+                f"Body field probed: {text_field}\n"
+                "Tip: call itop_describe_class with the KB class to verify available "
+                "fields, then retry with an explicit oql parameter."
+            )
 
         header = ["ID", "Title", "Category", "Status"]
         rows = []
@@ -91,14 +127,13 @@ def register(mcp, itop_request):
     @mcp.tool()
     async def itop_get_kb_article(article_id: int) -> str:
         """Get the full content of a knowledge-base article by ID.
-        
-        The tool automatically detects whether the iTop instance uses KBEntry or FAQ
-        articles. Redact or skip anything that resembles a password.
-        
+
+        Auto-detects KBEntry vs FAQ. Redact or skip anything resembling a password.
+
         Args:
             article_id: Numeric article ID.
         """
-        kb_cls, _ = await _detect_kb_class()
+        kb_cls = await _kb_class()
         if not kb_cls:
             return "No KB module installed (tried KBEntry, FAQ)."
 
@@ -109,8 +144,7 @@ def register(mcp, itop_request):
             "output_fields": "*+",
         })
 
-        articles = extract_objects(result)
-        if not articles:
+        if not extract_objects(result):
             return f"KB article #{article_id} not found."
 
         return format_objects(result)
@@ -118,13 +152,14 @@ def register(mcp, itop_request):
     @mcp.tool()
     async def itop_list_kb_categories() -> str:
         """List all knowledge-base categories.
-        
-        The tool automatically detects whether the iTop instance uses KBCategory or
-        FAQCategory.
+
+        Auto-detects KBCategory vs FAQCategory.
         """
-        _, cat_cls = await _detect_kb_class()
-        if not cat_cls:
+        kb_cls = await _kb_class()
+        if not kb_cls:
             return "No KB module installed."
+
+        cat_cls = _KB_CAT_MAP.get(kb_cls, "KBCategory")
 
         result = await itop_request({
             "operation": "core/get",
