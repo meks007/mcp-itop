@@ -223,6 +223,35 @@ def is_bare_number(key: Any) -> bool:
     return False
 
 
+def ensure_ref_field(obj_class: str, output_fields: str) -> str:
+    """Inject 'ref' and strip synthetic/redundant fields for ticket classes.
+
+    For classes in CLASSES_WITH_REF:
+    - 'ref' is injected at the front if not already present.
+    - 'id' is always removed (redundant once ref is present).
+    - Synthetic MCP-injected fields (e.g. 'link') are always removed because
+      they do not exist as iTop attributes and would cause API errors.
+
+    '*' and '*+' are passed through unchanged (iTop handles field expansion).
+    Non-ticket classes only have synthetic fields stripped.
+    """
+    if output_fields not in ("*", "*+"):
+        fields = [f.strip() for f in output_fields.split(",") if f.strip()]
+        fields = [f for f in fields if f not in _SYNTHETIC_FIELDS]
+        output_fields = ", ".join(fields)
+
+    if output_fields in ("*", "*+"):
+        return output_fields
+    if obj_class not in CLASSES_WITH_REF:
+        return output_fields
+
+    fields = [f.strip() for f in output_fields.split(",") if f.strip()]
+    fields = [f for f in fields if f != "id"]
+    if "ref" not in fields:
+        fields.insert(0, "ref")
+    return ", ".join(fields)
+
+
 async def resolve_ticket_by_number(number: int, itop_request) -> tuple[str, str] | tuple[None, None]:
     """Resolve a bare ticket number to (obj_class, ref) via a single OQL call.
 
