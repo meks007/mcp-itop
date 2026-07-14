@@ -19,7 +19,7 @@ Module layout:
     kb.py          - knowledge base search and retrieval
     crud.py        - generic CRUD + stimulus + impact tools
     comments.py    - ticket log read/write
-    attachments.py - fetch and link image attachments from iTop
+    attachments.py - image and file attachment tools and MCP resources
 """
 
 from __future__ import annotations
@@ -116,9 +116,9 @@ def _get_token() -> str:
 
 # -- Register all tools ---------------------------------------------------
 _analytics.register(mcp, itop_request)
-_attachments.register(mcp, _get_token, itop_request)
+_attachments.register(mcp, itop_request)
 _kb.register(mcp, itop_request)
-_crud.register(mcp, itop_request, _get_token)
+_crud.register(mcp, itop_request)
 _comments.register(mcp, itop_request)
 
 
