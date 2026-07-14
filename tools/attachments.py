@@ -8,14 +8,18 @@ register(mcp, itop_request)
 
     Tools:
         itop_get_ticket_images(obj_class, ticket_ref, key)
-            Fetch all image attachments for a ticket via the iTop REST API.
-            Queries both Attachment (image mimetype check) and InlineImage
-            (always image). Returns combined results as MCP resource JSON:
+            List all image attachments for a ticket. Returns a plain text
+            summary with filename, mimetype and resource_uri per image.
+            Tells the LLM how many itop_download_attachment calls are needed.
+
+        itop_download_attachment(uri)
+            Download exactly one attachment by resource URI. Returns a
+            structured dict with MCP resource JSON:
             {"contents": [{"uri": "...", "mimeType": "...", "blob": "..."}]}
             blob is pure Base64 without data-URI prefix.
 
         itop_get_ticket_attachments(obj_class, ticket_ref, key)
-            Fetch all non-image file attachments for a ticket.
+            List all non-image file attachments for a ticket.
             Returns metadata and browser download links only.
 
     Resources:
@@ -101,6 +105,32 @@ async def _download_binary(url: str) -> tuple[bytes, str]:
         return response.content, mimetype
 
 
+def _parse_uri(uri: str) -> tuple[str, str] | None:
+    """Parse an itop:// resource URI into (download_url, scheme).
+
+    Supported schemes:
+      itop://attachment/<attachment_id>
+      itop://inlineimage/<secret>/<record_id>
+
+    Returns (url, uri) on success, None on unrecognised URI.
+    """
+    if uri.startswith("itop://attachment/"):
+        attachment_id = uri[len("itop://attachment/"):]
+        if not attachment_id:
+            return None
+        return _attachment_url(attachment_id), uri
+
+    if uri.startswith("itop://inlineimage/"):
+        rest = uri[len("itop://inlineimage/"):]
+        parts = rest.split("/", 1)
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            return None
+        secret, record_id = parts
+        return _inline_image_url(secret, record_id), uri
+
+    return None
+
+
 def register(mcp, itop_request):
     """Register attachment tools and resources."""
 
@@ -172,18 +202,15 @@ def register(mcp, itop_request):
         ticket_ref: str = "",
         key: str = "",
     ) -> str:
-        """Fetch all image attachments for an iTop ticket.
+        """List all image attachments for an iTop ticket.
 
         Queries both the Attachment class (image mimetype check) and the
         InlineImage class (always image). Results from both sources are
-        combined and returned with equal weight.
+        combined with equal weight.
 
-        Each image is fetched and returned as a MCP resource JSON structure:
-          {"contents": [{"uri": "...", "mimeType": "...", "blob": "..."}]}
-        blob is pure Base64 without data-URI prefix.
-
-        To download or display an image later, call resources/read with the
-        resource_uri shown for each image.
+        Returns a plain text listing with filename, mimetype and resource_uri
+        per image. After receiving this list, call itop_download_attachment
+        once per resource_uri to retrieve each image as a structured blob.
 
         For ticket classes (UserRequest, Incident, etc.) prefer ticket_ref
         (e.g. R-016271); it is resolved automatically and takes priority
@@ -224,10 +251,8 @@ def register(mcp, itop_request):
                 filename = "attachment_" + record_id
             images.append({
                 "source": "Attachment",
-                "id": record_id,
                 "filename": filename,
                 "mimetype": mimetype,
-                "url": _attachment_url(record_id),
                 "resource_uri": "itop://attachment/" + record_id,
             })
 
@@ -252,11 +277,6 @@ def register(mcp, itop_request):
                 filename = fields.get("friendlyname") or ("inlineimage_" + record_id)
             if not mimetype:
                 mimetype = "image/unknown"
-            url = (
-                _inline_image_url(secret, record_id)
-                if secret
-                else _attachment_url(record_id)
-            )
             resource_uri = (
                 "itop://inlineimage/" + secret + "/" + record_id
                 if secret
@@ -264,41 +284,86 @@ def register(mcp, itop_request):
             )
             images.append({
                 "source": "InlineImage",
-                "id": record_id,
                 "filename": filename,
                 "mimetype": mimetype,
-                "url": url,
                 "resource_uri": resource_uri,
             })
 
         if not images:
-            return "No image attachments found for " + obj_class + " " + (ticket_ref or key) + "."
+            return (
+                "No image attachments found for "
+                + obj_class + " " + (ticket_ref or key) + "."
+            )
 
-        # Fetch each image and build MCP resource JSON structure
-        contents = []
+        label = ticket_ref or key or str(resolved)
+        lines = [
+            str(len(images)) + " image attachment(s) found for "
+            + obj_class + " " + label + ".",
+            "Call itop_download_attachment once per resource_uri to retrieve each image.",
+            "",
+        ]
         for img in images:
-            try:
-                content_bytes, detected_mime = await _download_binary(img["url"])
-                blob = base64.b64encode(content_bytes).decode("ascii")
-                mime = detected_mime if detected_mime != "application/octet-stream" else img["mimetype"]
-            except Exception as exc:
-                if MCP_DEBUG:
-                    logger.debug(
-                        "itop_get_ticket_images fetch error: uri=%s exc=%s",
-                        img["resource_uri"], exc,
-                    )
-                continue
-            contents.append({
-                "uri": img["resource_uri"],
-                "mimeType": mime,
-                "blob": blob,
-            })
+            lines.append("--- " + img["filename"] + " (" + img["source"] + ") ---")
+            lines.append("  mimetype     : " + img["mimetype"])
+            lines.append("  resource_uri : " + img["resource_uri"])
 
-        if not contents:
-            return "Image attachments found but could not be downloaded for " + obj_class + " " + (ticket_ref or key) + "."
+        return "\n".join(lines)
 
-        import json as _json
-        return _json.dumps({"contents": contents}, ensure_ascii=True)
+    # ------------------------------------------------------------------
+    # Tool: itop_download_attachment
+    # ------------------------------------------------------------------
+
+    @mcp.tool()
+    async def itop_download_attachment(uri: str) -> dict:
+        """Download exactly one image attachment by its resource URI.
+
+        Call this tool once per resource_uri returned by itop_get_ticket_images.
+        Each call fetches one image and returns a structured MCP resource object:
+
+          {"contents": [{"uri": "...", "mimeType": "...", "blob": "..."}]}
+
+        blob is pure Base64 without any data-URI prefix.
+
+        Supported URI schemes:
+          itop://attachment/<attachment_id>
+          itop://inlineimage/<secret>/<record_id>
+
+        Args:
+            uri: Resource URI as returned by itop_get_ticket_images.
+        """
+        parsed = _parse_uri(uri)
+        if parsed is None:
+            return {
+                "error": "Unrecognised URI scheme. Expected itop://attachment/<id>"
+                " or itop://inlineimage/<secret>/<record_id>. Got: " + uri
+            }
+
+        url, canonical_uri = parsed
+
+        try:
+            content_bytes, mimetype = await _download_binary(url)
+        except Exception as exc:
+            if MCP_DEBUG:
+                logger.debug("itop_download_attachment error: uri=%s exc=%s", uri, exc)
+            return {"error": "Download failed for " + uri + ": " + str(exc)}
+
+        blob = base64.b64encode(content_bytes).decode("ascii")
+
+        if MCP_DEBUG:
+            logger.debug(
+                "itop_download_attachment: uri=%s mime=%s bytes=%d",
+                uri, mimetype, len(content_bytes),
+            )
+
+        return {
+            "contents": [
+                {
+                    "uri": canonical_uri,
+                    "mimeType": mimetype,
+                    "blob": blob,
+                }
+            ]
+        }
 
     # ------------------------------------------------------------------
     # Tool: itop_get_ticket_attachments
@@ -310,7 +375,7 @@ def register(mcp, itop_request):
         ticket_ref: str = "",
         key: str = "",
     ) -> str:
-        """Fetch all non-image file attachments for an iTop ticket.
+        """List all non-image file attachments for an iTop ticket.
 
         Queries the Attachment class and returns entries whose MIME type is
         not an image type (e.g. PDF, DOCX, ZIP). For image attachments use
@@ -354,14 +419,16 @@ def register(mcp, itop_request):
             if not mimetype:
                 mimetype = "application/octet-stream"
             files.append({
-                "id": record_id,
                 "filename": filename,
                 "mimetype": mimetype,
                 "url": _attachment_url(record_id),
             })
 
         if not files:
-            return "No file attachments found for " + obj_class + " " + (ticket_ref or key) + "."
+            return (
+                "No file attachments found for "
+                + obj_class + " " + (ticket_ref or key) + "."
+            )
 
         label = ticket_ref or key or str(resolved)
         lines = [
