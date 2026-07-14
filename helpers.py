@@ -6,12 +6,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Tuple
 
 from config import ITOP_URL
 
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # SLA helpers
@@ -52,31 +54,46 @@ _ITOP_CLASS_REGISTRY: dict[str, dict] = {}
 def _registry_entry(cls: str) -> dict:
     """Return (and lazily create) the registry slot for a class."""
     if cls not in _ITOP_CLASS_REGISTRY:
+        logger.debug("[registry] init slot for class=%r", cls)
         _ITOP_CLASS_REGISTRY[cls] = {"exists": None, "fields": frozenset(), "meta": {}}
     return _ITOP_CLASS_REGISTRY[cls]
 
 
 def registry_get_meta(cls: str, key: str, default: Any = None) -> Any:
     """Read arbitrary per-class metadata from the registry."""
-    return _registry_entry(cls)["meta"].get(key, default)
+    value = _registry_entry(cls)["meta"].get(key, default)
+    logger.debug("[registry] get_meta cls=%r key=%r -> %r", cls, key, value)
+    return value
 
 
 def registry_set_meta(cls: str, key: str, value: Any) -> None:
     """Write arbitrary per-class metadata into the registry."""
+    logger.debug("[registry] set_meta cls=%r key=%r value=%r", cls, key, value)
     _registry_entry(cls)["meta"][key] = value
 
 
 def registry_get_fields(cls: str) -> frozenset:
     """Return the known field inventory for a class (may be empty if not yet seen)."""
-    return _registry_entry(cls)["fields"]
+    fields = _registry_entry(cls)["fields"]
+    logger.debug("[registry] get_fields cls=%r -> %d fields known", cls, len(fields))
+    return fields
 
 
 def _seed_field_cache(cls: str, fields: dict) -> None:
     """Grow the field inventory for a class from a live response fields dict."""
     entry = _registry_entry(cls)
     if fields:
+        before = len(entry["fields"])
         entry["fields"] = entry["fields"] | frozenset(fields.keys())
         entry["exists"] = True
+        after = len(entry["fields"])
+        logger.debug(
+            "[registry] seed_field_cache cls=%r fields_before=%d fields_after=%d new=%r",
+            cls,
+            before,
+            after,
+            sorted(frozenset(fields.keys()) - (entry["fields"] - frozenset(fields.keys()))),
+        )
 
 
 async def ensure_class_exists(candidates: list[str], itop_request) -> str:
@@ -92,8 +109,10 @@ async def ensure_class_exists(candidates: list[str], itop_request) -> str:
     for cls in candidates:
         entry = _registry_entry(cls)
         if entry["exists"] is True:
+            logger.debug("[registry] ensure_class_exists cls=%r -> cached True", cls)
             return cls
         if entry["exists"] is False:
+            logger.debug("[registry] ensure_class_exists cls=%r -> cached False, skip", cls)
             continue
         r = await itop_request({
             "operation": "core/get",
@@ -106,9 +125,17 @@ async def ensure_class_exists(candidates: list[str], itop_request) -> str:
             entry["exists"] = True
             for obj_data in (r.get("objects") or {}).values():
                 _seed_field_cache(cls, obj_data.get("fields") or {})
+            logger.debug("[registry] ensure_class_exists cls=%r -> exists=True (probed)", cls)
             return cls
         else:
             entry["exists"] = False
+            logger.debug(
+                "[registry] ensure_class_exists cls=%r -> exists=False code=%r msg=%r",
+                cls,
+                r.get("code"),
+                r.get("message"),
+            )
+    logger.debug("[registry] ensure_class_exists candidates=%r -> none found", candidates)
     return ""
 
 
@@ -140,9 +167,20 @@ async def resolve_output_fields(
     No extra describe request is fired -- the cache grows naturally from every
     successful core/get response processed by apply_field_strip or format_objects.
     """
+    logger.debug(
+        "[resolve_output_fields] cls=%r output_fields=%r strip=%r",
+        obj_class,
+        output_fields,
+        sorted(strip),
+    )
     is_wildcard = output_fields in ("*", "*+")
 
     if not is_wildcard or not strip:
+        logger.debug(
+            "[resolve_output_fields] passthrough (explicit or no strip) -> %r strip=%r",
+            output_fields,
+            sorted(strip),
+        )
         return output_fields, strip
 
     cached_fields = _registry_entry(obj_class)["fields"]
@@ -155,10 +193,26 @@ async def resolve_output_fields(
                 explicit = ["ref"] + [f for f in explicit if f not in ("ref", "id")]
         if not explicit:
             # Safety valve: strip removed everything -- fall back to wildcard + post-strip
+            logger.debug(
+                "[resolve_output_fields] cls=%r warm cache but strip removed all fields, fallback to wildcard",
+                obj_class,
+            )
             return output_fields, strip
-        return ", ".join(explicit), frozenset()
+        result_fields = ", ".join(explicit)
+        logger.debug(
+            "[resolve_output_fields] cls=%r WARM cache hit, explicit fields=%r post_strip=empty",
+            obj_class,
+            result_fields,
+        )
+        return result_fields, frozenset()
 
     # Cold path: wildcard + post-strip
+    logger.debug(
+        "[resolve_output_fields] cls=%r COLD cache miss, using wildcard=%r with post_strip=%r",
+        obj_class,
+        output_fields,
+        sorted(strip),
+    )
     return output_fields, strip
 
 
@@ -181,8 +235,19 @@ def apply_field_strip(result: dict, strip: frozenset[str]) -> dict:
         if not isinstance(fields, dict):
             continue
         _seed_field_cache(cls, fields)   # seed before popping
+        stripped = [key for key in strip if key in fields]
         for key in strip:
             fields.pop(key, None)
+        if stripped:
+            logger.debug(
+                "[apply_field_strip] cls=%r stripped fields=%r", cls, stripped
+            )
+        else:
+            logger.debug(
+                "[apply_field_strip] cls=%r no fields to strip from strip set=%r",
+                cls,
+                sorted(strip),
+            )
     return result
 
 
@@ -267,6 +332,7 @@ async def resolve_ticket_by_number(number: int, itop_request) -> tuple[str, str]
     """
     suffix = str(number).zfill(6)
     oql = "SELECT Ticket WHERE ref LIKE '%" + suffix + "'"
+    logger.debug("[resolve_ticket_by_number] number=%r suffix=%r oql=%r", number, suffix, oql)
     result = await itop_request({
         "operation": "core/get",
         "class": "Ticket",
@@ -275,12 +341,25 @@ async def resolve_ticket_by_number(number: int, itop_request) -> tuple[str, str]
         "limit": "1",
     })
     if result.get("code", -1) != 0:
+        logger.debug(
+            "[resolve_ticket_by_number] number=%r -> iTop error code=%r msg=%r",
+            number,
+            result.get("code"),
+            result.get("message"),
+        )
         return None, None
     for obj_data in (result.get("objects") or {}).values():
         obj_class = obj_data.get("class") or ""
         ref = (obj_data.get("fields") or {}).get("ref") or ""
         if obj_class and ref:
+            logger.debug(
+                "[resolve_ticket_by_number] number=%r -> resolved class=%r ref=%r",
+                number,
+                obj_class,
+                ref,
+            )
             return obj_class, ref
+    logger.debug("[resolve_ticket_by_number] number=%r -> not found", number)
     return None, None
 
 
@@ -302,23 +381,53 @@ async def resolve_ticket_ref(
     This function is the single entry point for all tools that accept a
     user-supplied ticket identifier without knowing the class upfront.
     """
+    logger.debug("[resolve_ticket_ref] cls=%r key=%r", obj_class, key)
     parsed = parse_key(key)
 
     # Already a fully-formed ref string -- use as-is
     if isinstance(parsed, str) and _REF_PATTERN.match(parsed):
+        logger.debug(
+            "[resolve_ticket_ref] key=%r is a fully-formed ref, returning cls=%r ref=%r",
+            key,
+            obj_class,
+            parsed,
+        )
         return obj_class, {"ref": parsed}
 
     # Bare number -- probe Ticket base class to find real class + ref
     if is_bare_number(parsed):
         number = int(parsed) if isinstance(parsed, str) else parsed
+        logger.debug(
+            "[resolve_ticket_ref] key=%r is bare number=%r, probing Ticket base class",
+            key,
+            number,
+        )
         found_class, found_ref = await resolve_ticket_by_number(number, itop_request)
         if found_class and found_ref:
+            logger.debug(
+                "[resolve_ticket_ref] bare number=%r resolved -> cls=%r ref=%r",
+                number,
+                found_class,
+                found_ref,
+            )
             return found_class, {"ref": found_ref}
         # Not found -- fall through and let iTop return an error naturally
         suffix = str(number).zfill(6)
-        return obj_class, "SELECT Ticket WHERE ref LIKE '%" + suffix + "'"
+        fallback_oql = "SELECT Ticket WHERE ref LIKE '%" + suffix + "'"
+        logger.debug(
+            "[resolve_ticket_ref] bare number=%r not resolved, falling back to OQL=%r",
+            number,
+            fallback_oql,
+        )
+        return obj_class, fallback_oql
 
     # OQL, JSON dict, or anything else -- pass through
+    logger.debug(
+        "[resolve_ticket_ref] key=%r parsed as %r (OQL/dict), passing through cls=%r",
+        key,
+        type(parsed).__name__,
+        obj_class,
+    )
     return obj_class, parsed
 
 
