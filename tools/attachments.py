@@ -24,7 +24,7 @@ import base64
 import httpx
 
 from config import ITOP_TIMEOUT, ITOP_URL, ITOP_VERIFY_SSL, MCP_DEBUG, logger
-from helpers import resolve_key
+from helpers import apply_field_strip, resolve_key, resolve_output_fields
 
 # ---------------------------------------------------------------------------
 # Limits
@@ -57,7 +57,7 @@ def _is_image(content_type: str) -> bool:
 def _download_url(attachment_id: str | int) -> str:
     """Build the ajax.document.php download URL for a given attachment ID."""
     return (
-        f"{ITOP_URL}/webservices/ajax.document.php"
+        f"{ITOP_URL}/pages/ajax.document.php"
         f"?operation=download_document&id={attachment_id}"
     )
 
@@ -66,14 +66,30 @@ async def _fetch_image_attachments(
     obj_class: str,
     obj_id: int | str,
     itop_request,
+    strip: frozenset[str] = frozenset({"contents"}),
 ) -> list[dict]:
     """Return image attachments for a ticket as a list of dicts.
 
-    Each dict has:
+    Uses the same resolve_output_fields / apply_field_strip pattern as
+    crud.itop_get so that:
+      - On a warm field cache: an explicit field list is sent, excluded fields
+        never travel the wire at all.
+      - On a cold cache (first call): wildcard is sent with post-response
+        stripping, and the cache is seeded for subsequent calls.
+
+    The default strip set excludes 'contents' so the binary blob is never
+    fetched during the metadata scan. Content is retrieved separately per
+    image in a second targeted request.
+
+    The strip parameter is accepted as a plain argument rather than a
+    module-level constant so callers can override it without introducing
+    new strip variables for each use-case.
+
+    Each returned dict has:
       id        - iTop attachment key (str)
       filename  - original filename (str)
       mimetype  - MIME type (str)
-      raw_bytes - decoded size in bytes (int)
+      raw_bytes - decoded byte count (int), 0 if content unavailable
       b64       - base64 string when size <= B64_INLINE_LIMIT, else None
       url       - ajax.document.php download link (str)
       note      - non-empty message when b64 is suppressed (str)
@@ -81,7 +97,12 @@ async def _fetch_image_attachments(
     Non-image attachments are silently skipped.
     Errors from iTop (e.g. Attachment class not installed) return an empty list.
     """
-    result = await itop_request({
+    # --- Step 1: metadata scan (contents blob excluded) -------------------
+    fields_to_request, post_strip = await resolve_output_fields(
+        "Attachment", "*", strip, itop_request
+    )
+
+    meta_result = await itop_request({
         "operation": "core/get",
         "class": "Attachment",
         "key": (
@@ -89,21 +110,25 @@ async def _fetch_image_attachments(
             f" WHERE item_class = '{obj_class}'"
             f" AND item_id = {obj_id}"
         ),
-        "output_fields": "filename, mimetype, contents",
+        "output_fields": fields_to_request,
     })
 
-    if result.get("code", -1) != 0:
+    if post_strip:
+        apply_field_strip(meta_result, post_strip)
+
+    if meta_result.get("code", -1) != 0:
         if MCP_DEBUG:
             logger.debug(
-                "_fetch_image_attachments error: code=%s msg=%s",
-                result.get("code"),
-                result.get("message"),
+                "_fetch_image_attachments metadata error: code=%s msg=%s",
+                meta_result.get("code"),
+                meta_result.get("message"),
             )
         return []
 
+    # --- Step 2: filter images, fetch content per image -------------------
     images: list[dict] = []
 
-    for obj_key, obj_data in (result.get("objects") or {}).items():
+    for obj_key, obj_data in (meta_result.get("objects") or {}).items():
         fields = obj_data.get("fields") or {}
         mimetype = (fields.get("mimetype") or "").strip()
 
@@ -113,12 +138,24 @@ async def _fetch_image_attachments(
         attachment_id = obj_data.get("key") or obj_key.split("::")[-1]
         filename = fields.get("filename") or f"attachment_{attachment_id}"
 
-        # iTop returns file contents as a compound {"mimetype": ..., "data": "<b64>"}
-        # or occasionally as a plain base64 string.
-        contents = fields.get("contents") or {}
-        b64_raw: str = (
-            contents.get("data", "") if isinstance(contents, dict) else str(contents)
-        )
+        # Fetch contents for this specific attachment only.
+        content_result = await itop_request({
+            "operation": "core/get",
+            "class": "Attachment",
+            "key": int(attachment_id),
+            "output_fields": "contents",
+        })
+
+        b64_raw = ""
+        if content_result.get("code", -1) == 0:
+            for _, cobj in (content_result.get("objects") or {}).items():
+                cfields = cobj.get("fields") or {}
+                contents = cfields.get("contents") or {}
+                b64_raw = (
+                    contents.get("data", "") if isinstance(contents, dict)
+                    else str(contents)
+                )
+                break
 
         try:
             raw_bytes = len(base64.b64decode(b64_raw, validate=False)) if b64_raw else 0
@@ -163,7 +200,7 @@ async def _fetch_image_attachments(
 # ---------------------------------------------------------------------------
 
 def register(mcp, get_token, itop_request):
-    """Register attachment tools. Signature extended: now also accepts itop_request."""
+    """Register attachment tools."""
 
     @mcp.tool()
     async def itop_get_ticket_images(
@@ -180,6 +217,9 @@ def register(mcp, get_token, itop_request):
           - a download link (always present)
           - an inline base64 data URI when the image is <= 100 KB
           - a note directing to itop_get_attachment when the image is > 100 KB
+
+        Metadata and content are fetched in separate requests so the binary
+        blob is never transmitted during the initial attachment scan.
 
         For ticket classes (UserRequest, Incident, etc.) prefer ticket_ref
         (e.g. "R-016271"); it is resolved automatically and takes priority
@@ -228,8 +268,8 @@ def register(mcp, get_token, itop_request):
         """Download a single image attachment from iTop and return it as a base64 data URI.
 
         Accepts an iTop ajax.document.php URL of the form:
-          .../webservices/ajax.document.php?operation=download_inlineimage&...
-          .../webservices/ajax.document.php?operation=download_document&...
+          .../pages/ajax.document.php?operation=download_inlineimage&...
+          .../pages/ajax.document.php?operation=download_document&...
 
         A HEAD request is sent first to verify the Content-Type without
         downloading the full body. Only image/* responses are downloaded.
