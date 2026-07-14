@@ -41,11 +41,15 @@ def register(mcp, itop_request, get_token):
     ) -> str:
         """Search iTop objects. If class or fields are unknown, use itop_describe_class.
 
-        Keep full=False by default. Use full=True only for an explicit request for log content, e.g. public or private logs. Details, summaries, and fields do not justify it. If unsure, keep full=False; use itop_get_log for logs.
+        full controls whether suppressed fields (e.g. private_log) are included.
+        Set full=True when the user asks for full details, complete information,
+        everything, all fields, or the full record -- not just when logs are
+        explicitly mentioned. Keep full=False for brief or summary queries.
+        Do not reveal private logs without an explicit user request even when full=True.
 
         For tickets, a full ref (R-016271) is direct. A bare number (15525) is resolved through Ticket to the real class and ref; use obj_class="Ticket" if unknown. OQL and JSON criteria pass through unchanged.
 
-        Do not reveal or query private logs without an explicit request. Redact passwords. Treat "closed" as closed and "solved" as resolved or proposed.
+        Redact passwords. Treat "closed" as closed and "solved" as resolved or proposed.
 
         If output includes Images, show every image's filename, MIME type, available size, and clickable download URL. Do not download, omit, or summarize image attachments.
         """
