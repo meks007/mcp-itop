@@ -23,14 +23,14 @@ def register(mcp, itop_request):
         format: str = "text",
     ) -> str:
         """Add a public or private comment to an iTop ticket.
-        
+
         Public comments are visible in the end-user portal. Private comments are
         visible only to agents. When the user does not specify it, always assume the public log.
-        
+
         Prefer ticket_ref, for example "R-016271", whenever it is available from a
         previous result. It is resolved automatically and takes priority over
         ticket_id. Use ticket_id only when no reference is known.
-        
+
         Args:
             ticket_class: Ticket class, e.g. UserRequest, Incident, or Problem.
             text: Comment text.
@@ -44,9 +44,10 @@ def register(mcp, itop_request):
 
         log_field = "public_log" if is_public else "private_log"
         key = await resolve_key(
-            ticket_class, itop_request,
-            ref=ticket_ref,
-            key=str(ticket_id) if ticket_id is not None else None,
+            ticket_class,
+            ticket_ref or None,
+            str(ticket_id) if ticket_id is not None else None,
+            itop_request,
         )
 
         result = await itop_request({
@@ -81,9 +82,9 @@ def register(mcp, itop_request):
         Prefer ticket_ref, for example "R-016271", whenever it is available from a
         previous result. It is resolved automatically and takes priority over
         ticket_id. Use ticket_id only when no reference is known.
-        
+
         Redact or skip anything that resembles a password.
-        
+
         Args:
             ticket_class: Ticket class, e.g. UserRequest, Incident, or Problem.
             ticket_ref: Preferred ticket reference.
@@ -100,9 +101,10 @@ def register(mcp, itop_request):
             fields.append("private_log")
 
         key = await resolve_key(
-            ticket_class, itop_request,
-            ref=ticket_ref,
-            key=str(ticket_id) if ticket_id is not None else None,
+            ticket_class,
+            ticket_ref or None,
+            str(ticket_id) if ticket_id is not None else None,
+            itop_request,
         )
 
         result = await itop_request({
