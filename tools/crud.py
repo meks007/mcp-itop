@@ -8,15 +8,22 @@ from __future__ import annotations
 from typing import Union
 
 from helpers import (
+    apply_field_strip,
     ensure_ref_field,
     format_objects,
     parse_json_arg,
     parse_key,
     parse_key_for_ticket,
     resolve_key,
+    resolve_output_fields,
     str_or,
 )
 from config import DEFAULT_COMMENT
+
+# Fields stripped by itop_get when full=False.
+# Configurable here; add any field name that produces large blobs you never
+# want in a lean search result (e.g. "description", "solution", "workaround").
+_LEAN_STRIP: frozenset[str] = frozenset({"public_log", "private_log"})
 
 
 def register(mcp, itop_request):
@@ -29,34 +36,42 @@ def register(mcp, itop_request):
         output_fields: str = "*",
         limit: int = 25,
         page: int = 0,
+        full: bool = False,
     ) -> str:
         """Search iTop objects.
 
-        If the class or fields are unknown, use itop_describe_class first. Do not
-        guess ticket fields.
-        
-        For ticket classes, prefer a ticket ref such as "R-016271" from a previous
-        result. It is resolved server-side and is safer than a numeric ID. If the
-        user provides only a number, interpret it as a UserRequest reference.
+        Use itop_describe_class first if the class or fields are unknown.
 
-        Read only public log per default. Do not mention the existence of the private log and only query it,
-        when the user asks for it.
-        
-        Redact or skip anything that resembles a password. Treat "closed" as status
-        closed; treat "solved" as resolved or proposed.
-        
+        full=False (default): log fields (public_log, private_log) are stripped
+        for a lean result suited for search and listing. Use full=True when the
+        user explicitly asks for logs or complete ticket detail.
+
+        For ticket classes, prefer a ref like "R-016271" as key. It is resolved
+        server-side and is safer than a numeric ID. A bare number is interpreted
+        as a UserRequest reference.
+
+        Read only public log by default. Do not reveal private log existence;
+        query it only when the user explicitly asks. Redact passwords. Treat
+        "closed" as status closed; "solved" as resolved or proposed.
+
         Args:
             obj_class: iTop class, e.g. Server, UserRequest, Person.
             key: Ticket ref, OQL query, numeric ID, or JSON criteria.
             output_fields: Comma-separated fields, "*", or "*+".
             limit: Maximum results; 0 means no limit.
             page: Page number, starting at 1.
+            full: False strips log fields for lean results; True returns everything.
         """
+        strip = frozenset() if full else _LEAN_STRIP
+        fields_to_request, post_strip = await resolve_output_fields(
+            obj_class, ensure_ref_field(obj_class, output_fields), strip, itop_request
+        )
+
         op: dict = {
             "operation": "core/get",
             "class": obj_class,
             "key": parse_key_for_ticket(obj_class, key),
-            "output_fields": ensure_ref_field(obj_class, output_fields),
+            "output_fields": fields_to_request,
         }
         if limit > 0:
             op["limit"] = str(limit)
@@ -64,6 +79,10 @@ def register(mcp, itop_request):
                 op["page"] = str(page)
 
         result = await itop_request(op)
+
+        if post_strip:
+            apply_field_strip(result, post_strip)
+
         return format_objects(result)
 
     @mcp.tool()
@@ -76,7 +95,7 @@ def register(mcp, itop_request):
         """Create an iTop object.
 
         Use itop_describe_class first if the required fields are unknown.
-        
+
         Args:
             obj_class: iTop class, e.g. UserRequest, Server, or Person.
             fields: JSON object containing field values.
@@ -110,10 +129,10 @@ def register(mcp, itop_request):
         Do not set status with this tool. Ticket state changes must use
         itop_apply_stimulus, for example ev_assign, ev_resolve, ev_reopen, or
         ev_pending.
-        
+
         For ticket classes, prefer ticket_ref such as "R-016271". It is resolved
         automatically and takes priority over key. Do not invent numeric IDs.
-        
+
         Args:
             obj_class: iTop class, e.g. UserRequest, Incident, or Server.
             fields: JSON object with fields to update; must not include status.
@@ -126,7 +145,6 @@ def register(mcp, itop_request):
         if isinstance(parsed, str):
             return parsed
 
-        # Guard: status must never be set via update - it is workflow-controlled
         if isinstance(parsed, dict) and "status" in parsed:
             return (
                 "Error: 'status' cannot be set via itop_update. "
@@ -159,12 +177,12 @@ def register(mcp, itop_request):
         simulate: bool = True,
     ) -> str:
         """Delete iTop object(s).
-        
+
         Deletion is disabled by policy. Do not use this tool.
-        
+
         For ticket classes, ticket_ref such as "R-016271" takes priority over key
         and is resolved automatically. Do not invent numeric IDs.
-        
+
         Args:
             obj_class: iTop class.
             ticket_ref: Preferred ticket reference.
@@ -194,10 +212,10 @@ def register(mcp, itop_request):
         comment: str = "",
     ) -> str:
         """Apply a lifecycle transition to an iTop object.
-        
-        Use this tool, not itop_update, to change ticket status. To finish a ticket,
-        use ev_resolve with a solution in fields; ev_close is not allowed.
-        
+
+        Use this tool, not itop_update, to change ticket status. To finish a
+        ticket, use ev_resolve with a solution in fields; ev_close is not allowed.
+
         For UserRequest and Incident, common stimuli are:
         - ev_assign: assign, with agent_id and team_id
         - ev_reassign: assign to another agent
@@ -205,10 +223,9 @@ def register(mcp, itop_request):
         - ev_resolve: resolve, with solution
         - ev_reopen: reopen
         - ev_pending: put on hold, with pending_reason
-        
-        Prefer ticket_ref, for example "R-016271". It takes priority over key and is
-        resolved automatically. Do not invent IDs.
-        
+
+        Prefer ticket_ref, for example "R-016271". It takes priority over key.
+
         Args:
             obj_class: iTop class, e.g. UserRequest or Incident.
             stimulus: Transition code; never ev_close.
@@ -222,12 +239,11 @@ def register(mcp, itop_request):
         if isinstance(parsed, str):
             return parsed
 
-        # Guard: ev_close is not permitted in this workflow - redirect to ev_resolve
         if stimulus == "ev_close":
             return (
                 "Error: ev_close is not permitted in this workflow. "
                 "To close a ticket, use ev_resolve with a solution in fields, "
-                "e.g. fields={\"solution\": \"...\"}. Resolving is the final step."
+                'e.g. fields={"solution": "..."}. Resolving is the final step.'
             )
 
         resolved = await resolve_key(obj_class, ticket_ref or None, key or None, itop_request)
