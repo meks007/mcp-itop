@@ -19,36 +19,83 @@ logger = logging.getLogger(__name__)
 # HTML stripping
 # ---------------------------------------------------------------------------
 
-_HTML_TAG_RE = re.compile(r"<[^>]+>", re.IGNORECASE)
-_HTML_ENTITY_RE = re.compile(r"&(?:#\d+|#x[\da-fA-F]+|[a-zA-Z]+);")
+# Tags whose opening or closing form represents a line break in the output.
+# Closing a block tag ends that "paragraph"; <br> is always a newline.
+_BLOCK_TAGS = re.compile(
+    r"<(?:/?(?:p|div|tr|li|dt|dd|blockquote|pre|"
+    r"h[1-6]|ul|ol|dl|table|thead|tbody|tfoot|"
+    r"figure|figcaption|section|article|aside|header|footer|main|"
+    r"hr)\b[^>]*|br\s*/?)>",
+    re.IGNORECASE,
+)
+
+# MS-Office conditional comments: <![if ...]> ... <![endif]> -- drop entirely.
+_MSO_CONDITIONAL_RE = re.compile(
+    r"<!\[if[^\]]*\]>.*?<!\[endif\]>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Any remaining tag (inline or unknown).
+_ANY_TAG_RE = re.compile(r"<[^>]+>", re.IGNORECASE)
+
+# HTML entities we handle by name.
 _HTML_ENTITIES: dict[str, str] = {
     "&amp;": "&", "&lt;": "<", "&gt;": ">",
     "&quot;": '"', "&apos;": "'", "&nbsp;": " ",
     "&#39;": "'",
 }
 
+# All remaining numeric / named entities.
+_HTML_ENTITY_RE = re.compile(r"&(?:#\d+|#x[\da-fA-F]+|[a-zA-Z]+);")
+
+
+def _decode_entity(m: re.Match) -> str:
+    raw = m.group(0)
+    inner = raw[1:-1]
+    try:
+        if inner.startswith("#x") or inner.startswith("#X"):
+            return chr(int(inner[2:], 16))
+        if inner.startswith("#"):
+            return chr(int(inner[1:]))
+    except (ValueError, OverflowError):
+        pass
+    return raw  # leave unknown named entities as-is
+
 
 def _strip_html(value: str) -> str:
-    """Remove HTML tags and decode common entities from a string."""
-    value = _HTML_TAG_RE.sub("", value)
-    # Decode named entities we know, then numeric ones
+    """Convert HTML to clean plain text, preserving meaningful line breaks.
+
+    Steps:
+    1. Drop MS-Office conditional comments wholesale.
+    2. Replace block-level tags and <br> with newlines.
+    3. Strip all remaining tags.
+    4. Decode HTML entities.
+    5. Collapse horizontal whitespace on each line, then collapse excess blank lines.
+    """
+    if not value or "<" not in value:
+        return value
+
+    # 1. Remove MSO conditional noise
+    value = _MSO_CONDITIONAL_RE.sub("", value)
+
+    # 2. Block tags / <br> -> newline
+    value = _BLOCK_TAGS.sub("\n", value)
+
+    # 3. Strip everything else
+    value = _ANY_TAG_RE.sub("", value)
+
+    # 4. Entities
     for entity, char in _HTML_ENTITIES.items():
         value = value.replace(entity, char)
-    def _decode_numeric(m: re.Match) -> str:
-        raw = m.group(0)
-        inner = raw[1:-1]  # strip & and ;
-        try:
-            if inner.startswith("#x") or inner.startswith("#X"):
-                return chr(int(inner[2:], 16))
-            if inner.startswith("#"):
-                return chr(int(inner[1:]))
-        except (ValueError, OverflowError):
-            pass
-        return raw
-    value = _HTML_ENTITY_RE.sub(_decode_numeric, value)
-    # Collapse excess whitespace that tags often leave behind
-    value = re.sub(r"[ \t]+", " ", value)
+    value = _HTML_ENTITY_RE.sub(_decode_entity, value)
+
+    # 5. Normalise whitespace:
+    #    - collapse horizontal whitespace within each line
+    #    - collapse runs of 3+ newlines to 2
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in value.splitlines()]
+    value = "\n".join(lines)
     value = re.sub(r"\n{3,}", "\n\n", value)
+
     return value.strip()
 
 
