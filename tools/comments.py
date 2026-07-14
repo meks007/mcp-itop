@@ -39,14 +39,14 @@ def register(mcp, itop_request):
             is_public: True for public_log; False for private_log.
             format: Comment format: "text" or "html".
         """
-        if not ticket_ref and ticket_id is None:
+        if not ticket_ref and not ticket_id:
             return "Error: supply ticket_ref (e.g. 'R-016271') or ticket_id."
 
         log_field = "public_log" if is_public else "private_log"
         key = await resolve_key(
             ticket_class,
             ticket_ref or None,
-            str(ticket_id) if ticket_id is not None else None,
+            str(ticket_id) if ticket_id else None,
             itop_request,
         )
 
@@ -91,7 +91,7 @@ def register(mcp, itop_request):
             ticket_id: Fallback numeric ID.
             log_type: "public", "private", or "both".
         """
-        if not ticket_ref and ticket_id is None:
+        if not ticket_ref and not ticket_id:
             return "Error: supply ticket_ref (e.g. 'R-016271') or ticket_id."
 
         fields = []
@@ -103,7 +103,7 @@ def register(mcp, itop_request):
         key = await resolve_key(
             ticket_class,
             ticket_ref or None,
-            str(ticket_id) if ticket_id is not None else None,
+            str(ticket_id) if ticket_id else None,
             itop_request,
         )
 
