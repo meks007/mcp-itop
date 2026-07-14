@@ -4,6 +4,7 @@ Pure utility / formatting helpers shared across all tool modules.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from datetime import datetime, timedelta, timezone
@@ -206,98 +207,103 @@ CLASSES_WITH_REF: frozenset[str] = frozenset({
 # Matches a fully-formed iTop ref, e.g. "R-016271" or "I-003"
 _REF_PATTERN = re.compile(r"^[A-Z]+-\d+$")
 
-# Matches a bare integer that the user typed as a ticket number, e.g. "15525"
-# These are treated as ref numbers, not database IDs, for ticket classes.
+# Matches a bare integer string, e.g. "15525"
 _BARE_NUMBER_PATTERN = re.compile(r"^\d+$")
 
 # Fields injected by MCP output formatting that must never be sent to iTop.
 _SYNTHETIC_FIELDS: frozenset[str] = frozenset({"link"})
 
-# Ref prefixes per ticket class. Used when a bare number is given so we can
-# build the canonical ref (e.g. 15525 -> R-015525 for UserRequest).
-_CLASS_REF_PREFIX: dict[str, str] = {
-    "UserRequest": "R",
-    "Incident": "I",
-    "Problem": "P",
-    "Change": "C",
-    "ChangeRequest": "C",
-    "NormalChange": "C",
-    "EmergencyChange": "C",
-    "RoutineChange": "C",
-    "ServiceRequest": "SR",
-    "RFC": "RFC",
-    "RFI": "RFI",
-}
+
+def is_bare_number(key: Any) -> bool:
+    """Return True if key is a bare integer or a string of only digits."""
+    if isinstance(key, int):
+        return True
+    if isinstance(key, str) and _BARE_NUMBER_PATTERN.match(key):
+        return True
+    return False
 
 
-def _bare_number_to_ref(obj_class: str, number: int) -> dict:
-    """Convert a bare integer to an iTop ref criteria dict.
+async def resolve_ticket_by_number(number: int, itop_request) -> tuple[str, str] | tuple[None, None]:
+    """Resolve a bare ticket number to (obj_class, ref) via a single OQL call.
 
-    Uses the class-specific prefix and zero-pads to 6 digits, matching the
-    default iTop ref format (e.g. 15525 -> {"ref": "R-015525"}).
-    Falls back to prefix "T" if the class is not in the prefix map.
+    iTop's Ticket base class covers UserRequest, Incident, Change, Problem, etc.
+    The ref number part is always 6 digits (zero-padded), and is unique across
+    all ticket subclasses -- so a single LIKE query is sufficient to identify
+    both the real class and the full ref string.
+
+    Example:
+        resolve_ticket_by_number(15525, ...) -> ("Incident", "I-015525")
+
+    Returns (None, None) when no ticket with that number is found.
     """
-    prefix = _CLASS_REF_PREFIX.get(obj_class, "T")
-    ref = prefix + "-" + str(number).zfill(6)
-    return {"ref": ref}
+    suffix = str(number).zfill(6)
+    oql = "SELECT Ticket WHERE ref LIKE '%" + suffix + "'"
+    result = await itop_request({
+        "operation": "core/get",
+        "class": "Ticket",
+        "key": oql,
+        "output_fields": "ref",
+        "limit": "1",
+    })
+    if result.get("code", -1) != 0:
+        return None, None
+    for obj_data in (result.get("objects") or {}).values():
+        obj_class = obj_data.get("class") or ""
+        ref = (obj_data.get("fields") or {}).get("ref") or ""
+        if obj_class and ref:
+            return obj_class, ref
+    return None, None
 
 
-def ensure_ref_field(obj_class: str, output_fields: str) -> str:
-    """Inject 'ref' and strip synthetic/redundant fields for ticket classes.
+async def resolve_ticket_ref(
+    obj_class: str,
+    key: str,
+    itop_request,
+) -> tuple[str, Any]:
+    """Resolve obj_class + key, performing a bare-number lookup when needed.
 
-    For classes in CLASSES_WITH_REF:
-    - 'ref' is injected at the front if not already present.
-    - 'id' is always removed (redundant once ref is present).
-    - Synthetic MCP-injected fields (e.g. 'link') are always removed because
-      they do not exist as iTop attributes and would cause API errors.
+    If key is a bare number (e.g. "15525" or 15525) and obj_class is "Ticket"
+    or not a known concrete ticket class, a single OQL probe is fired against
+    the Ticket base class to find the real class and full ref.
 
-    '*' and '*+' are passed through unchanged (iTop handles field expansion).
-    Non-ticket classes only have synthetic fields stripped.
-    """
-    if output_fields not in ("*", "*+"):
-        fields = [f.strip() for f in output_fields.split(",") if f.strip()]
-        fields = [f for f in fields if f not in _SYNTHETIC_FIELDS]
-        output_fields = ", ".join(fields)
+    Returns (resolved_class, resolved_key) where resolved_key is either:
+      - {"ref": "R-015525"}  (ref criteria dict)
+      - the original parsed key (OQL string, JSON dict, etc.)
 
-    if output_fields in ("*", "*+"):
-        return output_fields
-    if obj_class not in CLASSES_WITH_REF:
-        return output_fields
-
-    fields = [f.strip() for f in output_fields.split(",") if f.strip()]
-    fields = [f for f in fields if f != "id"]
-    if "ref" not in fields:
-        fields.insert(0, "ref")
-    return ", ".join(fields)
-
-
-def parse_key_for_ticket(obj_class: str, key: str) -> Any:
-    """Parse a key for ticket classes, normalising refs and bare numbers.
-
-    Resolution order for ticket classes (CLASSES_WITH_REF):
-    1. Fully-formed ref (e.g. "R-016271")  -> {"ref": "R-016271"}
-    2. Bare integer string (e.g. "15525")  -> {"ref": "R-015525"}
-       The class-specific prefix is used and the number is zero-padded to
-       6 digits to match iTop's default ref format.
-    3. Anything else (OQL, JSON string)    -> parsed as-is via parse_key().
-
-    For non-ticket classes the key is always parsed as-is.
+    This function is the single entry point for all tools that accept a
+    user-supplied ticket identifier without knowing the class upfront.
     """
     parsed = parse_key(key)
 
-    if obj_class not in CLASSES_WITH_REF:
-        return parsed
-
-    # Fully-formed ref string, e.g. "R-016271"
+    # Already a fully-formed ref string -- use as-is
     if isinstance(parsed, str) and _REF_PATTERN.match(parsed):
-        return {"ref": parsed}
+        return obj_class, {"ref": parsed}
 
-    # Bare integer -- user typed the ticket number without prefix/leading zeros
-    if isinstance(parsed, int):
-        return _bare_number_to_ref(obj_class, parsed)
-    if isinstance(parsed, str) and _BARE_NUMBER_PATTERN.match(parsed):
-        return _bare_number_to_ref(obj_class, int(parsed))
+    # Bare number -- probe Ticket base class to find real class + ref
+    if is_bare_number(parsed):
+        number = int(parsed) if isinstance(parsed, str) else parsed
+        found_class, found_ref = await resolve_ticket_by_number(number, itop_request)
+        if found_class and found_ref:
+            return found_class, {"ref": found_ref}
+        # Not found -- fall through and let iTop return an error naturally
+        suffix = str(number).zfill(6)
+        return obj_class, "SELECT Ticket WHERE ref LIKE '%" + suffix + "'"
 
+    # OQL, JSON dict, or anything else -- pass through
+    return obj_class, parsed
+
+
+def parse_key_for_ticket(obj_class: str, key: str) -> Any:
+    """Synchronous key parser for ticket classes (no lookup, use resolve_ticket_ref for lookup).
+
+    For cases where an async lookup is not possible (rare), this converts
+    fully-formed refs to criteria dicts. Bare numbers are returned as-is
+    (the async resolve_ticket_ref should be preferred instead).
+    """
+    parsed = parse_key(key)
+    if obj_class in CLASSES_WITH_REF:
+        if isinstance(parsed, str) and _REF_PATTERN.match(parsed):
+            return {"ref": parsed}
     return parsed
 
 
@@ -306,7 +312,8 @@ async def resolve_key(obj_class: str, ref: str | None, numeric_id: Any, itop_req
 
     Preference order:
     1. ref (ticket ref string, e.g. "R-016271") -- looked up via iTop.
-    2. numeric_id as fallback.
+    2. numeric_id as bare number -- triggers Ticket base class lookup.
+    3. numeric_id as fallback (DB id).
     """
     if ref and isinstance(ref, str) and _REF_PATTERN.match(ref.strip()):
         result = await itop_request({
@@ -323,7 +330,27 @@ async def resolve_key(obj_class: str, ref: str | None, numeric_id: Any, itop_req
                     return int(raw_id)
                 except (ValueError, TypeError):
                     pass
+
     if numeric_id is not None:
+        # If numeric_id looks like a bare ticket number, resolve via Ticket base class
+        if is_bare_number(numeric_id):
+            number = int(numeric_id)
+            found_class, found_ref = await resolve_ticket_by_number(number, itop_request)
+            if found_class and found_ref:
+                result = await itop_request({
+                    "operation": "core/get",
+                    "class": found_class,
+                    "key": {"ref": found_ref},
+                    "output_fields": "id",
+                })
+                objects = result.get("objects") or {}
+                for _k, obj_data in objects.items():
+                    raw_id = obj_data.get("key") or (obj_data.get("fields") or {}).get("id")
+                    if raw_id is not None:
+                        try:
+                            return int(raw_id)
+                        except (ValueError, TypeError):
+                            pass
         try:
             return int(numeric_id)
         except (ValueError, TypeError):
