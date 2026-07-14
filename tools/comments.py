@@ -7,7 +7,7 @@ from __future__ import annotations
 import re
 from typing import Optional, Union
 
-from helpers import extract_objects, format_objects, resolve_key, str_or
+from helpers import extract_objects, format_objects, resolve_key, resolve_ticket_ref, str_or
 
 
 def register(mcp, itop_request):
@@ -25,17 +25,20 @@ def register(mcp, itop_request):
         """Add a public or private comment to an iTop ticket.
 
         Public comments are visible in the end-user portal. Private comments are
-        visible only to agents. When the user does not specify it, always assume the public log.
+        visible only to agents. When the user does not specify it, always assume
+        the public log.
 
-        Prefer ticket_ref, for example "R-016271", whenever it is available from a
-        previous result. It is resolved automatically and takes priority over
-        ticket_id. Use ticket_id only when no reference is known.
+        Prefer ticket_ref, for example "R-016271", whenever it is available from
+        a previous result. A bare number like "15525" in ticket_id is resolved
+        automatically -- the real class and ref are looked up via the Ticket base
+        class (SELECT Ticket WHERE ref LIKE '%015525'). Pass ticket_class as
+        "Ticket" when the class is not known.
 
         Args:
-            ticket_class: Ticket class, e.g. UserRequest, Incident, or Problem.
+            ticket_class: Ticket class, e.g. UserRequest, Incident, or "Ticket".
             text: Comment text.
-            ticket_ref: Preferred ticket reference.
-            ticket_id: Fallback numeric ID.
+            ticket_ref: Preferred ticket reference, e.g. "R-016271".
+            ticket_id: Bare number or fallback numeric ID when ref is unknown.
             is_public: True for public_log; False for private_log.
             format: Comment format: "text" or "html".
         """
@@ -43,12 +46,21 @@ def register(mcp, itop_request):
             return "Error: supply ticket_ref (e.g. 'R-016271') or ticket_id."
 
         log_field = "public_log" if is_public else "private_log"
-        key = await resolve_key(
-            ticket_class,
-            ticket_ref or None,
-            str(ticket_id) if ticket_id else None,
-            itop_request,
-        )
+
+        # If a bare number is given without a ref, resolve class + ref first
+        if not ticket_ref and ticket_id:
+            resolved_class, resolved_key = await resolve_ticket_ref(
+                ticket_class, str(ticket_id), itop_request
+            )
+            ticket_class = resolved_class
+            key = resolved_key
+        else:
+            key = await resolve_key(
+                ticket_class,
+                ticket_ref or None,
+                str(ticket_id) if ticket_id else None,
+                itop_request,
+            )
 
         result = await itop_request({
             "operation": "core/update",
@@ -63,7 +75,7 @@ def register(mcp, itop_request):
                 }
             },
             "output_fields": "id, ref, friendlyname",
-            "comment": f"MCP: added {'public' if is_public else 'private'} comment",
+            "comment": "MCP: added " + ("public" if is_public else "private") + " comment",
         })
         return format_objects(result)
 
@@ -76,19 +88,21 @@ def register(mcp, itop_request):
     ) -> str:
         """Read public and/or private comments from an iTop ticket.
 
-        Read only public log per default. Do not mention the existence of the private log and only query it,
-        when the user asks for it.
+        Read only public log per default. Do not mention the existence of the
+        private log and only query it when the user asks for it.
 
-        Prefer ticket_ref, for example "R-016271", whenever it is available from a
-        previous result. It is resolved automatically and takes priority over
-        ticket_id. Use ticket_id only when no reference is known.
+        Prefer ticket_ref, for example "R-016271", whenever it is available from
+        a previous result. A bare number like "15525" in ticket_id is resolved
+        automatically -- the real class and ref are looked up via the Ticket base
+        class (SELECT Ticket WHERE ref LIKE '%015525'). Pass ticket_class as
+        "Ticket" when the class is not known.
 
         Redact or skip anything that resembles a password.
 
         Args:
-            ticket_class: Ticket class, e.g. UserRequest, Incident, or Problem.
-            ticket_ref: Preferred ticket reference.
-            ticket_id: Fallback numeric ID.
+            ticket_class: Ticket class, e.g. UserRequest, Incident, or "Ticket".
+            ticket_ref: Preferred ticket reference, e.g. "R-016271".
+            ticket_id: Bare number or fallback numeric ID when ref is unknown.
             log_type: "public", "private", or "both".
         """
         if not ticket_ref and not ticket_id:
@@ -100,12 +114,20 @@ def register(mcp, itop_request):
         if log_type in ("private", "both"):
             fields.append("private_log")
 
-        key = await resolve_key(
-            ticket_class,
-            ticket_ref or None,
-            str(ticket_id) if ticket_id else None,
-            itop_request,
-        )
+        # If a bare number is given without a ref, resolve class + ref first
+        if not ticket_ref and ticket_id:
+            resolved_class, resolved_key = await resolve_ticket_ref(
+                ticket_class, str(ticket_id), itop_request
+            )
+            ticket_class = resolved_class
+            key = resolved_key
+        else:
+            key = await resolve_key(
+                ticket_class,
+                ticket_ref or None,
+                str(ticket_id) if ticket_id else None,
+                itop_request,
+            )
 
         result = await itop_request({
             "operation": "core/get",
@@ -117,15 +139,15 @@ def register(mcp, itop_request):
         tickets = extract_objects(result)
         label = ticket_ref or str(ticket_id)
         if not tickets:
-            return f"Ticket {label!r} ({ticket_class}) not found."
+            return "Ticket " + repr(label) + " (" + ticket_class + ") not found."
 
         f = tickets[0]["fields"]
-        lines = [f"**Logs for {ticket_class} {label}**", ""]
+        lines = ["**Logs for " + ticket_class + " " + label + "**", ""]
 
         for field in fields:
             if field not in f:
                 continue
-            lines.append(f"--- {'Public Log' if field == 'public_log' else 'Private Log'} ---")
+            lines.append("--- " + ("Public Log" if field == "public_log" else "Private Log") + " ---")
             log_data = f[field]
             if isinstance(log_data, dict):
                 # iTop 3.2.1 uses 'entries', older versions use 'items'
@@ -138,7 +160,7 @@ def register(mcp, itop_request):
                     msg = item.get("message", "")
                     # Strip HTML tags for readability
                     msg = re.sub(r'<[^>]+>', '', msg)
-                    lines.append(f"[{date}] {user}: {msg[:200]}")
+                    lines.append("[" + date + "] " + user + ": " + msg[:200])
             elif isinstance(log_data, str):
                 lines.append(log_data[:500])
             else:
