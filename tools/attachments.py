@@ -9,21 +9,23 @@ register(mcp, itop_request)
     Tools:
         itop_get_ticket_images(obj_class, ticket_ref, key)
             Fetch all image attachments for a ticket via the iTop REST API.
-            Queries both Attachment and InlineImage classes.
-            Returns metadata, download links, and resource URIs for each image.
+            Queries both Attachment (image mimetype check) and InlineImage
+            (always image). Returns combined results as MCP resource JSON:
+            {"contents": [{"uri": "...", "mimeType": "...", "blob": "..."}]}
+            blob is pure Base64 without data-URI prefix.
 
         itop_get_ticket_attachments(obj_class, ticket_ref, key)
             Fetch all non-image file attachments for a ticket.
-            Returns metadata and download links.
+            Returns metadata and browser download links only.
 
     Resources:
         itop://attachment/{attachment_id}
             Download an Attachment by its numeric iTop ID.
-            Returns a pure Base64 blob (no data-URI prefix) with mimeType.
+            Returns bytes; FastMCP wraps as BlobResourceContents automatically.
 
-        itop://inlineimage/{record_id}/{secret}
-            Download an InlineImage by its numeric ID and secret.
-            Returns a pure Base64 blob (no data-URI prefix) with mimeType.
+        itop://inlineimage/{secret}/{record_id}
+            Download an InlineImage by its secret and numeric ID.
+            Returns bytes; FastMCP wraps as BlobResourceContents automatically.
 
 iTop blob field notes
 ---------------------
@@ -35,13 +37,6 @@ Attachment  : may be any MIME type; mimetype is checked before including.
 InlineImage : always an image; has a secret field for the download URL.
               Download via ?operation=download_inlineimage&id=<id>&s=<secret>
               Has no filename field; friendlyname or fabricated name is used.
-
-Auth token note
----------------
-auth_token is appended to every download URL so the link works for both
-direct browser access and programmatic use without a separate session.
-The resource handler fetches the binary at request time using the bearer
-token from the MCP request context.
 """
 
 from __future__ import annotations
@@ -61,17 +56,17 @@ def _is_image(mimetype: str) -> bool:
     return any(ct.startswith(p) for p in _IMAGE_PREFIXES)
 
 
-def _attachment_url(attachment_id: str | int, token: str) -> str:
+def _attachment_url(attachment_id: str | int) -> str:
     return (
         f"{ITOP_URL}/webservices/ajax.document.php"
-        f"?operation=download_document&id={attachment_id}&auth_token={token}"
+        f"?operation=download_document&id={attachment_id}"
     )
 
 
-def _inline_image_url(record_id: str | int, secret: str, token: str) -> str:
+def _inline_image_url(secret: str, record_id: str | int) -> str:
     return (
         f"{ITOP_URL}/webservices/ajax.document.php"
-        f"?operation=download_inlineimage&id={record_id}&s={secret}&auth_token={token}"
+        f"?operation=download_inlineimage&id={record_id}&s={secret}"
     )
 
 
@@ -114,18 +109,14 @@ def register(mcp, itop_request):
     # ------------------------------------------------------------------
 
     @mcp.resource("itop://attachment/{attachment_id}")
-    async def resource_attachment(attachment_id: str) -> dict:
-        """Download an iTop Attachment as a Base64 blob.
+    async def resource_attachment(attachment_id: str) -> bytes:
+        """Download an iTop Attachment as a binary blob.
 
         URI scheme: itop://attachment/<attachment_id>
-        The filename is derived from the last URI segment (the attachment_id).
-        Returns a pure Base64 string without any data-URI prefix.
+        FastMCP base64-encodes the returned bytes and wraps them as
+        BlobResourceContents automatically. No data-URI prefix is added.
         """
-        from auth import get_bearer_token
-        from server import mcp as _mcp
-        token = get_bearer_token(_mcp)
-
-        url = _attachment_url(attachment_id, token)
+        url = _attachment_url(attachment_id)
         try:
             content_bytes, mimetype = await _download_binary(url)
         except Exception as exc:
@@ -133,42 +124,27 @@ def register(mcp, itop_request):
                 logger.debug("resource_attachment error: id=%s exc=%s", attachment_id, exc)
             raise
 
-        blob = base64.b64encode(content_bytes).decode("ascii")
-        uri = "itop://attachment/" + attachment_id
-
         if MCP_DEBUG:
             logger.debug(
                 "resource_attachment: id=%s mime=%s bytes=%d",
                 attachment_id, mimetype, len(content_bytes),
             )
 
-        return {
-            "contents": [
-                {
-                    "uri": uri,
-                    "mimeType": mimetype,
-                    "blob": blob,
-                }
-            ]
-        }
+        return content_bytes
 
     # ------------------------------------------------------------------
-    # Resource: itop://inlineimage/{record_id}/{secret}
+    # Resource: itop://inlineimage/{secret}/{record_id}
     # ------------------------------------------------------------------
 
-    @mcp.resource("itop://inlineimage/{record_id}/{secret}")
-    async def resource_inlineimage(record_id: str, secret: str) -> dict:
-        """Download an iTop InlineImage as a Base64 blob.
+    @mcp.resource("itop://inlineimage/{secret}/{record_id}")
+    async def resource_inlineimage(secret: str, record_id: str) -> bytes:
+        """Download an iTop InlineImage as a binary blob.
 
-        URI scheme: itop://inlineimage/<record_id>/<secret>
-        The filename is derived from the last URI segment (the secret).
-        Returns a pure Base64 string without any data-URI prefix.
+        URI scheme: itop://inlineimage/<secret>/<record_id>
+        FastMCP base64-encodes the returned bytes and wraps them as
+        BlobResourceContents automatically. No data-URI prefix is added.
         """
-        from auth import get_bearer_token
-        from server import mcp as _mcp
-        token = get_bearer_token(_mcp)
-
-        url = _inline_image_url(record_id, secret, token)
+        url = _inline_image_url(secret, record_id)
         try:
             content_bytes, mimetype = await _download_binary(url)
         except Exception as exc:
@@ -178,24 +154,13 @@ def register(mcp, itop_request):
                 )
             raise
 
-        blob = base64.b64encode(content_bytes).decode("ascii")
-        uri = "itop://inlineimage/" + record_id + "/" + secret
-
         if MCP_DEBUG:
             logger.debug(
                 "resource_inlineimage: id=%s mime=%s bytes=%d",
                 record_id, mimetype, len(content_bytes),
             )
 
-        return {
-            "contents": [
-                {
-                    "uri": uri,
-                    "mimeType": mimetype,
-                    "blob": blob,
-                }
-            ]
-        }
+        return content_bytes
 
     # ------------------------------------------------------------------
     # Tool: itop_get_ticket_images
@@ -209,17 +174,16 @@ def register(mcp, itop_request):
     ) -> str:
         """Fetch all image attachments for an iTop ticket.
 
-        Queries both the Attachment class (file attachments, image types only)
-        and the InlineImage class (images embedded in ticket text fields).
-        Returns for each image:
+        Queries both the Attachment class (image mimetype check) and the
+        InlineImage class (always image). Results from both sources are
+        combined and returned with equal weight.
 
-          - source class (Attachment or InlineImage)
-          - filename, MIME type
-          - a browser download link (auth_token appended)
-          - a resource URI for use with resources/read to retrieve the image
-            as a Base64 blob directly through the MCP protocol
+        Each image is fetched and returned as a MCP resource JSON structure:
+          {"contents": [{"uri": "...", "mimeType": "...", "blob": "..."}]}
+        blob is pure Base64 without data-URI prefix.
 
-        To display or process an image, call resources/read with the resource_uri.
+        To download or display an image later, call resources/read with the
+        resource_uri shown for each image.
 
         For ticket classes (UserRequest, Incident, etc.) prefer ticket_ref
         (e.g. R-016271); it is resolved automatically and takes priority
@@ -230,17 +194,15 @@ def register(mcp, itop_request):
             ticket_ref: Preferred ticket reference, e.g. R-016271.
             key:        Fallback numeric ID or OQL query.
         """
-        from auth import get_bearer_token
-        from server import mcp as _mcp
-        token = get_bearer_token(_mcp)
-
         resolved = await resolve_key(
             obj_class, ticket_ref or None, key or None, itop_request
         )
         if resolved is None:
             return "Error: provide either ticket_ref or key to identify the ticket."
 
-        # -- Attachments (image types only) --
+        images = []
+
+        # -- Attachment (image types only) --
         att_result = await itop_request({
             "operation": "core/get",
             "class": "Attachment",
@@ -251,8 +213,6 @@ def register(mcp, itop_request):
             ),
             "output_fields": "contents",
         })
-
-        images = []
 
         for obj_key, obj_data in (att_result.get("objects") or {}).items():
             fields = obj_data.get("fields") or {}
@@ -267,11 +227,11 @@ def register(mcp, itop_request):
                 "id": record_id,
                 "filename": filename,
                 "mimetype": mimetype,
-                "url": _attachment_url(record_id, token),
+                "url": _attachment_url(record_id),
                 "resource_uri": "itop://attachment/" + record_id,
             })
 
-        # -- InlineImages --
+        # -- InlineImage (always image) --
         ii_result = await itop_request({
             "operation": "core/get",
             "class": "InlineImage",
@@ -293,12 +253,12 @@ def register(mcp, itop_request):
             if not mimetype:
                 mimetype = "image/unknown"
             url = (
-                _inline_image_url(record_id, secret, token)
+                _inline_image_url(secret, record_id)
                 if secret
-                else _attachment_url(record_id, token)
+                else _attachment_url(record_id)
             )
             resource_uri = (
-                "itop://inlineimage/" + record_id + "/" + secret
+                "itop://inlineimage/" + secret + "/" + record_id
                 if secret
                 else "itop://attachment/" + record_id
             )
@@ -314,20 +274,31 @@ def register(mcp, itop_request):
         if not images:
             return "No image attachments found for " + obj_class + " " + (ticket_ref or key) + "."
 
-        label = ticket_ref or key or str(resolved)
-        lines = [
-            "Image attachments for " + obj_class + " " + label
-            + " (" + str(len(images)) + " found):"
-        ]
-
+        # Fetch each image and build MCP resource JSON structure
+        contents = []
         for img in images:
-            lines.append("\n--- " + img["filename"] + " (" + img["source"] + ") ---")
-            lines.append("  mimetype     : " + img["mimetype"])
-            lines.append("  browser_link : " + img["url"])
-            lines.append("  resource_uri : " + img["resource_uri"])
-            lines.append("  (call resources/read with resource_uri to retrieve as Base64 blob)")
+            try:
+                content_bytes, detected_mime = await _download_binary(img["url"])
+                blob = base64.b64encode(content_bytes).decode("ascii")
+                mime = detected_mime if detected_mime != "application/octet-stream" else img["mimetype"]
+            except Exception as exc:
+                if MCP_DEBUG:
+                    logger.debug(
+                        "itop_get_ticket_images fetch error: uri=%s exc=%s",
+                        img["resource_uri"], exc,
+                    )
+                continue
+            contents.append({
+                "uri": img["resource_uri"],
+                "mimeType": mime,
+                "blob": blob,
+            })
 
-        return "\n".join(lines)
+        if not contents:
+            return "Image attachments found but could not be downloaded for " + obj_class + " " + (ticket_ref or key) + "."
+
+        import json as _json
+        return _json.dumps({"contents": contents}, ensure_ascii=True)
 
     # ------------------------------------------------------------------
     # Tool: itop_get_ticket_attachments
@@ -345,15 +316,14 @@ def register(mcp, itop_request):
         not an image type (e.g. PDF, DOCX, ZIP). For image attachments use
         itop_get_ticket_images instead.
 
+        Returns metadata and browser download links only. No binary content
+        is fetched or returned.
+
         Args:
             obj_class:  iTop class, e.g. UserRequest, Incident.
             ticket_ref: Preferred ticket reference, e.g. R-016271.
             key:        Fallback numeric ID or OQL query.
         """
-        from auth import get_bearer_token
-        from server import mcp as _mcp
-        token = get_bearer_token(_mcp)
-
         resolved = await resolve_key(
             obj_class, ticket_ref or None, key or None, itop_request
         )
@@ -387,7 +357,7 @@ def register(mcp, itop_request):
                 "id": record_id,
                 "filename": filename,
                 "mimetype": mimetype,
-                "url": _attachment_url(record_id, token),
+                "url": _attachment_url(record_id),
             })
 
         if not files:
