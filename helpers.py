@@ -16,6 +16,54 @@ from config import ITOP_URL
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# HTML stripping
+# ---------------------------------------------------------------------------
+
+_HTML_TAG_RE = re.compile(r"<[^>]+>", re.IGNORECASE)
+_HTML_ENTITY_RE = re.compile(r"&(?:#\d+|#x[\da-fA-F]+|[a-zA-Z]+);")
+_HTML_ENTITIES: dict[str, str] = {
+    "&amp;": "&", "&lt;": "<", "&gt;": ">",
+    "&quot;": '"', "&apos;": "'", "&nbsp;": " ",
+    "&#39;": "'",
+}
+
+
+def _strip_html(value: str) -> str:
+    """Remove HTML tags and decode common entities from a string."""
+    value = _HTML_TAG_RE.sub("", value)
+    # Decode named entities we know, then numeric ones
+    for entity, char in _HTML_ENTITIES.items():
+        value = value.replace(entity, char)
+    def _decode_numeric(m: re.Match) -> str:
+        raw = m.group(0)
+        inner = raw[1:-1]  # strip & and ;
+        try:
+            if inner.startswith("#x") or inner.startswith("#X"):
+                return chr(int(inner[2:], 16))
+            if inner.startswith("#"):
+                return chr(int(inner[1:]))
+        except (ValueError, OverflowError):
+            pass
+        return raw
+    value = _HTML_ENTITY_RE.sub(_decode_numeric, value)
+    # Collapse excess whitespace that tags often leave behind
+    value = re.sub(r"[ \t]+", " ", value)
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    return value.strip()
+
+
+def strip_html_recursive(obj: Any) -> Any:
+    """Recursively strip HTML from all string values in dicts/lists."""
+    if isinstance(obj, str):
+        return _strip_html(obj)
+    if isinstance(obj, dict):
+        return {k: strip_html_recursive(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [strip_html_recursive(item) for item in obj]
+    return obj
+
+
+# ---------------------------------------------------------------------------
 # SLA helpers
 # ---------------------------------------------------------------------------
 
@@ -545,6 +593,9 @@ def format_objects(result: dict) -> str:
     Side effect: seeds _ITOP_CLASS_REGISTRY with the field inventory for
     every class seen, so resolve_output_fields hits the warm-cache path on
     subsequent calls for the same class.
+
+    HTML tags and entities are stripped from all string field values before
+    rendering, removing noise from iTop's rich-text fields.
     """
     if result.get("code", -1) != 0:
         return f"Error (code {result.get('code')}): {str_or(result, 'message', 'Unknown error')}"
@@ -567,7 +618,10 @@ def format_objects(result: dict) -> str:
         for fn, fv in fields.items():
             if fn == "ref" or (ref and fn == "id"):
                 continue
-            if isinstance(fv, (dict, list)):
+            if isinstance(fv, str):
+                fv = _strip_html(fv)
+            elif isinstance(fv, (dict, list)):
+                fv = strip_html_recursive(fv)
                 fv = json.dumps(fv, indent=2, ensure_ascii=False)
             lines.append(f"  {fn}: {fv}")
     return "\n".join(lines)
