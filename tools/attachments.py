@@ -27,9 +27,11 @@ InlineImage : always an image; has a secret field for the download URL.
               Download via ?operation=download_inlineimage&id=<id>&s=<secret>
               Has no filename field; friendlyname or fabricated name is used.
 
-Both classes use item_class / item_id to link to the parent object.
-Mimetype lives inside the contents blob so there is no lean metadata
-scan possible -- contents is always fetched directly.
+Auth token note
+---------------
+The auth_token is appended to every download URL unconditionally so that
+both the LLM (calling itop_get_attachment) and the user (clicking the link
+in chat) can access the image without a separate browser session.
 """
 
 from __future__ import annotations
@@ -55,23 +57,17 @@ def _is_image(mimetype: str) -> bool:
     return any(ct.startswith(p) for p in _IMAGE_PREFIXES)
 
 
-def _attachment_url(attachment_id: str | int) -> str:
+def _attachment_url(attachment_id: str | int, token: str) -> str:
     return (
         f"{ITOP_URL}/webservices/ajax.document.php"
-        f"?operation=download_document&id={attachment_id}"
+        f"?operation=download_document&id={attachment_id}&auth_token={token}"
     )
 
 
-def _inline_image_url(record_id: str | int, secret: str) -> str:
-    """Build the InlineImage download URL.
-
-    Correct form: ?operation=download_inlineimage&id=<id>&s=<secret>
-    Both id and s are required. The secret field in the REST response
-    maps to the s query parameter, not secret.
-    """
+def _inline_image_url(record_id: str | int, secret: str, token: str) -> str:
     return (
         f"{ITOP_URL}/webservices/ajax.document.php"
-        f"?operation=download_inlineimage&id={record_id}&s={secret}"
+        f"?operation=download_inlineimage&id={record_id}&s={secret}&auth_token={token}"
     )
 
 
@@ -124,12 +120,12 @@ def _build_image_dict(source, record_id, filename, mimetype, b64_raw, url):
     }
 
 
-async def _fetch_attachments(obj_class, obj_id, itop_request):
+async def _fetch_attachments(obj_class, obj_id, token, itop_request):
     """Fetch Attachment records for a ticket, returning only image types.
 
     Attachment may be any MIME type. The mimetype lives inside the contents
     blob so contents is always fetched. Non-image records are discarded after
-    unpacking.
+    unpacking. auth_token is embedded in the download URL.
     """
     result = await itop_request({
         "operation": "core/get",
@@ -165,7 +161,7 @@ async def _fetch_attachments(obj_class, obj_id, itop_request):
 
         img = _build_image_dict(
             "Attachment", record_id, filename, mimetype, b64_raw,
-            _attachment_url(record_id),
+            _attachment_url(record_id, token),
         )
         images.append(img)
 
@@ -178,12 +174,13 @@ async def _fetch_attachments(obj_class, obj_id, itop_request):
     return images
 
 
-async def _fetch_inline_images(obj_class, obj_id, itop_request):
+async def _fetch_inline_images(obj_class, obj_id, token, itop_request):
     """Fetch InlineImage records for a ticket.
 
     InlineImage is always an image type; no mimetype check needed.
     The download URL requires both the record id and the secret field
     as the s query parameter: ?operation=download_inlineimage&id=<id>&s=<secret>
+    auth_token is embedded in the download URL.
     InlineImage has no filename field; contents.filename, friendlyname,
     or a fabricated name is used as fallback.
     """
@@ -221,9 +218,9 @@ async def _fetch_inline_images(obj_class, obj_id, itop_request):
             mimetype = "image/unknown"
 
         url = (
-            _inline_image_url(record_id, secret)
+            _inline_image_url(record_id, secret, token)
             if secret
-            else _attachment_url(record_id)
+            else _attachment_url(record_id, token)
         )
 
         img = _build_image_dict(
@@ -240,10 +237,10 @@ async def _fetch_inline_images(obj_class, obj_id, itop_request):
     return images
 
 
-async def _fetch_image_attachments(obj_class, obj_id, itop_request):
+async def _fetch_image_attachments(obj_class, obj_id, token, itop_request):
     """Return all images for a ticket from both Attachment and InlineImage."""
-    attachments = await _fetch_attachments(obj_class, obj_id, itop_request)
-    inline_images = await _fetch_inline_images(obj_class, obj_id, itop_request)
+    attachments = await _fetch_attachments(obj_class, obj_id, token, itop_request)
+    inline_images = await _fetch_inline_images(obj_class, obj_id, token, itop_request)
     return attachments + inline_images
 
 
@@ -264,7 +261,8 @@ def register(mcp, get_token, itop_request):
 
           - source class (Attachment or InlineImage)
           - filename, MIME type, size
-          - a download link (always present, uses /webservices/ path)
+          - a download link with auth_token embedded (works for both LLM
+            download via itop_get_attachment and direct user access in browser)
           - an inline base64 data URI when the image is at or below 100 KB
           - a note directing to itop_get_attachment when above 100 KB
 
@@ -283,7 +281,8 @@ def register(mcp, get_token, itop_request):
         if resolved is None:
             return "Error: provide either ticket_ref or key to identify the ticket."
 
-        images = await _fetch_image_attachments(obj_class, resolved, itop_request)
+        token = get_token()
+        images = await _fetch_image_attachments(obj_class, resolved, token, itop_request)
 
         if not images:
             return "No image attachments found for " + obj_class + " " + (ticket_ref or key) + "."
@@ -316,9 +315,11 @@ def register(mcp, get_token, itop_request):
         """Download a single image attachment from iTop and return it as a base64 data URI.
 
         The URL must use the /webservices/ajax.document.php path, not /pages/.
-        The /pages/ path requires a browser session and will not work here.
-        Use the link provided by itop_get_ticket_images which already points
-        to the correct /webservices/ endpoint.
+        Use the link provided by itop_get_ticket_images which already contains
+        the correct /webservices/ endpoint and auth_token parameter.
+
+        If the URL does not already contain auth_token it will be appended
+        automatically. /pages/ is silently rewritten to /webservices/.
 
         Accepts URLs of the form:
           .../webservices/ajax.document.php?operation=download_document&id=...
@@ -336,16 +337,17 @@ def register(mcp, get_token, itop_request):
 
         url = url.replace("/pages/ajax.document.php", "/webservices/ajax.document.php")
 
-        token = get_token()
-        sep = "&" if "?" in url else "?"
-        auth_url = url + sep + "auth_token=" + token
+        if "auth_token=" not in url:
+            token = get_token()
+            sep = "&" if "?" in url else "?"
+            url = url + sep + "auth_token=" + token
 
         if MCP_DEBUG:
             logger.debug("itop_get_attachment HEAD %s", url)
 
         async with _get_http_client() as client:
             try:
-                head_resp = await client.head(auth_url, follow_redirects=True)
+                head_resp = await client.head(url, follow_redirects=True)
                 head_resp.raise_for_status()
             except httpx.HTTPStatusError as e:
                 return "Error: HEAD request failed with HTTP " + str(e.response.status_code) + "."
@@ -364,7 +366,7 @@ def register(mcp, get_token, itop_request):
                 )
 
             try:
-                async with client.stream("GET", auth_url, follow_redirects=True) as resp:
+                async with client.stream("GET", url, follow_redirects=True) as resp:
                     resp.raise_for_status()
                     chunks = []
                     total = 0
