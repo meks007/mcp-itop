@@ -55,9 +55,14 @@ def _is_image(content_type: str) -> bool:
 
 
 def _download_url(attachment_id: str | int) -> str:
-    """Build the ajax.document.php download URL for a given attachment ID."""
+    """Build the ajax.document.php download URL for a given attachment ID.
+
+    Uses /webservices/ path which works for programmatic (LLM) downloads.
+    /pages/ is accessible in a browser session but not via token-authenticated
+    API calls made by this server.
+    """
     return (
-        f"{ITOP_URL}/pages/ajax.document.php"
+        f"{ITOP_URL}/webservices/ajax.document.php"
         f"?operation=download_document&id={attachment_id}"
     )
 
@@ -267,9 +272,14 @@ def register(mcp, get_token, itop_request):
     async def itop_get_attachment(url: str) -> str:
         """Download a single image attachment from iTop and return it as a base64 data URI.
 
-        Accepts an iTop ajax.document.php URL of the form:
-          .../pages/ajax.document.php?operation=download_inlineimage&...
-          .../pages/ajax.document.php?operation=download_document&...
+        The URL must use the /webservices/ajax.document.php path, not /pages/.
+        The /pages/ path requires a browser session and will not work here.
+        Use the link provided by itop_get_ticket_images which already points
+        to the correct /webservices/ endpoint.
+
+        Accepts URLs of the form:
+          .../webservices/ajax.document.php?operation=download_inlineimage&...
+          .../webservices/ajax.document.php?operation=download_document&...
 
         A HEAD request is sent first to verify the Content-Type without
         downloading the full body. Only image/* responses are downloaded.
@@ -281,6 +291,9 @@ def register(mcp, get_token, itop_request):
         """
         if not url or "ajax.document.php" not in url:
             return "Error: url must be an iTop ajax.document.php attachment URL."
+
+        # Enforce /webservices/ path regardless of what was passed in.
+        url = url.replace("/pages/ajax.document.php", "/webservices/ajax.document.php")
 
         token = get_token()
         sep = "&" if "?" in url else "?"
