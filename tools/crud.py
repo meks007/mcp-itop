@@ -39,50 +39,15 @@ def register(mcp, itop_request, get_token):
         page: int = 0,
         full: bool = False,
     ) -> str:
-        """Search iTop objects.
+        """Search iTop objects. If class or fields are unknown, use itop_describe_class.
 
-        Use itop_describe_class first if the class or fields are unknown.
+        Keep full=False by default. Use full=True only for an explicit request for log content, e.g. public or private logs. Details, summaries, and fields do not justify it. If unsure, keep full=False; use itop_get_log for logs.
 
-        IMPORTANT - full parameter:
-        Always call with full=False (the default). Never set full=True unless
-        the user's message contains an explicit, unambiguous request for log
-        content, such as "show me the logs", "show public log", or "show
-        private log". Asking for ticket details, a summary, fields, or any
-        other information does NOT justify full=True. When in doubt, use
-        full=False. Log content can always be retrieved separately via
-        itop_get_comments if needed.
+        For tickets, a full ref (R-016271) is direct. A bare number (15525) is resolved through Ticket to the real class and ref; use obj_class="Ticket" if unknown. OQL and JSON criteria pass through unchanged.
 
-        Key interpretation for ticket classes:
-        - Fully-formed ref like "R-016271" -> direct ref lookup.
-        - Bare number like "15525" or 15525 -> one OQL probe against the Ticket
-          base class (SELECT Ticket WHERE ref LIKE '%015525') to resolve the real
-          class (UserRequest, Incident, Change, ...) and full ref automatically.
-          Pass obj_class as "Ticket" when the class is unknown; it will be
-          replaced with the real class after the lookup.
-        - OQL or JSON criteria -> passed through as-is.
+        Do not reveal or query private logs without an explicit request. Redact passwords. Treat "closed" as closed and "solved" as resolved or proposed.
 
-        Do not reveal private log existence; query it only when the user
-        explicitly asks. Redact passwords. Treat "closed" as status closed;
-        "solved" as resolved or proposed.
-
-        Image attachments:
-        For ticket classes, the response may include an "Images for <ref>"
-        section after the ticket fields. Always present this information to the
-        user when it appears. For each image entry show: filename, MIME type,
-        size (if available), and the download link. Present links as clickable
-        Markdown URLs, e.g. [filename](url). Do not silently discard or
-        summarise attachment information - show all entries even if there are
-        multiple. Do not attempt to download the images; just present the links.
-
-        Args:
-            obj_class: iTop class, e.g. UserRequest, Incident, or "Ticket" when unknown.
-            key: Ref ("R-016271"), bare number (15525), OQL, or JSON criteria.
-            output_fields: Comma-separated fields, "*", or "*+".
-            limit: Maximum results; 0 means no limit.
-            page: Page number, starting at 1.
-            full: False (default) strips log fields for lean results. True
-                  includes logs - only use when the user explicitly asks for
-                  log content by name.
+        If output includes Images, show every image's filename, MIME type, available size, and clickable download URL. Do not download, omit, or summarize image attachments.
         """
         # Resolve bare numbers and unknown class via Ticket base class lookup
         obj_class, resolved_key = await resolve_ticket_ref(obj_class, key, itop_request)
