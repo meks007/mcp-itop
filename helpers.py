@@ -88,9 +88,9 @@ def _seed_field_cache(cls: str, fields: dict) -> None:
     entry = _registry_entry(cls)
     if fields:
         incoming = frozenset(fields.keys())
-        before_set = entry["fields"]                  # snapshot before update
-        new = incoming - before_set                   # truly new fields only
-        entry["fields"] = before_set | incoming       # union: existing + incoming
+        before_set = entry["fields"]
+        new = incoming - before_set
+        entry["fields"] = before_set | incoming
         entry["exists"] = True
         logger.debug(
             "[registry] seed_field_cache cls=%r fields_before=%d fields_after=%d new=%r",
@@ -191,13 +191,11 @@ async def resolve_output_fields(
     cached_fields = _registry_entry(obj_class)["fields"]
 
     if cached_fields:
-        # Warm path: build explicit list pre-filtered
         explicit = sorted(cached_fields - strip - _SYNTHETIC_FIELDS)
         if obj_class in CLASSES_WITH_REF:
             if "ref" in explicit:
                 explicit = ["ref"] + [f for f in explicit if f not in ("ref", "id")]
         if not explicit:
-            # Safety valve: strip removed everything -- fall back to wildcard + post-strip
             logger.debug(
                 "[resolve_output_fields] cls=%r warm cache but strip removed all fields, fallback to wildcard",
                 obj_class,
@@ -211,7 +209,6 @@ async def resolve_output_fields(
         )
         return result_fields, frozenset()
 
-    # Cold path: wildcard + post-strip
     logger.debug(
         "[resolve_output_fields] cls=%r COLD cache miss, using wildcard=%r with post_strip=%r",
         obj_class,
@@ -239,7 +236,7 @@ def apply_field_strip(result: dict, strip: frozenset[str]) -> dict:
         fields = obj_data.get("fields")
         if not isinstance(fields, dict):
             continue
-        _seed_field_cache(cls, fields)   # seed before popping
+        _seed_field_cache(cls, fields)
         stripped = [key for key in strip if key in fields]
         for key in strip:
             fields.pop(key, None)
@@ -389,7 +386,6 @@ async def resolve_ticket_ref(
     logger.debug("[resolve_ticket_ref] cls=%r key=%r", obj_class, key)
     parsed = parse_key(key)
 
-    # Already a fully-formed ref string -- use as-is
     if isinstance(parsed, str) and _REF_PATTERN.match(parsed):
         logger.debug(
             "[resolve_ticket_ref] key=%r is a fully-formed ref, returning cls=%r ref=%r",
@@ -399,7 +395,6 @@ async def resolve_ticket_ref(
         )
         return obj_class, {"ref": parsed}
 
-    # Bare number -- probe Ticket base class to find real class + ref
     if is_bare_number(parsed):
         number = int(parsed) if isinstance(parsed, str) else parsed
         logger.debug(
@@ -416,7 +411,6 @@ async def resolve_ticket_ref(
                 found_ref,
             )
             return found_class, {"ref": found_ref}
-        # Not found -- fall through and let iTop return an error naturally
         suffix = str(number).zfill(6)
         fallback_oql = "SELECT Ticket WHERE ref LIKE '%" + suffix + "'"
         logger.debug(
@@ -426,7 +420,6 @@ async def resolve_ticket_ref(
         )
         return obj_class, fallback_oql
 
-    # OQL, JSON dict, or anything else -- pass through
     logger.debug(
         "[resolve_ticket_ref] key=%r parsed as %r (OQL/dict), passing through cls=%r",
         key,
@@ -434,20 +427,6 @@ async def resolve_ticket_ref(
         obj_class,
     )
     return obj_class, parsed
-
-
-def parse_key_for_ticket(obj_class: str, key: str) -> Any:
-    """Synchronous key parser for ticket classes (no lookup, use resolve_ticket_ref for lookup).
-
-    For cases where an async lookup is not possible (rare), this converts
-    fully-formed refs to criteria dicts. Bare numbers are returned as-is
-    (the async resolve_ticket_ref should be preferred instead).
-    """
-    parsed = parse_key(key)
-    if obj_class in CLASSES_WITH_REF:
-        if isinstance(parsed, str) and _REF_PATTERN.match(parsed):
-            return {"ref": parsed}
-    return parsed
 
 
 async def resolve_key(obj_class: str, ref: str | None, numeric_id: Any, itop_request) -> Any:
@@ -475,7 +454,6 @@ async def resolve_key(obj_class: str, ref: str | None, numeric_id: Any, itop_req
                     pass
 
     if numeric_id is not None:
-        # If numeric_id looks like a bare ticket number, resolve via Ticket base class
         if is_bare_number(numeric_id):
             number = int(numeric_id)
             found_class, found_ref = await resolve_ticket_by_number(number, itop_request)
