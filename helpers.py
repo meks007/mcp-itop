@@ -12,9 +12,9 @@ from typing import Any, Tuple
 from config import ITOP_URL
 
 
-# -------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # SLA helpers
-# -------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 SLA_ANALYSIS_FIELDS = (
     "id,ref,title,status,service_name,org_name,agent_name,caller_name,"
@@ -35,12 +35,155 @@ def sla_is_breached(val: str) -> bool:
     return val.strip().lower() in _SLA_BREACHED_VALUES if val else False
 
 
-# -------------------------------------------------------------------------
-# Classes that carry a human-readable "ref" ticket number in iTop
-# -------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Universal class registry
+# ---------------------------------------------------------------------------
+# Single process-level cache for all iTop class metadata.
+# Per-entry shape:
+#   {
+#     "exists": bool | None,     # None = not yet probed
+#     "fields": frozenset[str],  # known field names, grown from live responses
+#     "meta":   dict,            # arbitrary per-class metadata (e.g. text_field for KB)
+#   }
+_ITOP_CLASS_REGISTRY: dict[str, dict] = {}
 
-# iTop assigns a "ref" field (e.g. "R-000123") to all ticket-like classes.
-# Used by ensure_ref_field() and parse_key_for_ticket().
+
+def _registry_entry(cls: str) -> dict:
+    """Return (and lazily create) the registry slot for a class."""
+    if cls not in _ITOP_CLASS_REGISTRY:
+        _ITOP_CLASS_REGISTRY[cls] = {"exists": None, "fields": frozenset(), "meta": {}}
+    return _ITOP_CLASS_REGISTRY[cls]
+
+
+def registry_get_meta(cls: str, key: str, default: Any = None) -> Any:
+    """Read arbitrary per-class metadata from the registry."""
+    return _registry_entry(cls)["meta"].get(key, default)
+
+
+def registry_set_meta(cls: str, key: str, value: Any) -> None:
+    """Write arbitrary per-class metadata into the registry."""
+    _registry_entry(cls)["meta"][key] = value
+
+
+def _seed_field_cache(cls: str, fields: dict) -> None:
+    """Grow the field inventory for a class from a live response fields dict."""
+    entry = _registry_entry(cls)
+    if fields:
+        entry["fields"] = entry["fields"] | frozenset(fields.keys())
+        entry["exists"] = True
+
+
+async def ensure_class_exists(candidates: list[str], itop_request) -> str:
+    """Return the first class in candidates that exists on the iTop server.
+
+    Each candidate is probed with a minimal core/get (limit 1, output_fields id)
+    unless its existence is already cached in _ITOP_CLASS_REGISTRY. The first
+    confirmed class name is returned; an empty string is returned if none exist.
+
+    All probe results (positive and negative) are cached, so subsequent calls
+    within the same server process pay no network cost.
+    """
+    for cls in candidates:
+        entry = _registry_entry(cls)
+        if entry["exists"] is True:
+            return cls
+        if entry["exists"] is False:
+            continue
+        r = await itop_request({
+            "operation": "core/get",
+            "class": cls,
+            "key": f"SELECT {cls}",
+            "output_fields": "id",
+            "limit": "1",
+        })
+        if r.get("code") == 0:
+            entry["exists"] = True
+            for obj_data in (r.get("objects") or {}).values():
+                _seed_field_cache(cls, obj_data.get("fields") or {})
+            return cls
+        else:
+            entry["exists"] = False
+    return ""
+
+
+async def resolve_output_fields(
+    obj_class: str,
+    output_fields: str,
+    strip: frozenset[str],
+    itop_request,  # noqa: ARG001 - reserved for future warm-miss describe fallback
+) -> tuple[str, frozenset[str]]:
+    """Resolve (output_fields, strip) into (fields_to_request, post_strip_set).
+
+    Three cases:
+
+    1. Explicit field list (not * or *+):
+       Send as-is. Return the full strip set for post-response application.
+       Fields in the strip set that the LLM explicitly requested are silently
+       removed from the result without an error.
+
+    2. Wildcard (* or *+), field cache WARM for obj_class:
+       Build an explicit field list from the cached set minus strip and
+       _SYNTHETIC_FIELDS. Send that explicit list. Return an empty post-strip
+       set -- nothing left to strip.
+
+    3. Wildcard (* or *+), field cache COLD for obj_class:
+       Send the wildcard as-is. Return the strip set for post-response
+       application. The response will seed the cache via apply_field_strip /
+       format_objects, so the next call hits case 2.
+
+    No extra describe request is fired -- the cache grows naturally from every
+    successful core/get response processed by apply_field_strip or format_objects.
+    """
+    is_wildcard = output_fields in ("*", "*+")
+
+    if not is_wildcard or not strip:
+        return output_fields, strip
+
+    cached_fields = _registry_entry(obj_class)["fields"]
+
+    if cached_fields:
+        # Warm path: build explicit list pre-filtered
+        explicit = sorted(cached_fields - strip - _SYNTHETIC_FIELDS)
+        if obj_class in CLASSES_WITH_REF:
+            if "ref" in explicit:
+                explicit = ["ref"] + [f for f in explicit if f not in ("ref", "id")]
+        if not explicit:
+            # Safety valve: strip removed everything -- fall back to wildcard + post-strip
+            return output_fields, strip
+        return ", ".join(explicit), frozenset()
+
+    # Cold path: wildcard + post-strip
+    return output_fields, strip
+
+
+def apply_field_strip(result: dict, strip: frozenset[str]) -> dict:
+    """Remove strip fields from every object in an iTop result dict.
+
+    Mutates result in-place and returns it.
+    Seeds _ITOP_CLASS_REGISTRY with the full field set BEFORE stripping, so
+    the warm-cache path in resolve_output_fields sees the complete inventory
+    on the next call.
+    """
+    if not strip:
+        return result
+    objects = result.get("objects")
+    if not objects:
+        return result
+    for obj_data in objects.values():
+        cls = obj_data.get("class", "")
+        fields = obj_data.get("fields")
+        if not isinstance(fields, dict):
+            continue
+        _seed_field_cache(cls, fields)   # seed before popping
+        for key in strip:
+            fields.pop(key, None)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Classes that carry a human-readable "ref" ticket number in iTop
+# ---------------------------------------------------------------------------
+
 CLASSES_WITH_REF: frozenset[str] = frozenset({
     "UserRequest",
     "Incident",
@@ -55,7 +198,6 @@ CLASSES_WITH_REF: frozenset[str] = frozenset({
     "RFI",
 })
 
-# Matches iTop ticket ref strings like "R-000123", "INC-42", "P-007".
 _REF_PATTERN = re.compile(r"^[A-Z]+-\d+$")
 
 # Fields injected by MCP output formatting that must never be sent to iTop.
@@ -74,7 +216,6 @@ def ensure_ref_field(obj_class: str, output_fields: str) -> str:
     '*' and '*+' are passed through unchanged (iTop handles field expansion).
     Non-ticket classes only have synthetic fields stripped.
     """
-    # Strip synthetic fields universally, even for non-ticket classes
     if output_fields not in ("*", "*+"):
         fields = [f.strip() for f in output_fields.split(",") if f.strip()]
         fields = [f for f in fields if f not in _SYNTHETIC_FIELDS]
@@ -86,7 +227,6 @@ def ensure_ref_field(obj_class: str, output_fields: str) -> str:
         return output_fields
 
     fields = [f.strip() for f in output_fields.split(",") if f.strip()]
-    # Always strip id for ticket classes - ref is the canonical identifier
     fields = [f for f in fields if f != "id"]
     if "ref" not in fields:
         fields.insert(0, "ref")
@@ -94,13 +234,7 @@ def ensure_ref_field(obj_class: str, output_fields: str) -> str:
 
 
 def parse_key_for_ticket(obj_class: str, key: str) -> Any:
-    """Parse a key, resolving ref strings to JSON criteria for ticket classes.
-
-    For classes in CLASSES_WITH_REF, if the key looks like a ticket ref
-    (e.g. "R-000123", "INC-42"), it is converted to {"ref": "<value>"} so
-    iTop resolves it server-side. All other key forms (numeric ID, OQL,
-    JSON) are handled by the standard parse_key() logic.
-    """
+    """Parse a key, resolving ref strings to JSON criteria for ticket classes."""
     parsed = parse_key(key)
     if (
         obj_class in CLASSES_WITH_REF
@@ -115,19 +249,8 @@ async def resolve_key(obj_class: str, ref: str | None, numeric_id: Any, itop_req
     """Resolve a ticket identifier to a numeric key for mutation operations.
 
     Preference order:
-    1. If ref is provided and looks like a ticket ref, look up the numeric key
-       via iTop and return it. This guarantees the correct object is targeted.
-    2. If ref is not a recognizable ref string, fall back to numeric_id.
-    3. If neither is usable, return numeric_id as-is.
-
-    Args:
-        obj_class: iTop class (e.g. UserRequest).
-        ref: Ticket ref string (e.g. "R-016271") or None.
-        numeric_id: Numeric ID or string ID as fallback.
-        itop_request: Async callable for iTop REST requests.
-
-    Returns:
-        Numeric integer key for use in iTop mutation operations.
+    1. ref (ticket ref string, e.g. "R-016271") -- looked up via iTop.
+    2. numeric_id as fallback.
     """
     if ref and isinstance(ref, str) and _REF_PATTERN.match(ref.strip()):
         result = await itop_request({
@@ -144,7 +267,6 @@ async def resolve_key(obj_class: str, ref: str | None, numeric_id: Any, itop_req
                     return int(raw_id)
                 except (ValueError, TypeError):
                     pass
-    # Fallback to numeric_id
     if numeric_id is not None:
         try:
             return int(numeric_id)
@@ -153,9 +275,9 @@ async def resolve_key(obj_class: str, ref: str | None, numeric_id: Any, itop_req
     return numeric_id
 
 
-# -------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Generic helpers
-# -------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 def str_or(d: dict, key: str, default: str = "") -> str:
     v = d.get(key)
@@ -194,9 +316,9 @@ def parse_date_range(start: str, end: str) -> Tuple[str, str]:
     return dt_start.strftime("%Y-%m-%d %H:%M:%S"), dt_end.strftime("%Y-%m-%d %H:%M:%S")
 
 
-# -------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # iTop response formatters
-# -------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 def extract_objects(result: dict) -> list[dict]:
     """Extract list of {class, key, fields} from iTop response."""
@@ -205,25 +327,20 @@ def extract_objects(result: dict) -> list[dict]:
         return []
     out = []
     for _obj_key, obj_data in objs.items():
-        out.append(
-            {
-                "class": obj_data.get("class", "?"),
-                "key": obj_data.get("key", "?"),
-                "fields": obj_data.get("fields", {}),
-            }
-        )
+        out.append({
+            "class": obj_data.get("class", "?"),
+            "key": obj_data.get("key", "?"),
+            "fields": obj_data.get("fields", {}),
+        })
     return out
 
 
 def format_objects(result: dict) -> str:
     """Format iTop response objects into readable string.
 
-    For each object:
-    - If a 'ref' field is present, it is used as the header label instead of
-      the numeric key, and 'ref' is suppressed from the field list.
-    - 'id' is always suppressed when 'ref' is present (redundant).
-    - A 'link' line is injected using ITOP_URL + class + numeric key, giving
-      the LLM a direct URL to the object in the iTop UI.
+    Side effect: seeds _ITOP_CLASS_REGISTRY with the field inventory for
+    every class seen, so resolve_output_fields hits the warm-cache path on
+    subsequent calls for the same class.
     """
     if result.get("code", -1) != 0:
         return f"Error (code {result.get('code')}): {str_or(result, 'message', 'Unknown error')}"
@@ -235,17 +352,15 @@ def format_objects(result: dict) -> str:
         cls = str_or(obj_data, "class", "?")
         oid = str_or(obj_data, "key", "?")
         fields = obj_data.get("fields", {}) or {}
-        # Use ref as the header label when available
+        _seed_field_cache(cls, fields)
         ref = fields.get("ref")
         label = ref if ref else oid
         lines.append(f"\n--- {cls}::{label} ---")
-        # Inject direct link to the iTop UI object page
         if ITOP_URL and oid:
             lines.append(
                 f"  link: {ITOP_URL}/pages/UI.php?operation=details&class={cls}&id={oid}"
             )
         for fn, fv in fields.items():
-            # ref is already in the header; id is redundant when ref is present
             if fn == "ref" or (ref and fn == "id"):
                 continue
             if isinstance(fv, (dict, list)):
