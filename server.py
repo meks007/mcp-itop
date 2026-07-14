@@ -118,7 +118,7 @@ def _get_token() -> str:
 _analytics.register(mcp, itop_request)
 _attachments.register(mcp, _get_token, itop_request)
 _kb.register(mcp, itop_request)
-_crud.register(mcp, itop_request)
+_crud.register(mcp, itop_request, _get_token)
 _comments.register(mcp, itop_request)
 
 
