@@ -24,7 +24,7 @@ The contents AttributeBlob is returned by the REST API as a dict:
 Attachment  : may be any MIME type; mimetype is checked before including.
               Download via ?operation=download_document&id=<id>
 InlineImage : always an image; has a secret field for the download URL.
-              Download via ?operation=download_inlineimage&secret=<secret>
+              Download via ?operation=download_inlineimage&id=<id>&s=<secret>
               Has no filename field; friendlyname or fabricated name is used.
 
 Both classes use item_class / item_id to link to the parent object.
@@ -62,10 +62,16 @@ def _attachment_url(attachment_id: str | int) -> str:
     )
 
 
-def _inline_image_url(secret: str) -> str:
+def _inline_image_url(record_id: str | int, secret: str) -> str:
+    """Build the InlineImage download URL.
+
+    Correct form: ?operation=download_inlineimage&id=<id>&s=<secret>
+    Both id and s are required. The secret field in the REST response
+    maps to the s query parameter, not secret.
+    """
     return (
         f"{ITOP_URL}/webservices/ajax.document.php"
-        f"?operation=download_inlineimage&secret={secret}"
+        f"?operation=download_inlineimage&id={record_id}&s={secret}"
     )
 
 
@@ -85,14 +91,7 @@ def _unpack_contents(contents: object) -> tuple:
     return "", "", ""
 
 
-def _build_image_dict(
-    source,
-    record_id,
-    filename,
-    mimetype,
-    b64_raw,
-    url,
-):
+def _build_image_dict(source, record_id, filename, mimetype, b64_raw, url):
     """Build the standard image result dict applying the inline/note decision."""
     try:
         raw_bytes = len(base64.b64decode(b64_raw, validate=False)) if b64_raw else 0
@@ -183,7 +182,8 @@ async def _fetch_inline_images(obj_class, obj_id, itop_request):
     """Fetch InlineImage records for a ticket.
 
     InlineImage is always an image type; no mimetype check needed.
-    The download URL requires the secret field, not the record ID.
+    The download URL requires both the record id and the secret field
+    as the s query parameter: ?operation=download_inlineimage&id=<id>&s=<secret>
     InlineImage has no filename field; contents.filename, friendlyname,
     or a fabricated name is used as fallback.
     """
@@ -220,7 +220,11 @@ async def _fetch_inline_images(obj_class, obj_id, itop_request):
         if not mimetype:
             mimetype = "image/unknown"
 
-        url = _inline_image_url(secret) if secret else _attachment_url(record_id)
+        url = (
+            _inline_image_url(record_id, secret)
+            if secret
+            else _attachment_url(record_id)
+        )
 
         img = _build_image_dict(
             "InlineImage", record_id, filename, mimetype, b64_raw, url,
@@ -262,7 +266,7 @@ def register(mcp, get_token, itop_request):
           - filename, MIME type, size
           - a download link (always present, uses /webservices/ path)
           - an inline base64 data URI when the image is at or below 100 KB
-          - a note directing to itop_get_attachment when the image is above 100 KB
+          - a note directing to itop_get_attachment when above 100 KB
 
         For ticket classes (UserRequest, Incident, etc.) prefer ticket_ref
         (e.g. R-016271); it is resolved automatically and takes priority
@@ -318,7 +322,7 @@ def register(mcp, get_token, itop_request):
 
         Accepts URLs of the form:
           .../webservices/ajax.document.php?operation=download_document&id=...
-          .../webservices/ajax.document.php?operation=download_inlineimage&secret=...
+          .../webservices/ajax.document.php?operation=download_inlineimage&id=...&s=...
 
         A HEAD request is sent first to verify the Content-Type without
         downloading the full body. Only image/* responses are downloaded.
