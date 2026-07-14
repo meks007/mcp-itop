@@ -1,5 +1,5 @@
 """
-Attachment tools: fetch and download images attached to iTop tickets.
+Attachment tools: fetch image links and metadata for iTop tickets.
 
 Public API
 ----------
@@ -10,11 +10,12 @@ register(mcp, get_token, itop_request)
         Fetch all image attachments for a ticket via the iTop REST API.
         Queries both Attachment and InlineImage classes.
         - Images <= 100 KB -> inline base64 data URI + download link
-        - Images >  100 KB -> download link only + note to fetch separately
+        - Images >  100 KB -> download link only + note
 
-    itop_get_attachment(url)
-        Download a single attachment by its ajax.document.php URL and return
-        it as a base64 data URI. Hard-capped at 5 MB.
+fetch_image_links(obj_class, obj_id, token, itop_request)
+    Module-level helper (not an MCP tool) used by crud.itop_get to append
+    image links to ticket output. Returns a list of {filename, source, url}
+    dicts without fetching any binary content.
 
 iTop blob field notes
 ---------------------
@@ -29,9 +30,14 @@ InlineImage : always an image; has a secret field for the download URL.
 
 Auth token note
 ---------------
-The auth_token is appended to every download URL unconditionally so that
-both the LLM (calling itop_get_attachment) and the user (clicking the link
-in chat) can access the image without a separate browser session.
+auth_token is appended to every download URL so the link works for both
+direct browser access and programmatic use without a separate session.
+
+Download note
+-------------
+itop_get_attachment is intentionally not registered as an MCP tool.
+Image download by the LLM is not supported. Images are linked in the
+ticket output; the user opens them directly in the browser.
 """
 
 from __future__ import annotations
@@ -102,7 +108,7 @@ def _build_image_dict(source, record_id, filename, mimetype, b64_raw, url):
         note = (
             "Image size (" + str(raw_bytes // 1024) + " KB) exceeds the "
             + str(B64_INLINE_LIMIT // 1024) + " KB inline limit. "
-            "Use itop_get_attachment with the link to fetch it separately."
+            "Open the link directly in a browser to view it."
         )
     else:
         b64_out = None
@@ -121,12 +127,7 @@ def _build_image_dict(source, record_id, filename, mimetype, b64_raw, url):
 
 
 async def _fetch_attachments(obj_class, obj_id, token, itop_request):
-    """Fetch Attachment records for a ticket, returning only image types.
-
-    Attachment may be any MIME type. The mimetype lives inside the contents
-    blob so contents is always fetched. Non-image records are discarded after
-    unpacking. auth_token is embedded in the download URL.
-    """
+    """Fetch Attachment records for a ticket, returning only image types."""
     result = await itop_request({
         "operation": "core/get",
         "class": "Attachment",
@@ -178,11 +179,7 @@ async def _fetch_inline_images(obj_class, obj_id, token, itop_request):
     """Fetch InlineImage records for a ticket.
 
     InlineImage is always an image type; no mimetype check needed.
-    The download URL requires both the record id and the secret field
-    as the s query parameter: ?operation=download_inlineimage&id=<id>&s=<secret>
-    auth_token is embedded in the download URL.
-    InlineImage has no filename field; contents.filename, friendlyname,
-    or a fabricated name is used as fallback.
+    Download URL: ?operation=download_inlineimage&id=<id>&s=<secret>
     """
     result = await itop_request({
         "operation": "core/get",
@@ -244,6 +241,77 @@ async def _fetch_image_attachments(obj_class, obj_id, token, itop_request):
     return attachments + inline_images
 
 
+async def fetch_image_links(obj_class, obj_id, token, itop_request):
+    """Return image link metadata for a ticket without fetching binary content.
+
+    Used by crud.itop_get to append image links to ticket output.
+    Queries both Attachment (image types only) and InlineImage.
+    Each returned dict has: source, filename, mimetype, url.
+    No base64 content is fetched or returned.
+    """
+    att_result = await itop_request({
+        "operation": "core/get",
+        "class": "Attachment",
+        "key": (
+            "SELECT Attachment"
+            " WHERE item_class = '" + obj_class + "'"
+            " AND item_id = " + str(obj_id)
+        ),
+        "output_fields": "contents",
+    })
+
+    links = []
+
+    for obj_key, obj_data in (att_result.get("objects") or {}).items():
+        fields = obj_data.get("fields") or {}
+        record_id = str(obj_data.get("key") or obj_key.split("::")[-1])
+        mimetype, _data, filename = _unpack_contents(fields.get("contents"))
+        if not _is_image(mimetype):
+            continue
+        if not filename:
+            filename = "attachment_" + record_id
+        links.append({
+            "source": "Attachment",
+            "filename": filename,
+            "mimetype": mimetype,
+            "url": _attachment_url(record_id, token),
+        })
+
+    ii_result = await itop_request({
+        "operation": "core/get",
+        "class": "InlineImage",
+        "key": (
+            "SELECT InlineImage"
+            " WHERE item_class = '" + obj_class + "'"
+            " AND item_id = " + str(obj_id)
+        ),
+        "output_fields": "contents, secret, friendlyname",
+    })
+
+    for obj_key, obj_data in (ii_result.get("objects") or {}).items():
+        fields = obj_data.get("fields") or {}
+        record_id = str(obj_data.get("key") or obj_key.split("::")[-1])
+        mimetype, _data, filename = _unpack_contents(fields.get("contents"))
+        secret = (fields.get("secret") or "").strip()
+        if not filename:
+            filename = fields.get("friendlyname") or ("inlineimage_" + record_id)
+        if not mimetype:
+            mimetype = "image/unknown"
+        url = (
+            _inline_image_url(record_id, secret, token)
+            if secret
+            else _attachment_url(record_id, token)
+        )
+        links.append({
+            "source": "InlineImage",
+            "filename": filename,
+            "mimetype": mimetype,
+            "url": url,
+        })
+
+    return links
+
+
 def register(mcp, get_token, itop_request):
     """Register attachment tools."""
 
@@ -261,10 +329,8 @@ def register(mcp, get_token, itop_request):
 
           - source class (Attachment or InlineImage)
           - filename, MIME type, size
-          - a download link with auth_token embedded (works for both LLM
-            download via itop_get_attachment and direct user access in browser)
+          - a download link with auth_token (open in browser to view)
           - an inline base64 data URI when the image is at or below 100 KB
-          - a note directing to itop_get_attachment when above 100 KB
 
         For ticket classes (UserRequest, Incident, etc.) prefer ticket_ref
         (e.g. R-016271); it is resolved automatically and takes priority
@@ -310,88 +376,6 @@ def register(mcp, get_token, itop_request):
 
         return "\n".join(lines)
 
-    @mcp.tool()
-    async def itop_get_attachment(url: str) -> str:
-        """Download a single image attachment from iTop and return it as a base64 data URI.
-
-        The URL must use the /webservices/ajax.document.php path, not /pages/.
-        Use the link provided by itop_get_ticket_images which already contains
-        the correct /webservices/ endpoint and auth_token parameter.
-
-        If the URL does not already contain auth_token it will be appended
-        automatically. /pages/ is silently rewritten to /webservices/.
-
-        Accepts URLs of the form:
-          .../webservices/ajax.document.php?operation=download_document&id=...
-          .../webservices/ajax.document.php?operation=download_inlineimage&id=...&s=...
-
-        A HEAD request is sent first to verify the Content-Type without
-        downloading the full body. Only image/* responses are downloaded.
-        Downloads are capped at 5 MB. Non-image attachments are rejected.
-
-        Args:
-            url: Full iTop ajax.document.php URL for the attachment.
-        """
-        if not url or "ajax.document.php" not in url:
-            return "Error: url must be an iTop ajax.document.php attachment URL."
-
-        url = url.replace("/pages/ajax.document.php", "/webservices/ajax.document.php")
-
-        if "auth_token=" not in url:
-            token = get_token()
-            sep = "&" if "?" in url else "?"
-            url = url + sep + "auth_token=" + token
-
-        if MCP_DEBUG:
-            logger.debug("itop_get_attachment HEAD %s", url)
-
-        async with _get_http_client() as client:
-            try:
-                head_resp = await client.head(url, follow_redirects=True)
-                head_resp.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                return "Error: HEAD request failed with HTTP " + str(e.response.status_code) + "."
-            except httpx.HTTPError as e:
-                return "Error: HEAD request failed: " + str(e)
-
-            content_type = head_resp.headers.get("content-type", "")
-            if MCP_DEBUG:
-                logger.debug("itop_get_attachment HEAD content-type=%s", content_type)
-
-            if not _is_image(content_type):
-                ct_clean = content_type.split(";")[0].strip() or "unknown"
-                return (
-                    "Skipped: attachment is not an image (content-type: " + ct_clean + "). "
-                    "Only image/* attachments are downloaded by this tool."
-                )
-
-            try:
-                async with client.stream("GET", url, follow_redirects=True) as resp:
-                    resp.raise_for_status()
-                    chunks = []
-                    total = 0
-                    async for chunk in resp.aiter_bytes(chunk_size=65536):
-                        total += len(chunk)
-                        if total > _MAX_DL_BYTES:
-                            return (
-                                "Error: attachment exceeds the "
-                                + str(_MAX_DL_BYTES // (1024 * 1024))
-                                + " MB size limit and was not downloaded."
-                            )
-                        chunks.append(chunk)
-            except httpx.HTTPStatusError as e:
-                return "Error: GET request failed with HTTP " + str(e.response.status_code) + "."
-            except httpx.HTTPError as e:
-                return "Error: GET request failed: " + str(e)
-
-        raw = b"".join(chunks)
-        mime = content_type.split(";")[0].strip()
-        b64 = base64.b64encode(raw).decode("ascii")
-        data_uri = "data:" + mime + ";base64," + b64
-
-        if MCP_DEBUG:
-            logger.debug(
-                "itop_get_attachment downloaded %d bytes mime=%s", len(raw), mime
-            )
-
-        return data_uri
+    # itop_get_attachment is intentionally not registered as an MCP tool.
+    # LLM download of attachments is not supported. Images are linked in
+    # ticket output via fetch_image_links; users open them in the browser.
