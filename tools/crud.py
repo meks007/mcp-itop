@@ -12,11 +12,12 @@ from helpers import (
     ensure_ref_field,
     extract_objects,
     format_objects,
+    is_bare_number,
     parse_json_arg,
     parse_key,
-    parse_key_for_ticket,
     resolve_key,
     resolve_output_fields,
+    resolve_ticket_ref,
     str_or,
     CLASSES_WITH_REF,
 )
@@ -51,15 +52,14 @@ def register(mcp, itop_request, get_token):
         full=False. Log content can always be retrieved separately via
         itop_get_comments if needed.
 
-        Key interpretation for ticket classes (UserRequest, Incident, etc.):
-        - A fully-formed ref like "R-016271" is used directly as a ref lookup.
-        - A bare number like "15525" or 15525 is treated as a ticket ref number
-          and automatically converted to the canonical ref format with the
-          class-specific prefix and 6-digit zero-padding, e.g. "R-015525".
-          Never pass a bare number as a database ID for ticket classes -- the
-          ref lookup is always preferred because ticket numbers and database IDs
-          differ in iTop.
-        - An OQL query string or JSON criteria dict is passed through as-is.
+        Key interpretation for ticket classes:
+        - Fully-formed ref like "R-016271" -> direct ref lookup.
+        - Bare number like "15525" or 15525 -> one OQL probe against the Ticket
+          base class (SELECT Ticket WHERE ref LIKE '%015525') to resolve the real
+          class (UserRequest, Incident, Change, ...) and full ref automatically.
+          Pass obj_class as "Ticket" when the class is unknown; it will be
+          replaced with the real class after the lookup.
+        - OQL or JSON criteria -> passed through as-is.
 
         Do not reveal private log existence; query it only when the user
         explicitly asks. Redact passwords. Treat "closed" as status closed;
@@ -75,8 +75,8 @@ def register(mcp, itop_request, get_token):
         multiple. Do not attempt to download the images; just present the links.
 
         Args:
-            obj_class: iTop class, e.g. Server, UserRequest, Person.
-            key: Ticket ref ("R-016271"), bare number (15525), OQL, or JSON.
+            obj_class: iTop class, e.g. UserRequest, Incident, or "Ticket" when unknown.
+            key: Ref ("R-016271"), bare number (15525), OQL, or JSON criteria.
             output_fields: Comma-separated fields, "*", or "*+".
             limit: Maximum results; 0 means no limit.
             page: Page number, starting at 1.
@@ -84,6 +84,9 @@ def register(mcp, itop_request, get_token):
                   includes logs - only use when the user explicitly asks for
                   log content by name.
         """
+        # Resolve bare numbers and unknown class via Ticket base class lookup
+        obj_class, resolved_key = await resolve_ticket_ref(obj_class, key, itop_request)
+
         strip = frozenset() if full else _LEAN_STRIP
         fields_to_request, post_strip = await resolve_output_fields(
             obj_class, ensure_ref_field(obj_class, output_fields), strip, itop_request
@@ -92,7 +95,7 @@ def register(mcp, itop_request, get_token):
         op: dict = {
             "operation": "core/get",
             "class": obj_class,
-            "key": parse_key_for_ticket(obj_class, key),
+            "key": resolved_key,
             "output_fields": fields_to_request,
         }
         if limit > 0:
@@ -173,14 +176,15 @@ def register(mcp, itop_request, get_token):
         itop_apply_stimulus, for example ev_assign, ev_resolve, ev_reopen, or
         ev_pending.
 
-        For ticket classes, prefer ticket_ref such as "R-016271". It is resolved
-        automatically and takes priority over key. Do not invent numeric IDs.
+        For ticket classes, prefer ticket_ref such as "R-016271". A bare number
+        like "15525" in key is resolved automatically via a Ticket base class
+        lookup -- the real class and ref are determined server-side.
 
         Args:
-            obj_class: iTop class, e.g. UserRequest, Incident, or Server.
+            obj_class: iTop class, e.g. UserRequest, Incident, or "Ticket" when unknown.
             fields: JSON object with fields to update; must not include status.
-            ticket_ref: Preferred ticket reference.
-            key: Fallback numeric ID, OQL query, or JSON criteria.
+            ticket_ref: Preferred ticket reference, e.g. "R-016271".
+            key: Bare number, OQL, or JSON criteria when ref is unknown.
             output_fields: Fields to return.
             comment: Optional comment for change tracking.
         """
@@ -267,13 +271,14 @@ def register(mcp, itop_request, get_token):
         - ev_reopen: reopen
         - ev_pending: put on hold, with pending_reason
 
-        Prefer ticket_ref, for example "R-016271". It takes priority over key.
+        Prefer ticket_ref, for example "R-016271". A bare number like "15525"
+        in key is resolved automatically via a Ticket base class lookup.
 
         Args:
-            obj_class: iTop class, e.g. UserRequest or Incident.
+            obj_class: iTop class, e.g. UserRequest or Incident, or "Ticket" when unknown.
             stimulus: Transition code; never ev_close.
             ticket_ref: Preferred ticket reference.
-            key: Fallback numeric ID, OQL, or JSON criteria.
+            key: Bare number, OQL, or JSON criteria when ref is unknown.
             fields: JSON transition fields.
             output_fields: Fields to return.
             comment: Optional change comment.
