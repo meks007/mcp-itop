@@ -65,6 +65,11 @@ def registry_set_meta(cls: str, key: str, value: Any) -> None:
     _registry_entry(cls)["meta"][key] = value
 
 
+def registry_get_fields(cls: str) -> frozenset:
+    """Return the known field inventory for a class (may be empty if not yet seen)."""
+    return _registry_entry(cls)["fields"]
+
+
 def _seed_field_cache(cls: str, fields: dict) -> None:
     """Grow the field inventory for a class from a live response fields dict."""
     entry = _registry_entry(cls)
