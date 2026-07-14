@@ -25,6 +25,35 @@ from config import DEFAULT_COMMENT
 # want in a lean search result (e.g. "description", "solution", "workaround").
 _LEAN_STRIP: frozenset[str] = frozenset({"public_log", "private_log"})
 
+# Fields that iTop manages exclusively through its lifecycle stimulus engine.
+# Setting these via core/update bypasses workflow guards and must never be done.
+# Use itop_apply_stimulus with the appropriate stimulus instead:
+#   status         -> ev_assign / ev_resolve / ev_reopen / ev_pending / ev_propose
+#   agent_id       -> ev_assign / ev_reassign (include team_id)
+#   team_id        -> ev_assign / ev_reassign (include agent_id)
+#   solution       -> ev_resolve (include solution text in fields)
+#   pending_reason -> ev_pending (include pending_reason in fields)
+_STIMULUS_CONTROLLED_FIELDS: frozenset[str] = frozenset({
+    "status",
+    "agent_id",
+    "team_id",
+    "solution",
+    "pending_reason",
+})
+
+_STIMULUS_CONTROLLED_HINT = (
+    "Error: the following fields are controlled by the iTop stimulus engine "
+    "and must not be set via itop_update: {blocked}.\n"
+    "Use itop_apply_stimulus with the appropriate stimulus:\n"
+    "  ev_assign   - assign ticket (agent_id, team_id)\n"
+    "  ev_reassign - reassign to another agent (agent_id, team_id)\n"
+    "  ev_resolve  - resolve ticket (solution)\n"
+    "  ev_reopen   - reopen ticket\n"
+    "  ev_pending  - put on hold (pending_reason)\n"
+    "  ev_propose  - propose solution\n"
+    "Do NOT retry by removing these fields and updating status separately."
+)
+
 
 def register(mcp, itop_request):
     """Register all CRUD tools on the given mcp instance."""
@@ -133,16 +162,19 @@ def register(mcp, itop_request):
     ) -> str:
         """Update fields on an existing iTop object.
 
-        Do not set status with this tool. Ticket state changes must use
-        itop_apply_stimulus, for example ev_assign, ev_resolve, ev_reopen, or
-        ev_pending.
+        NEVER use this tool to change ticket state or assignment. The fields
+        status, agent_id, team_id, solution, and pending_reason are controlled
+        exclusively by the iTop stimulus engine. Attempting to set them here
+        is blocked. Use itop_apply_stimulus instead. If a stimulus fails due
+        to an invalid state transition, report the failure to the user; do not
+        circumvent it by updating fields directly.
 
-        For ticket classes, prefer ticket_ref such as "R-016271". It is resolved
-        automatically and takes priority over key. Do not invent numeric IDs.
+        Prefer ticket_ref such as "R-016271"; it takes priority over key.
 
         Args:
             obj_class: iTop class, e.g. UserRequest, Incident, or Server.
-            fields: JSON object with fields to update; must not include status.
+            fields: JSON object with fields to update. Must not contain
+                    status, agent_id, team_id, solution, or pending_reason.
             ticket_ref: Preferred ticket reference.
             key: Fallback numeric ID, OQL query, or JSON criteria.
             output_fields: Fields to return.
@@ -152,16 +184,10 @@ def register(mcp, itop_request):
         if isinstance(parsed, str):
             return parsed
 
-        if isinstance(parsed, dict) and "status" in parsed:
-            return (
-                "Error: 'status' cannot be set via itop_update. "
-                "iTop enforces status transitions through its workflow engine. "
-                "Use itop_apply_stimulus with the appropriate stimulus instead:\n"
-                "  ev_assign   - assign ticket\n"
-                "  ev_resolve  - resolve ticket (include solution in fields)\n"
-                "  ev_reopen   - reopen ticket\n"
-                "  ev_pending  - put ticket on hold"
-            )
+        if isinstance(parsed, dict):
+            blocked = sorted(_STIMULUS_CONTROLLED_FIELDS & parsed.keys())
+            if blocked:
+                return _STIMULUS_CONTROLLED_HINT.format(blocked=", ".join(blocked))
 
         resolved = await resolve_key(obj_class, ticket_ref or None, key or None, itop_request)
 
@@ -220,18 +246,22 @@ def register(mcp, itop_request):
     ) -> str:
         """Apply a lifecycle transition to an iTop object.
 
-        Use this tool, not itop_update, to change ticket status. To finish a
-        ticket, use ev_resolve with a solution in fields; ev_close is not allowed.
+        This is the ONLY tool allowed to change ticket state or assignment.
+        Never fall back to itop_update if this call fails. If iTop rejects the
+        stimulus because the transition is not valid from the current state,
+        report the failure to the user and stop. Do not attempt to reach the
+        target state via intermediate field updates or a different stimulus
+        chain without explicit user instruction.
 
-        For UserRequest and Incident, common stimuli are:
-        - ev_assign: assign, with agent_id and team_id
-        - ev_reassign: assign to another agent
-        - ev_propose: propose a solution
-        - ev_resolve: resolve, with solution
-        - ev_reopen: reopen
-        - ev_pending: put on hold, with pending_reason
+        Common stimuli for UserRequest / Incident:
+          ev_assign   - assign (agent_id, team_id)
+          ev_reassign - reassign (agent_id, team_id)
+          ev_propose  - propose solution
+          ev_resolve  - resolve (solution)
+          ev_reopen   - reopen
+          ev_pending  - hold (pending_reason)
 
-        Prefer ticket_ref, for example "R-016271". It takes priority over key.
+        Prefer ticket_ref, e.g. "R-016271"; it takes priority over key.
 
         Args:
             obj_class: iTop class, e.g. UserRequest or Incident.
@@ -264,6 +294,17 @@ def register(mcp, itop_request):
             "output_fields": ensure_ref_field(obj_class, output_fields),
             "comment": comment or DEFAULT_COMMENT,
         })
+
+        if result.get("code", -1) != 0:
+            msg = str_or(result, "message", "Unknown error")
+            return (
+                f"Error (code {result.get('code')}): {msg}\n"
+                "The stimulus was rejected by iTop. This may mean the transition "
+                "is not available from the current state. "
+                "Do NOT attempt to reach the target state via itop_update or any "
+                "other field manipulation. Report the failure to the user."
+            )
+
         return format_objects(result)
 
     @mcp.tool()
