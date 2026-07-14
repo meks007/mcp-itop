@@ -24,7 +24,7 @@ from helpers import (
 from config import DEFAULT_COMMENT
 
 # Fields stripped by itop_get when full=False.
-_LEAN_STRIP: frozenset[str] = frozenset({"public_log", "private_log"})
+_LEAN_STRIP: frozenset[str] = frozenset({"private_log"})
 
 
 def register(mcp, itop_request, get_token):
