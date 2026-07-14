@@ -59,6 +59,15 @@ def register(mcp, itop_request, get_token):
         explicitly asks. Redact passwords. Treat "closed" as status closed;
         "solved" as resolved or proposed.
 
+        Image attachments:
+        For ticket classes, the response may include an "Images for <ref>"
+        section after the ticket fields. Always present this information to the
+        user when it appears. For each image entry show: filename, MIME type,
+        size (if available), and the download link. Present links as clickable
+        Markdown URLs, e.g. [filename](url). Do not silently discard or
+        summarise attachment information - show all entries even if there are
+        multiple. Do not attempt to download the images; just present the links.
+
         Args:
             obj_class: iTop class, e.g. Server, UserRequest, Person.
             key: Ticket ref, OQL query, numeric ID, or JSON criteria.
