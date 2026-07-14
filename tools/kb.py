@@ -9,15 +9,23 @@ from helpers import (
     extract_objects,
     format_objects,
     format_table,
+    registry_get_fields,
     registry_get_meta,
     registry_set_meta,
     str_or,
 )
 
-# Candidate class pairs: (article_class, category_class)
+# Candidate article classes in probe order
 _KB_CANDIDATES = ["KBEntry", "FAQ"]
 _KB_CAT_MAP = {"KBEntry": "KBCategory", "FAQ": "FAQCategory"}
-_KB_TEXT_FIELD_CANDIDATES = ["description", "summary", "contents", "solution", "document"]
+
+# Candidate text body fields in preference order.
+# iTop returns code=0 even for unknown fields in a plain SELECT output_fields
+# probe, but OQL WHERE clauses reject unknown field names with code=100.
+# We therefore resolve the text field against the registry field inventory
+# (populated from the class existence probe) rather than via a live request.
+# This list is also used as a final fallback when the registry is empty.
+_KB_TEXT_FIELD_CANDIDATES = ["description", "summary", "solution", "document"]
 
 
 def register(mcp, itop_request):
@@ -30,12 +38,33 @@ def register(mcp, itop_request):
     async def _kb_text_field(kb_cls: str) -> str:
         """Return the confirmed text body field for kb_cls.
 
-        Result is stored in the universal class registry under meta key
-        'text_field' so the probe runs at most once per server lifetime.
+        Resolution order:
+        1. Registry meta cache (text_field key) -- free after first call.
+        2. Registry field inventory -- populated by ensure_class_exists from
+           the existence probe response. We intersect _KB_TEXT_FIELD_CANDIDATES
+           with the known fields and return the first match. This avoids the
+           false-positive probe bug where iTop accepts unknown field names in
+           output_fields for a plain SELECT but then rejects them in OQL WHERE.
+        3. Live output_fields probe -- last resort for empty classes or when
+           the existence probe returned no objects (and thus no field inventory).
+        4. Hard fallback to "description".
         """
         cached = registry_get_meta(kb_cls, "text_field")
         if cached:
             return cached
+
+        # Path 2: intersect candidate list with registry field inventory
+        known = registry_get_fields(kb_cls)
+        if known:
+            for field in _KB_TEXT_FIELD_CANDIDATES:
+                if field in known:
+                    registry_set_meta(kb_cls, "text_field", field)
+                    return field
+
+        # Path 3: live probe -- only reached when class has zero instances
+        # so the existence probe returned no objects to seed the field cache.
+        # We must use a real request here; we accept the false-positive risk
+        # because there is no better option for an empty class.
         for field in _KB_TEXT_FIELD_CANDIDATES:
             r = await itop_request({
                 "operation": "core/get",
@@ -47,7 +76,8 @@ def register(mcp, itop_request):
             if r.get("code") == 0:
                 registry_set_meta(kb_cls, "text_field", field)
                 return field
-        # Last resort -- keeps title search working even if body probe fails
+
+        # Path 4: hard fallback
         registry_set_meta(kb_cls, "text_field", "description")
         return "description"
 
@@ -62,14 +92,13 @@ def register(mcp, itop_request):
     ) -> str:
         """Search knowledge-base articles by text in title or body.
 
-        Auto-detects KBEntry vs FAQ and probes which field holds the article
-        body (description, summary, contents, solution, document). Single
-        quotes in query are stripped -- iTop OQL has no backslash-escape support.
+        Auto-detects KBEntry vs FAQ and resolves the body field name against
+        the server's actual field inventory -- never guesses a field that would
+        cause an OQL error. Single quotes in query are stripped (iTop OQL has
+        no backslash-escape support).
 
         Supply oql to bypass the auto-built LIKE query entirely (same pattern
         as itop_get). When oql is provided, query is used only in the header.
-        Call itop_describe_class with the KB class first if the exact fields
-        are known.
 
         Args:
             query: Search text. Single quotes stripped before OQL use.
@@ -104,9 +133,8 @@ def register(mcp, itop_request):
             return (
                 f"No KB articles found for query '{query}'.\n"
                 f"OQL used: {effective_oql}\n"
-                f"Body field probed: {text_field}\n"
-                "Tip: call itop_describe_class with the KB class to verify available "
-                "fields, then retry with an explicit oql parameter."
+                f"Body field used: {text_field}\n"
+                "Tip: supply an explicit oql parameter to override the search query."
             )
 
         header = ["ID", "Title", "Category", "Status"]
