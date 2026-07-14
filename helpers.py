@@ -203,10 +203,43 @@ CLASSES_WITH_REF: frozenset[str] = frozenset({
     "RFI",
 })
 
+# Matches a fully-formed iTop ref, e.g. "R-016271" or "I-003"
 _REF_PATTERN = re.compile(r"^[A-Z]+-\d+$")
+
+# Matches a bare integer that the user typed as a ticket number, e.g. "15525"
+# These are treated as ref numbers, not database IDs, for ticket classes.
+_BARE_NUMBER_PATTERN = re.compile(r"^\d+$")
 
 # Fields injected by MCP output formatting that must never be sent to iTop.
 _SYNTHETIC_FIELDS: frozenset[str] = frozenset({"link"})
+
+# Ref prefixes per ticket class. Used when a bare number is given so we can
+# build the canonical ref (e.g. 15525 -> R-015525 for UserRequest).
+_CLASS_REF_PREFIX: dict[str, str] = {
+    "UserRequest": "R",
+    "Incident": "I",
+    "Problem": "P",
+    "Change": "C",
+    "ChangeRequest": "C",
+    "NormalChange": "C",
+    "EmergencyChange": "C",
+    "RoutineChange": "C",
+    "ServiceRequest": "SR",
+    "RFC": "RFC",
+    "RFI": "RFI",
+}
+
+
+def _bare_number_to_ref(obj_class: str, number: int) -> dict:
+    """Convert a bare integer to an iTop ref criteria dict.
+
+    Uses the class-specific prefix and zero-pads to 6 digits, matching the
+    default iTop ref format (e.g. 15525 -> {"ref": "R-015525"}).
+    Falls back to prefix "T" if the class is not in the prefix map.
+    """
+    prefix = _CLASS_REF_PREFIX.get(obj_class, "T")
+    ref = prefix + "-" + str(number).zfill(6)
+    return {"ref": ref}
 
 
 def ensure_ref_field(obj_class: str, output_fields: str) -> str:
@@ -239,14 +272,32 @@ def ensure_ref_field(obj_class: str, output_fields: str) -> str:
 
 
 def parse_key_for_ticket(obj_class: str, key: str) -> Any:
-    """Parse a key, resolving ref strings to JSON criteria for ticket classes."""
+    """Parse a key for ticket classes, normalising refs and bare numbers.
+
+    Resolution order for ticket classes (CLASSES_WITH_REF):
+    1. Fully-formed ref (e.g. "R-016271")  -> {"ref": "R-016271"}
+    2. Bare integer string (e.g. "15525")  -> {"ref": "R-015525"}
+       The class-specific prefix is used and the number is zero-padded to
+       6 digits to match iTop's default ref format.
+    3. Anything else (OQL, JSON string)    -> parsed as-is via parse_key().
+
+    For non-ticket classes the key is always parsed as-is.
+    """
     parsed = parse_key(key)
-    if (
-        obj_class in CLASSES_WITH_REF
-        and isinstance(parsed, str)
-        and _REF_PATTERN.match(parsed)
-    ):
+
+    if obj_class not in CLASSES_WITH_REF:
+        return parsed
+
+    # Fully-formed ref string, e.g. "R-016271"
+    if isinstance(parsed, str) and _REF_PATTERN.match(parsed):
         return {"ref": parsed}
+
+    # Bare integer -- user typed the ticket number without prefix/leading zeros
+    if isinstance(parsed, int):
+        return _bare_number_to_ref(obj_class, parsed)
+    if isinstance(parsed, str) and _BARE_NUMBER_PATTERN.match(parsed):
+        return _bare_number_to_ref(obj_class, int(parsed))
+
     return parsed
 
 
