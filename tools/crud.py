@@ -38,31 +38,23 @@ def register(mcp, itop_request):
         page: int = 0,
         full: bool = False,
     ) -> str:
-        """Search iTop objects. If class or fields are unknown, use itop_describe_class.
-
-        BATCHING -- always combine multiple lookups for the same class into one call:
-        - Multiple refs:    key="SELECT UserRequest WHERE ref IN ('R-001', 'R-002', 'R-003')"
-        - Multiple numbers: key="SELECT Ticket WHERE ref LIKE '%001' OR ref LIKE '%002'"
-        - Mixed criteria:   key="SELECT UserRequest WHERE status = 'open' OR ref = 'R-005'"
-        Never call itop_get in a loop once per ticket/object when an OQL WHERE ... IN (...)
-        or OR clause can fetch them all in a single call. Pass obj_class="Ticket" when the
-        concrete class is unknown and let the OQL do the filtering.
-
-        full controls whether suppressed fields (e.g. private_log) are included.
-        Set full=True when the user asks for full details, complete information,
-        everything, all fields, or the full record -- not just when logs are
-        explicitly mentioned. Keep full=False for brief or summary queries.
-        Do not reveal private logs without an explicit user request even when full=True.
-
-        READING TICKET LOGS: public_log and private_log are part of the full
-        record. To read comments or log entries, call itop_get with full=True.
-        There is no separate log tool -- do NOT attempt to call itop_get_log or
-        any other log-specific tool; use itop_get with full=True instead.
-
-        For tickets, a full ref (R-016271) is direct. A bare number (15525) is resolved through Ticket to the real class and ref; use obj_class="Ticket" if unknown. OQL and JSON criteria pass through unchanged.
-
-        Redact passwords. Treat "closed" as closed and "solved" as resolved or proposed.
-        """
+        """Search iTop objects. Use itop_describe_class for unknown classes/fields.
+        
+        Batch same-class lookups in one call with OQL IN or OR, for example:
+        key="SELECT UserRequest WHERE ref IN ('R-001','R-002')". Do not call itop_get
+        once per object when one query can fetch all results. Use obj_class="Ticket"
+        when the concrete ticket class is unknown.
+        
+        Set full=True for full details, all fields, or comments. This includes
+        suppressed fields such as private_log. Keep full=False for summaries. Never
+        reveal private logs without an explicit request. Read ticket comments with
+        this tool and full=True; no separate log tool exists.
+        
+        A full ticket ref such as R-016271 is direct. A bare number such as 15525 is
+        resolved through Ticket to its real class and ref. Criteria pass through unchanged.
+        
+        Redact passwords. Treat "closed" as closed and "solved" as resolved or
+        proposed."""
         # Resolve bare numbers and unknown class via Ticket base class lookup
         obj_class, resolved_key = await resolve_ticket_ref(obj_class, key, itop_request)
 
@@ -216,31 +208,29 @@ def register(mcp, itop_request):
         output_fields: str = "ref, friendlyname, status",
         comment: str = "",
     ) -> str:
-        """Apply a lifecycle transition to an iTop object.
-
-        Use this tool, not itop_update, to change ticket status. To finish a
-        ticket, use ev_resolve with a solution in fields; ev_close is not allowed.
-
-        For UserRequest and Incident, common stimuli are:
-        - ev_assign: assign, with agent_id and team_id
+        """Apply an iTop lifecycle transition.
+        
+        Use this, not itop_update, to change status. Finish tickets with ev_resolve and
+        a solution in fields. Never use ev_close.
+        
+        Common stimuli:
+        - ev_assign: assign with agent_id and team_id
         - ev_reassign: assign to another agent
         - ev_propose: propose a solution
-        - ev_resolve: resolve, with solution
+        - ev_resolve: resolve with solution
         - ev_reopen: reopen
-        - ev_pending: put on hold, with pending_reason
-
-        Prefer ticket_ref, for example "R-016271". A bare number like "15525"
-        in key is resolved automatically via a Ticket base class lookup.
-
+        - ev_pending: hold with pending_reason
+        
+        Prefer ticket_ref. Bare numbers are resolved through Ticket.
+        
         Args:
-            obj_class: iTop class, e.g. UserRequest or Incident, or "Ticket" when unknown.
+            obj_class: UserRequest, Incident, or "Ticket" when unknown.
             stimulus: Transition code; never ev_close.
             ticket_ref: Preferred ticket reference.
-            key: Bare number, OQL, or JSON criteria when ref is unknown.
+            key: Bare number, OQL, or JSON criteria if the ref is unknown.
             fields: JSON transition fields.
-            output_fields: Fields to return.
-            comment: Optional change comment.
-        """
+            output_fields: Return fields.
+            comment: Optional change comment."""
         parsed = parse_json_arg(fields, "fields")
         if isinstance(parsed, str):
             return parsed
