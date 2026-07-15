@@ -14,9 +14,10 @@ register(mcp, itop_request)
             directly to resources/read.
 
         itop_download_attachment(uri)
-            Validate an itop:// attachment URI and return it unchanged.
-            The URI is already a valid resources/read URI; this tool exists
-            so the LLM has an explicit validation step before reading.
+            Validate an itop:// attachment URI and return a ResourceLink
+            that the LLM can embed directly in the conversation context.
+            The ResourceLink points at the matching path-parametrised
+            resource handler so resources/read delivers the blob.
 
         itop_get_ticket_attachments(obj_class, ticket_ref, key)
             List all non-image file attachments for a ticket.
@@ -46,6 +47,7 @@ InlineImage : always an image; has a secret field for the download URL.
 from __future__ import annotations
 
 import httpx
+from mcp.types import ResourceLink
 
 from config import ITOP_TIMEOUT, ITOP_URL, ITOP_VERIFY_SSL, MCP_DEBUG, logger
 from helpers import resolve_key
@@ -132,6 +134,17 @@ def _validate_itop_uri(uri: str) -> str:
         "Unrecognised URI scheme. Expected itop://attachment/<id>"
         " or itop://inlineimage/<secret>/<record_id>. Got: " + uri
     )
+
+
+def _mime_for_uri(uri: str) -> str:
+    """Best-effort MIME type for a validated itop:// URI.
+
+    InlineImages are always images; Attachments are treated as image/png
+    as a sensible default since this tool is called from the image flow.
+    """
+    if uri.startswith("itop://inlineimage/"):
+        return "image/png"
+    return "image/png"
 
 
 def register(mcp, itop_request):
@@ -221,7 +234,7 @@ def register(mcp, itop_request):
         Returns a plain text listing with filename, mimetype and resource_uri
         per image. Each resource_uri is a valid MCP resource URI that can be
         read directly via resources/read (or passed to itop_download_attachment
-        for an explicit validation step first).
+        to obtain a ResourceLink for embedding in the conversation context).
 
         For ticket classes (UserRequest, Incident, etc.) prefer ticket_ref
         (e.g. R-016271); it is resolved automatically and takes priority
@@ -310,7 +323,8 @@ def register(mcp, itop_request):
         lines = [
             str(len(images)) + " image attachment(s) found for "
             + obj_class + " " + label + ".",
-            "Read each resource_uri directly via resources/read to retrieve the image blob.",
+            "Pass each resource_uri to itop_download_attachment to get a ResourceLink,",
+            "then read it via resources/read to retrieve the image blob.",
             "",
         ]
         for img in images:
@@ -325,24 +339,47 @@ def register(mcp, itop_request):
     # ------------------------------------------------------------------
 
     @mcp.tool()
-    async def itop_download_attachment(uri: str) -> str:
-        """Validate an iTop attachment URI and return it ready for resources/read.
+    async def itop_download_attachment(
+        uri: str,
+        name: str = "",
+        description: str = "",
+    ) -> ResourceLink:
+        """Return a ResourceLink for an iTop image attachment.
 
-        The URI returned by itop_get_ticket_images is already a valid
-        resources/read URI. This tool validates the scheme and returns it
-        unchanged, giving the LLM an explicit confirmation step.
+        Validates the itop:// URI and wraps it in a ResourceLink so the
+        LLM can embed the resource reference directly in the conversation
+        context. The linked resource handler (itop://attachment/{id} or
+        itop://inlineimage/{secret}/{id}) serves the binary blob when the
+        client calls resources/read.
 
         Supported URI schemes:
           itop://attachment/<attachment_id>
           itop://inlineimage/<secret>/<record_id>
 
         Args:
-            uri: Resource URI as returned by itop_get_ticket_images.
+            uri:         Resource URI as returned by itop_get_ticket_images.
+            name:        Optional human-readable name for the ResourceLink.
+            description: Optional description for the ResourceLink.
         """
         validated = _validate_itop_uri(uri)
+        mime = _mime_for_uri(validated)
+
+        link_name = name or validated
+        link_description = description or "Read this resource to retrieve the iTop image blob."
+
         if MCP_DEBUG:
-            logger.debug("itop_download_attachment: uri=%s (validated)", validated)
-        return validated
+            logger.debug(
+                "itop_download_attachment: uri=%s mime=%s name=%r",
+                validated, mime, link_name,
+            )
+
+        return ResourceLink(
+            type="resource_link",
+            uri=validated,
+            name=link_name,
+            description=link_description,
+            mimeType=mime,
+        )
 
     # ------------------------------------------------------------------
     # Tool: itop_get_ticket_attachments
