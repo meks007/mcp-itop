@@ -25,29 +25,24 @@ def register(mcp, itop_request):
         format: str = "text",
     ) -> str:
         """Add a public or private comment to an iTop ticket.
-
-        Public comments are visible in the end-user portal. Private comments are
-        visible only to agents. When the user does not specify it, always assume
-        the public log.
-
-        To READ log entries, use itop_get with full=True instead -- the full
-        record already contains public_log (and private_log when authorised).
-        Do NOT call a separate log tool; none exists.
-
-        Prefer ticket_ref, for example "R-016271", whenever it is available from
-        a previous result. A bare number like "15525" in ticket_id is resolved
-        automatically -- the real class and ref are looked up via the Ticket base
-        class (SELECT Ticket WHERE ref LIKE '%015525'). Pass ticket_class as
-        "Ticket" when the class is not known.
-
+        
+        Public comments are portal-visible; private comments are agent-only. If the
+        user does not specify visibility, use the public log.
+        
+        Read comments with itop_get and full=True. The full record contains public_log
+        and, when authorized, private_log. No separate log tool exists.
+        
+        Prefer ticket_ref, for example "R-016271". A bare ticket_id such as "15525"
+        is resolved to its real class and reference through Ticket. Use
+        ticket_class="Ticket" when the concrete class is unknown.
+        
         Args:
-            ticket_class: Ticket class, e.g. UserRequest, Incident, or "Ticket".
+            ticket_class: UserRequest, Incident, or "Ticket" when unknown.
             text: Comment text.
-            ticket_ref: Preferred ticket reference, e.g. "R-016271".
-            ticket_id: Bare number or fallback numeric ID when ref is unknown.
+            ticket_ref: Preferred ticket reference, for example "R-016271".
+            ticket_id: Bare number or numeric ID when the ref is unknown.
             is_public: True for public_log; False for private_log.
-            format: Comment format: "text" or "html".
-        """
+            format: "text" or "html"."""
         if not ticket_ref and not ticket_id:
             return "Error: supply ticket_ref (e.g. 'R-016271') or ticket_id."
 
