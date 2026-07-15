@@ -40,6 +40,14 @@ def register(mcp, itop_request):
     ) -> str:
         """Search iTop objects. If class or fields are unknown, use itop_describe_class.
 
+        BATCHING -- always combine multiple lookups for the same class into one call:
+        - Multiple refs:    key="SELECT UserRequest WHERE ref IN ('R-001', 'R-002', 'R-003')"
+        - Multiple numbers: key="SELECT Ticket WHERE ref LIKE '%001' OR ref LIKE '%002'"
+        - Mixed criteria:   key="SELECT UserRequest WHERE status = 'open' OR ref = 'R-005'"
+        Never call itop_get in a loop once per ticket/object when an OQL WHERE ... IN (...)
+        or OR clause can fetch them all in a single call. Pass obj_class="Ticket" when the
+        concrete class is unknown and let the OQL do the filtering.
+
         full controls whether suppressed fields (e.g. private_log) are included.
         Set full=True when the user asks for full details, complete information,
         everything, all fields, or the full record -- not just when logs are
