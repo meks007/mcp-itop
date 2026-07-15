@@ -10,12 +10,7 @@ register(mcp, itop_request)
         itop_get_ticket_images(obj_class, ticket_ref, key)
             List all image attachments for a ticket. Returns a plain text
             summary with filename, mimetype and resource_uri per image.
-            Tells the LLM how many itop_download_attachment calls are needed.
-
-        itop_download_attachment(uri)
-            Download exactly one attachment by resource URI. Returns an
-            EmbeddedResource with BlobResourceContents carrying pure Base64
-            blob and mimeType. No data-URI prefix is added.
+            The LLM reads each image via resources/read on the returned URI.
 
         itop_get_ticket_attachments(obj_class, ticket_ref, key)
             List all non-image file attachments for a ticket.
@@ -44,10 +39,7 @@ InlineImage : always an image; has a secret field for the download URL.
 
 from __future__ import annotations
 
-import base64
-
 import httpx
-from mcp.types import BlobResourceContents, EmbeddedResource
 
 from config import ITOP_TIMEOUT, ITOP_URL, ITOP_VERIFY_SSL, MCP_DEBUG, logger
 from helpers import resolve_key
@@ -103,32 +95,6 @@ async def _download_binary(url: str) -> tuple[bytes, str]:
         ct = response.headers.get("content-type", "application/octet-stream")
         mimetype = ct.split(";")[0].strip()
         return response.content, mimetype
-
-
-def _parse_uri(uri: str) -> tuple[str, str] | None:
-    """Parse an itop:// resource URI into (download_url, canonical_uri).
-
-    Supported schemes:
-      itop://attachment/<attachment_id>
-      itop://inlineimage/<secret>/<record_id>
-
-    Returns (url, uri) on success, None on unrecognised URI.
-    """
-    if uri.startswith("itop://attachment/"):
-        attachment_id = uri[len("itop://attachment/"):]
-        if not attachment_id:
-            return None
-        return _attachment_url(attachment_id), uri
-
-    if uri.startswith("itop://inlineimage/"):
-        rest = uri[len("itop://inlineimage/"):]
-        parts = rest.split("/", 1)
-        if len(parts) != 2 or not parts[0] or not parts[1]:
-            return None
-        secret, record_id = parts
-        return _inline_image_url(secret, record_id), uri
-
-    return None
 
 
 def register(mcp, itop_request):
@@ -209,8 +175,8 @@ def register(mcp, itop_request):
         combined with equal weight.
 
         Returns a plain text listing with filename, mimetype and resource_uri
-        per image. After receiving this list, call itop_download_attachment
-        once per resource_uri to retrieve each image as a blob.
+        per image. Use resources/read on each resource_uri to retrieve the
+        image as a blob via the registered MCP resource handlers.
 
         For ticket classes (UserRequest, Incident, etc.) prefer ticket_ref
         (e.g. R-016271); it is resolved automatically and takes priority
@@ -299,7 +265,7 @@ def register(mcp, itop_request):
         lines = [
             str(len(images)) + " image attachment(s) found for "
             + obj_class + " " + label + ".",
-            "Call itop_download_attachment once per resource_uri to retrieve each image.",
+            "Use resources/read on each resource_uri to retrieve the image blob.",
             "",
         ]
         for img in images:
@@ -308,59 +274,6 @@ def register(mcp, itop_request):
             lines.append("  resource_uri : " + img["resource_uri"])
 
         return "\n".join(lines)
-
-    # ------------------------------------------------------------------
-    # Tool: itop_download_attachment
-    # ------------------------------------------------------------------
-
-    @mcp.tool()
-    async def itop_download_attachment(uri: str) -> EmbeddedResource:
-        """Download exactly one image attachment by its resource URI.
-
-        Call this tool once per resource_uri returned by itop_get_ticket_images.
-        Each call fetches one image and returns an EmbeddedResource carrying a
-        BlobResourceContents with pure Base64 blob and mimeType.
-        No data-URI prefix is added to the blob.
-
-        Supported URI schemes:
-          itop://attachment/<attachment_id>
-          itop://inlineimage/<secret>/<record_id>
-
-        Args:
-            uri: Resource URI as returned by itop_get_ticket_images.
-        """
-        parsed = _parse_uri(uri)
-        if parsed is None:
-            raise ValueError(
-                "Unrecognised URI scheme. Expected itop://attachment/<id>"
-                " or itop://inlineimage/<secret>/<record_id>. Got: " + uri
-            )
-
-        url, canonical_uri = parsed
-
-        try:
-            content_bytes, mimetype = await _download_binary(url)
-        except Exception as exc:
-            if MCP_DEBUG:
-                logger.debug("itop_download_attachment error: uri=%s exc=%s", uri, exc)
-            raise
-
-        blob = base64.b64encode(content_bytes).decode("ascii")
-
-        if MCP_DEBUG:
-            logger.debug(
-                "itop_download_attachment: uri=%s mime=%s bytes=%d",
-                uri, mimetype, len(content_bytes),
-            )
-
-        return EmbeddedResource(
-            type="resource",
-            resource=BlobResourceContents(
-                uri=canonical_uri,
-                mimeType=mimetype,
-                blob=blob,
-            ),
-        )
 
     # ------------------------------------------------------------------
     # Tool: itop_get_ticket_attachments
