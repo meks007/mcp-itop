@@ -10,28 +10,26 @@ register(mcp, itop_request)
         itop_get_ticket_images(obj_class, ticket_ref, key)
             List all image attachments for a ticket. Returns a plain text
             summary with filename, mimetype and resource_uri per image.
-            Pass each resource_uri to itop_download_attachment to build the
-            fixed resources/read URI, then read it via Langdock.
+            Each resource_uri is a valid MCP resource URI that can be passed
+            directly to resources/read.
 
         itop_download_attachment(uri)
-            Validate an itop:// attachment URI and return the fixed
-            resources/read URI: itop://download?uri=<encoded>
-            Langdock calls resources/read on that fixed URI, which routes
-            the blob through the attachment path and bypasses the
-            tool-response character limit.
+            Validate an itop:// attachment URI and return it unchanged.
+            The URI is already a valid resources/read URI; this tool exists
+            so the LLM has an explicit validation step before reading.
 
         itop_get_ticket_attachments(obj_class, ticket_ref, key)
             List all non-image file attachments for a ticket.
             Returns metadata and browser download links only.
 
     Resources:
-        itop://download
-            Fixed URI registered at startup. Langdock discovers it via
-            resources/list and saves it. At read time, the ?uri= query
-            parameter carries the actual itop://attachment/<id> or
-            itop://inlineimage/<secret>/<record_id> target. The handler
-            URL-decodes the parameter, downloads the binary from iTop,
-            and returns it as a BlobResourceContents.
+        itop://attachment/{attachment_id}
+            Downloads an iTop Attachment record by its numeric ID.
+            Returns the binary blob directly.
+
+        itop://inlineimage/{secret}/{record_id}
+            Downloads an iTop InlineImage by its secret token and record ID.
+            Returns the binary blob directly.
 
 iTop blob field notes
 ---------------------
@@ -47,18 +45,12 @@ InlineImage : always an image; has a secret field for the download URL.
 
 from __future__ import annotations
 
-from urllib.parse import parse_qs, quote, urlencode, urlparse
-
 import httpx
 
 from config import ITOP_TIMEOUT, ITOP_URL, ITOP_VERIFY_SSL, MCP_DEBUG, logger
 from helpers import resolve_key
 
 _IMAGE_PREFIXES = ("image/",)
-
-# Fixed resource URI registered at startup so Langdock can discover it.
-# The dynamic target is carried as the ?uri= query parameter.
-_DOWNLOAD_RESOURCE_URI = "itop://download"
 
 
 def _is_image(mimetype: str) -> bool:
@@ -142,138 +134,72 @@ def _validate_itop_uri(uri: str) -> str:
     )
 
 
-def _build_download_uri(itop_uri: str) -> str:
-    """Build the fixed resources/read URI for a given itop:// URI.
-
-    Returns itop://download?uri=<percent-encoded itop_uri>
-    """
-    return _DOWNLOAD_RESOURCE_URI + "?" + urlencode({"uri": itop_uri})
-
-
-def _resolve_itop_download_url(resource_uri: str) -> tuple[str, str]:
-    """Extract the itop:// URI from a download resource URI and resolve it
-    to an iTop HTTP download URL.
-
-    Args:
-        resource_uri: Full resource URI, e.g.
-                      itop://download?uri=itop%3A%2F%2Fattachment%2F123
-
-    Returns:
-        (http_download_url, itop_uri)
-
-    Raises ValueError on missing or invalid uri parameter.
-    """
-    parsed = urlparse(resource_uri)
-    qs = parse_qs(parsed.query)
-    itop_uris = qs.get("uri", [])
-    if not itop_uris:
-        raise ValueError("Missing uri query parameter in resource URI: " + resource_uri)
-    itop_uri = itop_uris[0]
-    _validate_itop_uri(itop_uri)
-
-    if itop_uri.startswith("itop://attachment/"):
-        attachment_id = itop_uri[len("itop://attachment/"):]
-        return _attachment_url(attachment_id), itop_uri
-
-    rest = itop_uri[len("itop://inlineimage/"):]
-    secret, record_id = rest.split("/", 1)
-    return _inline_image_url(secret, record_id), itop_uri
-
-
 def register(mcp, itop_request):
     """Register attachment tools and resources."""
 
     # ------------------------------------------------------------------
-    # Resource: itop://download  (fixed URI, discovered by Langdock at setup)
+    # Resource: itop://attachment/{attachment_id}
     # ------------------------------------------------------------------
 
-    @mcp.resource(_DOWNLOAD_RESOURCE_URI)
-    async def resource_download() -> bytes:
-        """Download an iTop image attachment.
+    @mcp.resource(
+        "itop://attachment/{attachment_id}",
+        name="itop-attachment",
+        title="iTop ticket attachment",
+        description="An image or file attached to an iTop ticket",
+        mime_type="image/png",
+    )
+    async def resource_attachment(attachment_id: str) -> bytes:
+        """Download an iTop Attachment by its record ID.
 
-        Fixed URI: itop://download
-        The actual attachment is identified by the ?uri= query parameter,
-        which carries the percent-encoded itop://attachment/<id> or
-        itop://inlineimage/<secret>/<record_id> target URI.
-
-        Langdock discovers this resource at setup via resources/list, then
-        calls resources/read with the full itop://download?uri=... URI at
-        runtime. FastMCP passes the full URI string to this handler, which
-        decodes the parameter, downloads the binary from iTop, and returns
-        the bytes. FastMCP wraps the result as BlobResourceContents.
+        Called by the LLM via resources/read with the URI
+        itop://attachment/<id> as returned by itop_get_ticket_images.
+        FastMCP extracts the path parameter and passes it here directly.
         """
-        # FastMCP passes the actual requested URI (including query string)
-        # as the first argument when the registered URI is a fixed pattern
-        # but the client calls it with additional query parameters.
-        # We access it via the MCP request context instead.
-        raise NotImplementedError(
-            "This resource must be called with a ?uri= query parameter. "
-            "Use itop_download_attachment to obtain the correct URI."
-        )
-
-    # ------------------------------------------------------------------
-    # Resource: itop://download?uri=... (actual handler via read_resource)
-    # ------------------------------------------------------------------
-    # FastMCP's @mcp.resource decorator matches on the base URI only.
-    # To serve dynamic query parameters we override the read handler at
-    # the low-level server layer so the full requested URI is available.
-
-    original_read = getattr(mcp, "_resource_manager", None)
-
-    # Register a catch-all read handler by subclassing the resource manager
-    # is not straightforward in mcp.server.fastmcp. Instead we use the
-    # supported pattern: register the resource with a template URI that
-    # captures the query string as a path segment is not possible either.
-    #
-    # Practical solution: the @mcp.resource decorator for the fixed URI
-    # itop://download is registered above so Langdock sees it in
-    # resources/list. The actual blob serving is done by a second handler
-    # registered with a broader URI match using the low-level
-    # @mcp.server.request_handler approach is also not exposed cleanly.
-    #
-    # We therefore use the only clean mechanism available in FastMCP:
-    # register the resource with a URI template that treats the query
-    # string as a named parameter via a fake path segment. Langdock
-    # discovers the fixed base URI itop://download via resources/list
-    # (registered above). When it calls resources/read with the full
-    # itop://download?uri=... URI, FastMCP routes it to whichever handler
-    # matches the full string. We register a second handler that matches
-    # the parametrised form.
-
-    @mcp.resource("itop://download?uri={encoded_uri}")
-    async def resource_download_with_uri(encoded_uri: str) -> bytes:
-        """Serve an iTop image by resolving the ?uri= parameter.
-
-        Called by Langdock via resources/read on the URI produced by
-        itop_download_attachment: itop://download?uri=<encoded>
-        FastMCP decodes the {encoded_uri} path parameter, which here is
-        the percent-encoded itop:// target URI.
-        """
-        from urllib.parse import unquote
-        itop_uri = unquote(encoded_uri)
-        _validate_itop_uri(itop_uri)
-
-        if itop_uri.startswith("itop://attachment/"):
-            attachment_id = itop_uri[len("itop://attachment/"):]
-            http_url = _attachment_url(attachment_id)
-        else:
-            rest = itop_uri[len("itop://inlineimage/"):]
-            secret, record_id = rest.split("/", 1)
-            http_url = _inline_image_url(secret, record_id)
-
+        http_url = _attachment_url(attachment_id)
         try:
             content_bytes, mimetype = await _download_binary(http_url)
         except Exception as exc:
-            if MCP_DEBUG:
-                logger.debug("resource_download_with_uri error: uri=%s exc=%s", itop_uri, exc)
+            logger.debug("resource_attachment error: id=%s exc=%s", attachment_id, exc)
             raise
-
         if MCP_DEBUG:
             logger.debug(
-                "resource_download_with_uri: uri=%s mime=%s bytes=%d",
-                itop_uri, mimetype, len(content_bytes),
+                "resource_attachment: id=%s mime=%s bytes=%d",
+                attachment_id, mimetype, len(content_bytes),
             )
+        return content_bytes
 
+    # ------------------------------------------------------------------
+    # Resource: itop://inlineimage/{secret}/{record_id}
+    # ------------------------------------------------------------------
+
+    @mcp.resource(
+        "itop://inlineimage/{secret}/{record_id}",
+        name="itop-inlineimage",
+        title="iTop inline image",
+        description="An inline image attached to an iTop ticket",
+        mime_type="image/png",
+    )
+    async def resource_inlineimage(secret: str, record_id: str) -> bytes:
+        """Download an iTop InlineImage by its secret token and record ID.
+
+        Called by the LLM via resources/read with the URI
+        itop://inlineimage/<secret>/<record_id> as returned by
+        itop_get_ticket_images. FastMCP extracts both path parameters.
+        """
+        http_url = _inline_image_url(secret, record_id)
+        try:
+            content_bytes, mimetype = await _download_binary(http_url)
+        except Exception as exc:
+            logger.debug(
+                "resource_inlineimage error: secret=%s id=%s exc=%s",
+                secret, record_id, exc,
+            )
+            raise
+        if MCP_DEBUG:
+            logger.debug(
+                "resource_inlineimage: secret=%s id=%s mime=%s bytes=%d",
+                secret, record_id, mimetype, len(content_bytes),
+            )
         return content_bytes
 
     # ------------------------------------------------------------------
@@ -293,9 +219,9 @@ def register(mcp, itop_request):
         combined with equal weight.
 
         Returns a plain text listing with filename, mimetype and resource_uri
-        per image. Pass each resource_uri to itop_download_attachment to get
-        the fixed resources/read URI, then read it via Langdock to retrieve
-        the image blob.
+        per image. Each resource_uri is a valid MCP resource URI that can be
+        read directly via resources/read (or passed to itop_download_attachment
+        for an explicit validation step first).
 
         For ticket classes (UserRequest, Incident, etc.) prefer ticket_ref
         (e.g. R-016271); it is resolved automatically and takes priority
@@ -384,8 +310,7 @@ def register(mcp, itop_request):
         lines = [
             str(len(images)) + " image attachment(s) found for "
             + obj_class + " " + label + ".",
-            "Pass each resource_uri to itop_download_attachment to get the",
-            "resources/read URI, then read it via Langdock to retrieve the image.",
+            "Read each resource_uri directly via resources/read to retrieve the image blob.",
             "",
         ]
         for img in images:
@@ -401,18 +326,11 @@ def register(mcp, itop_request):
 
     @mcp.tool()
     async def itop_download_attachment(uri: str) -> str:
-        """Build the resources/read URI for one image attachment.
+        """Validate an iTop attachment URI and return it ready for resources/read.
 
-        Validates the itop:// resource URI and returns the fixed
-        resources/read URI: itop://download?uri=<percent-encoded uri>
-
-        Langdock then calls resources/read on that URI. The registered
-        itop://download resource handler decodes the parameter, downloads
-        the binary from iTop, and returns it as a blob via the attachment
-        path - bypassing the tool-response character limit entirely.
-
-        Call this tool once per resource_uri returned by itop_get_ticket_images,
-        then read the returned URI via Langdock resources/read.
+        The URI returned by itop_get_ticket_images is already a valid
+        resources/read URI. This tool validates the scheme and returns it
+        unchanged, giving the LLM an explicit confirmation step.
 
         Supported URI schemes:
           itop://attachment/<attachment_id>
@@ -422,15 +340,9 @@ def register(mcp, itop_request):
             uri: Resource URI as returned by itop_get_ticket_images.
         """
         validated = _validate_itop_uri(uri)
-        download_uri = _build_download_uri(validated)
-
         if MCP_DEBUG:
-            logger.debug(
-                "itop_download_attachment: uri=%s download_uri=%s",
-                validated, download_uri,
-            )
-
-        return download_uri
+            logger.debug("itop_download_attachment: uri=%s (validated)", validated)
+        return validated
 
     # ------------------------------------------------------------------
     # Tool: itop_get_ticket_attachments
