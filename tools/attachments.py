@@ -10,7 +10,14 @@ register(mcp, itop_request)
         itop_get_ticket_images(obj_class, ticket_ref, key)
             List all image attachments for a ticket. Returns a plain text
             summary with filename, mimetype and resource_uri per image.
-            The LLM reads each image via resources/read on the returned URI.
+            Call itop_download_attachment once per resource_uri to retrieve
+            each image via the MCP resources/read path.
+
+        itop_download_attachment(uri)
+            Validate and return the resource URI as a plain string.
+            Langdock calls resources/read on the returned URI, routing the
+            blob through the attachment path and bypassing the tool-response
+            character limit.
 
         itop_get_ticket_attachments(obj_class, ticket_ref, key)
             List all non-image file attachments for a ticket.
@@ -97,6 +104,37 @@ async def _download_binary(url: str) -> tuple[bytes, str]:
         return response.content, mimetype
 
 
+def _validate_uri(uri: str) -> str:
+    """Validate an itop:// resource URI and return it unchanged.
+
+    Supported schemes:
+      itop://attachment/<attachment_id>
+      itop://inlineimage/<secret>/<record_id>
+
+    Raises ValueError on unrecognised or malformed URIs.
+    """
+    if uri.startswith("itop://attachment/"):
+        attachment_id = uri[len("itop://attachment/"):]
+        if not attachment_id:
+            raise ValueError("Missing attachment_id in URI: " + uri)
+        return uri
+
+    if uri.startswith("itop://inlineimage/"):
+        rest = uri[len("itop://inlineimage/"):]
+        parts = rest.split("/", 1)
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            raise ValueError(
+                "Malformed inlineimage URI, expected "
+                "itop://inlineimage/<secret>/<record_id>. Got: " + uri
+            )
+        return uri
+
+    raise ValueError(
+        "Unrecognised URI scheme. Expected itop://attachment/<id>"
+        " or itop://inlineimage/<secret>/<record_id>. Got: " + uri
+    )
+
+
 def register(mcp, itop_request):
     """Register attachment tools and resources."""
 
@@ -175,8 +213,8 @@ def register(mcp, itop_request):
         combined with equal weight.
 
         Returns a plain text listing with filename, mimetype and resource_uri
-        per image. Use resources/read on each resource_uri to retrieve the
-        image as a blob via the registered MCP resource handlers.
+        per image. Call itop_download_attachment once per resource_uri to
+        trigger the MCP resources/read path and retrieve each image as a blob.
 
         For ticket classes (UserRequest, Incident, etc.) prefer ticket_ref
         (e.g. R-016271); it is resolved automatically and takes priority
@@ -265,7 +303,7 @@ def register(mcp, itop_request):
         lines = [
             str(len(images)) + " image attachment(s) found for "
             + obj_class + " " + label + ".",
-            "Use resources/read on each resource_uri to retrieve the image blob.",
+            "Call itop_download_attachment once per resource_uri to retrieve each image.",
             "",
         ]
         for img in images:
@@ -274,6 +312,35 @@ def register(mcp, itop_request):
             lines.append("  resource_uri : " + img["resource_uri"])
 
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Tool: itop_download_attachment
+    # ------------------------------------------------------------------
+
+    @mcp.tool()
+    async def itop_download_attachment(uri: str) -> str:
+        """Trigger a resources/read download for one image attachment.
+
+        Validates the resource URI and returns it as a plain string.
+        Langdock then calls resources/read on that URI, routing the image
+        blob through the registered MCP resource handlers via the attachment
+        path. This avoids the tool-response character limit entirely.
+
+        Call this tool once per resource_uri returned by itop_get_ticket_images.
+
+        Supported URI schemes:
+          itop://attachment/<attachment_id>
+          itop://inlineimage/<secret>/<record_id>
+
+        Args:
+            uri: Resource URI as returned by itop_get_ticket_images.
+        """
+        validated = _validate_uri(uri)
+
+        if MCP_DEBUG:
+            logger.debug("itop_download_attachment: uri=%s", validated)
+
+        return validated
 
     # ------------------------------------------------------------------
     # Tool: itop_get_ticket_attachments
