@@ -599,6 +599,62 @@ async def resolve_key(
 
 
 # ---------------------------------------------------------------------------
+# Image count helper
+# ---------------------------------------------------------------------------
+
+async def fetch_image_counts(
+    obj_class: str,
+    obj_id: str | int,
+    itop_request,
+) -> tuple[int, int]:
+    """Return (attachment_count, inline_image_count) for a ticket object.
+
+    Both queries request only 'id' -- no contents blob is downloaded.
+    Attachment count covers ALL Attachment records regardless of MIME type
+    because mimetype is embedded in the contents blob and cannot be filtered
+    via OQL without fetching it. InlineImage records are always images.
+
+    Returns (0, 0) silently on any iTop error so callers are never blocked.
+    Only called for classes in CLASSES_WITH_REF.
+    """
+    oid = str(obj_id)
+
+    att_result = await itop_request({
+        "operation": "core/get",
+        "class": "Attachment",
+        "key": (
+            "SELECT Attachment"
+            " WHERE item_class = '" + obj_class + "'"
+            " AND item_id = " + oid
+        ),
+        "output_fields": "id",
+    })
+    att_count = len(att_result.get("objects") or {})
+    logger.debug(
+        "[fetch_image_counts] cls=%r id=%r Attachment count=%d",
+        obj_class, oid, att_count,
+    )
+
+    ii_result = await itop_request({
+        "operation": "core/get",
+        "class": "InlineImage",
+        "key": (
+            "SELECT InlineImage"
+            " WHERE item_class = '" + obj_class + "'"
+            " AND item_id = " + oid
+        ),
+        "output_fields": "id",
+    })
+    ii_count = len(ii_result.get("objects") or {})
+    logger.debug(
+        "[fetch_image_counts] cls=%r id=%r InlineImage count=%d",
+        obj_class, oid, ii_count,
+    )
+
+    return att_count, ii_count
+
+
+# ---------------------------------------------------------------------------
 # Generic helpers
 # ---------------------------------------------------------------------------
 
@@ -667,6 +723,11 @@ def format_objects(result: dict) -> str:
 
     HTML tags and entities are stripped from all string field values before
     rendering, removing noise from iTop's rich-text fields.
+
+    Fields whose name starts with '_' are treated as synthetic annotations
+    injected by the caller (e.g. '_images'). They are rendered at the end of
+    each object block with a bracketed label instead of the raw underscore
+    name, and are never passed to iTop.
     """
     if result.get("code", -1) != 0:
         return f"Error (code {result.get('code')}): {str_or(result, 'message', 'Unknown error')}"
@@ -686,7 +747,11 @@ def format_objects(result: dict) -> str:
             lines.append(
                 f"  link: {ITOP_URL}/pages/UI.php?operation=details&class={cls}&id={oid}"
             )
+        synthetic = {}
         for fn, fv in fields.items():
+            if fn.startswith("_"):
+                synthetic[fn] = fv
+                continue
             if fn == "ref" or (ref and fn == "id"):
                 continue
             if isinstance(fv, str):
@@ -695,6 +760,10 @@ def format_objects(result: dict) -> str:
                 fv = strip_html_recursive(fv)
                 fv = json.dumps(fv, indent=2, ensure_ascii=False)
             lines.append(f"  {fn}: {fv}")
+        # Render synthetic annotations last, with a bracketed label.
+        for fn, fv in synthetic.items():
+            display_name = fn.lstrip("_")
+            lines.append(f"  [{display_name}] {fv}")
     return "\n".join(lines)
 
 
