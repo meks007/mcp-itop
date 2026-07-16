@@ -42,6 +42,7 @@ from fastmcp.server.auth.providers.debug import DebugTokenVerifier
 from auth import BearerTokenMiddleware, get_bearer_token
 from client import itop_request as _raw_itop_request
 from config import MCP_DEBUG, logger
+import attachment_store
 
 import tools.analytics as _analytics
 import tools.attachments as _attachments
@@ -160,6 +161,10 @@ def main():
         print("Error: ITOP_URL is not set.", file=sys.stderr)
         print("Create .env file with ITOP_URL (see .env.example)", file=sys.stderr)
         sys.exit(1)
+
+    # Open the SQLite attachment store eagerly so any permission or path
+    # problem surfaces immediately at startup, not on the first tool call.
+    attachment_store.init_db()
 
     logger.info(
         "Starting iTop MCP server on %s:%d (debug=%s)",
