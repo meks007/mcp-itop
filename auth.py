@@ -1,43 +1,86 @@
 """
 Authentication: bearer token verifier and per-request token accessor.
+
+Uses fastmcp (PrefectHQ) DebugTokenVerifier which accepts any non-empty
+bearer token. The token itself is the caller's iTop REST/JSON API auth_token.
+Actual validity is enforced by iTop on every REST call - we only check that
+a non-empty token was presented.
+
+The raw token string is stored in a module-level ContextVar by the Starlette
+middleware defined here (BearerTokenMiddleware) and read back via
+get_bearer_token() from tool and resource handlers.
 """
 
 from __future__ import annotations
 
-from mcp.server.auth.middleware.auth_context import get_access_token
-from mcp.server.auth.provider import AccessToken, TokenVerifier
+from contextvars import ContextVar
+
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import Response
 
 from config import logger
 
+# ---------------------------------------------------------------------------
+# ContextVar holding the raw bearer token for the current request
+# ---------------------------------------------------------------------------
 
-class ItopBearerVerifier(TokenVerifier):
-    """Validates presence of a bearer token at MCP handshake time.
+_bearer_token_var: ContextVar[str] = ContextVar("bearer_token", default="")
 
-    The token itself is the caller's iTop REST/JSON API auth_token. We do
-    not (and cannot, without calling iTop) verify it is a valid iTop
-    token here - only that the client presented a non-empty bearer value.
-    An invalid/expired token will simply be rejected by iTop on the first
-    real REST call made through itop_* tools.
+
+def get_bearer_token() -> str:
+    """Return the iTop auth_token for the current request.
+
+    Reads from the ContextVar populated by BearerTokenMiddleware.
+    Raises ValueError when no token is present (unauthenticated request
+    that somehow bypassed the fastmcp auth layer).
     """
-
-    async def verify_token(self, token: str) -> AccessToken | None:
-        if not token or not token.strip():
-            return None  # causes MCP handshake to fail with 401
-        return AccessToken(token=token, client_id="itop-client", scopes=[])
-
-
-def get_bearer_token(mcp) -> str:
-    """Return the iTop auth_token supplied by the connected client.
-
-    Each client authenticates to this MCP server with its own iTop REST
-    API token via "Authorization: Bearer <itop_token>". The SDK's
-    AuthContextMiddleware stores the verified token in a contextvar;
-    get_access_token() retrieves it for the current request.
-    """
-    access_token = get_access_token()
-    if access_token is None or not access_token.token:
+    token = _bearer_token_var.get()
+    logger.debug(
+        "[auth] get_bearer_token: token present=%s len=%d",
+        bool(token),
+        len(token),
+    )
+    if not token:
         raise ValueError(
-            "No iTop auth token found on this connection. Connect with an "
-            "'Authorization: Bearer <itop_token>' header."
+            "No iTop auth token found on this request. Connect with an "
+            "'Authorization: Bearer <itop_token>' HTTP header."
         )
-    return access_token.token
+    return token
+
+
+# ---------------------------------------------------------------------------
+# Starlette middleware: extract and store bearer token per request
+# ---------------------------------------------------------------------------
+
+class BearerTokenMiddleware(BaseHTTPMiddleware):
+    """Extract the Authorization: Bearer token and store it in a ContextVar.
+
+    This runs on every HTTP request so that get_bearer_token() works in both
+    tool handlers and resource handlers regardless of how fastmcp routes them.
+    Requests without a token are passed through unchanged - fastmcp's own
+    auth layer (DebugTokenVerifier) will reject them with 401 before any
+    tool or resource handler is reached.
+    """
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        auth_header = request.headers.get("authorization", "")
+        token = ""
+        if auth_header.lower().startswith("bearer "):
+            token = auth_header[len("bearer "):].strip()
+
+        logger.debug(
+            "[auth] BearerTokenMiddleware: path=%s token_present=%s len=%d",
+            request.url.path,
+            bool(token),
+            len(token),
+        )
+
+        # Store token in ContextVar for this request's async context.
+        _token_reset = _bearer_token_var.set(token)
+        try:
+            response = await call_next(request)
+        finally:
+            _bearer_token_var.reset(_token_reset)
+
+        return response
