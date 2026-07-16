@@ -144,25 +144,11 @@ def register(mcp, itop_request, get_token_fn):
         ticket_ref: str = "",
         key: str = "",
     ) -> str:
-        """Fetch image attachments for an iTop ticket and store them for retrieval.
+        """Find image attachments for an iTop ticket and store them for the current session.
 
-        Queries both the Attachment class (image mimetype check) and the
-        InlineImage class (always image). Persists the results in the SQLite
-        attachment store for the current session.
-
-        Returns only the image count and the static MCP resource URI
-        itop://attachment/images. The client must read that resource to
-        retrieve the actual image binaries.
-
-        For ticket classes (UserRequest, Incident, etc.) prefer ticket_ref
-        (e.g. R-016271); it is resolved automatically and takes priority
-        over key. Use key (numeric ID or OQL) for non-ticket classes.
-
-        Args:
-            obj_class:  iTop class, e.g. UserRequest, Incident.
-            ticket_ref: Preferred ticket reference, e.g. R-016271.
-            key:        Fallback numeric ID or OQL query.
-        """
+        Prefer ticket_ref for tickets; use key for a numeric ID or OQL query.
+        After this tool returns, read the MCP resource itop://attachment/image.png
+        to retrieve the actual image binaries."""
         logger.debug(
             "[attachments] itop_get_ticket_images: called obj_class=%s ticket_ref=%r key=%r",
             obj_class, ticket_ref, key,
@@ -300,20 +286,9 @@ def register(mcp, itop_request, get_token_fn):
         ticket_ref: str = "",
         key: str = "",
     ) -> str:
-        """List all non-image file attachments for an iTop ticket.
-
-        Queries the Attachment class and returns entries whose MIME type is
-        not an image type (e.g. PDF, DOCX, ZIP). For image attachments use
-        itop_get_ticket_images instead.
-
-        Returns metadata and browser download links only. No binary content
-        is fetched or returned.
-
-        Args:
-            obj_class:  iTop class, e.g. UserRequest, Incident.
-            ticket_ref: Preferred ticket reference, e.g. R-016271.
-            key:        Fallback numeric ID or OQL query.
-        """
+        """List non-image file attachments for an iTop ticket, including MIME type and browser
+        download link. Use itop_get_ticket_images for images. Returns metadata and links only,
+        no file binaries. Prefer ticket_ref; use key for a numeric ID or OQL query."""
         # resolve_key now returns (resolved_class, numeric_key); override obj_class.
         obj_class, resolved = await resolve_key(
             obj_class, ticket_ref or None, key or None, itop_request
@@ -376,10 +351,9 @@ def register(mcp, itop_request, get_token_fn):
         _STATIC_RESOURCE_URI,
         name="Analyze ticket images",
         description=(
-            "All images from the most recent itop_get_ticket_images call "
-            "for this client session. Returns one ResourceContent per image "
-            "with the raw binary and its MIME type. Call itop_get_ticket_images "
-            "first to populate this resource."
+            "Returns all images stored by the most recent itop_get_ticket_images call "
+            "for this session as one ResourceContent per image. "
+            "Call itop_get_ticket_images first to populate this resource."
         ),
         mime_type="image/png",
     )
