@@ -3,13 +3,15 @@ Attachment tools: fetch image metadata and download attachments as files.
 
 Public API
 ----------
-register(mcp, itop_request)
-    Registers the following MCP tools:
+register(mcp, itop_request, get_token_fn)
+    Registers the following MCP tools and resources:
 
     Tools:
         itop_get_ticket_images(obj_class, ticket_ref, key)
             List all image attachments for a ticket. Returns a plain text
             summary with filename, mimetype and resource_uri per image.
+            Also persists the image list in the SQLite attachment store so
+            the static resource handler can serve them.
 
         itop_download_attachment(uri, name)
             Download an iTop image attachment and return it directly as a
@@ -20,6 +22,12 @@ register(mcp, itop_request)
         itop_get_ticket_attachments(obj_class, ticket_ref, key)
             List all non-image file attachments for a ticket.
             Returns metadata and browser download links only.
+
+    Resources:
+        itop://attachment/images  (static)
+            Returns all images stored by the most recent
+            itop_get_ticket_images call for this client session as a
+            multi-content ResourceResult (one ResourceContent per image).
 
 iTop blob field notes
 ---------------------
@@ -40,7 +48,9 @@ import mimetypes
 
 import httpx
 from mcp.types import CallToolResult, TextContent
+from mcp.server.fastmcp.resources import ResourceResult, ResourceContent
 
+from attachment_store import get_images, store_images
 from config import ITOP_TIMEOUT, ITOP_URL, ITOP_VERIFY_SSL, MCP_DEBUG, logger
 from helpers import resolve_key
 
@@ -143,8 +153,26 @@ def _filename_from_uri(uri: str, mimetype: str) -> str:
         return "attachment_" + attachment_id + ext
 
 
-def register(mcp, itop_request):
-    """Register attachment tools."""
+def _http_url_from_uri(uri: str) -> str:
+    """Resolve an itop:// URI to an iTop HTTP download URL."""
+    if uri.startswith("itop://inlineimage/"):
+        rest = uri[len("itop://inlineimage/"):]
+        secret, record_id = rest.split("/", 1)
+        return _inline_image_url(secret, record_id)
+    else:
+        attachment_id = uri[len("itop://attachment/"):]
+        return _attachment_url(attachment_id)
+
+
+def register(mcp, itop_request, get_token_fn):
+    """Register attachment tools and the static image resource.
+
+    Args:
+        mcp:           FastMCP server instance.
+        itop_request:  Async callable that sends iTop REST requests.
+        get_token_fn:  Zero-argument callable returning the current bearer
+                       token string for the active MCP client session.
+    """
 
     # ------------------------------------------------------------------
     # Tool: itop_get_ticket_images
@@ -164,7 +192,9 @@ def register(mcp, itop_request):
 
         Returns a plain text listing with filename, mimetype and resource_uri
         per image. Pass each resource_uri to itop_download_attachment to
-        download the image directly as a file attachment.
+        download the image directly as a file attachment. Alternatively read
+        the static MCP resource itop://attachment/images to retrieve all
+        images at once.
 
         For ticket classes (UserRequest, Incident, etc.) prefer ticket_ref
         (e.g. R-016271); it is resolved automatically and takes priority
@@ -207,6 +237,8 @@ def register(mcp, itop_request):
                 "source": "Attachment",
                 "filename": filename,
                 "mimetype": mimetype,
+                "uri": "itop://attachment/" + record_id,
+                # keep resource_uri alias so existing LLM prompts still work
                 "resource_uri": "itop://attachment/" + record_id,
             })
 
@@ -240,6 +272,7 @@ def register(mcp, itop_request):
                 "source": "InlineImage",
                 "filename": filename,
                 "mimetype": mimetype,
+                "uri": resource_uri,
                 "resource_uri": resource_uri,
             })
 
@@ -249,11 +282,31 @@ def register(mcp, itop_request):
                 + obj_class + " " + (ticket_ref or key) + "."
             )
 
+        # Persist image list in the SQLite store so the static resource
+        # handler itop://attachment/images can serve them for this session.
+        try:
+            token = get_token_fn()
+            if token:
+                store_images(token, images)
+                logger.debug(
+                    "[attachments] stored %d image URI(s) in attachment_store",
+                    len(images),
+                )
+            else:
+                logger.debug(
+                    "[attachments] get_token_fn returned empty token, "
+                    "skipping attachment_store write"
+                )
+        except Exception as exc:
+            # Never let store errors break the tool response.
+            logger.warning("[attachments] attachment_store write failed: %s", exc)
+
         label = ticket_ref or key or str(resolved)
         lines = [
             str(len(images)) + " image attachment(s) found for "
             + obj_class + " " + label + ".",
             "Pass each resource_uri to itop_download_attachment to download the image.",
+            "Or read the MCP resource itop://attachment/images to get all images at once.",
             "",
         ]
         for img in images:
@@ -295,14 +348,7 @@ def register(mcp, itop_request):
             name: Optional filename override.
         """
         validated = _validate_itop_uri(uri)
-
-        if validated.startswith("itop://inlineimage/"):
-            rest = validated[len("itop://inlineimage/"):]
-            secret, record_id = rest.split("/", 1)
-            http_url = _inline_image_url(secret, record_id)
-        else:
-            attachment_id = validated[len("itop://attachment/"):]
-            http_url = _attachment_url(attachment_id)
+        http_url = _http_url_from_uri(validated)
 
         try:
             content_bytes, mimetype = await _download_binary(http_url)
@@ -412,3 +458,90 @@ def register(mcp, itop_request):
             lines.append("  browser_link : " + f["url"])
 
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Resource: itop://attachment/images  (static, no URI template)
+    # ------------------------------------------------------------------
+
+    @mcp.resource(
+        "itop://attachment/images",
+        name="TicketImages",
+        description=(
+            "All images from the most recent itop_get_ticket_images call "
+            "for this client session. Returns one ResourceContent per image "
+            "with the raw binary and its MIME type. Call itop_get_ticket_images "
+            "first to populate this resource."
+        ),
+        mime_type="image/png",
+    )
+    async def serve_ticket_images() -> ResourceResult:
+        """Serve all ticket images stored for the current bearer token session.
+
+        Downloads each image binary from iTop and returns them as a list of
+        ResourceContent objects inside a single ResourceResult. The MIME type
+        of each item reflects the actual image format (image/png, image/jpeg,
+        etc.).
+
+        Returns a plain-text ResourceResult when no images are available
+        (not yet stored, token mismatch, or TTL expired).
+        """
+        try:
+            token = get_token_fn()
+        except Exception as exc:
+            logger.warning(
+                "[attachments] serve_ticket_images: get_token_fn failed: %s", exc
+            )
+            token = ""
+
+        if not token:
+            return ResourceResult(
+                contents="No active session token. Connect with a valid iTop bearer token."
+            )
+
+        entries = get_images(token)
+
+        if not entries:
+            return ResourceResult(
+                contents=(
+                    "No images available for this session. "
+                    "Call itop_get_ticket_images first."
+                )
+            )
+
+        resource_contents: list[ResourceContent] = []
+        errors: list[str] = []
+
+        for entry in entries:
+            uri = entry["uri"]
+            try:
+                http_url = _http_url_from_uri(uri)
+                content_bytes, detected_mime = await _download_binary(http_url)
+                mime = detected_mime or entry.get("mimetype", "application/octet-stream")
+                resource_contents.append(
+                    ResourceContent(content=content_bytes, mime_type=mime)
+                )
+                if MCP_DEBUG:
+                    logger.debug(
+                        "[attachments] serve_ticket_images: fetched uri=%s mime=%s bytes=%d",
+                        uri, mime, len(content_bytes),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[attachments] serve_ticket_images: download failed uri=%s exc=%s",
+                    uri, exc,
+                )
+                errors.append(uri + ": " + str(exc))
+
+        if not resource_contents:
+            error_detail = "; ".join(errors) if errors else "unknown error"
+            return ResourceResult(
+                contents="Failed to download all images. Errors: " + error_detail
+            )
+
+        logger.debug(
+            "[attachments] serve_ticket_images: returning %d image(s) "
+            "(%d error(s) skipped)",
+            len(resource_contents),
+            len(errors),
+        )
+        return ResourceResult(contents=resource_contents)
