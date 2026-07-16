@@ -85,7 +85,7 @@ def register(mcp, itop_request):
         return f"id,title,{text_field},category_name,status"
 
     @mcp.tool(
-        name="Search KB articles"
+        name="Search_KB_articles"
     )
     async def itop_search_kb(
         query: str,
@@ -144,7 +144,7 @@ def register(mcp, itop_request):
         return "\n".join(out)
 
     @mcp.tool(
-        name="Get KB article"
+        name="Get_KB_article"
     )
     async def itop_get_kb_article(article_id: int) -> str:
         """Get the full content of a knowledge-base article by numeric ID. Auto-detects KBEntry vs FAQ."""
@@ -165,7 +165,7 @@ def register(mcp, itop_request):
         return format_objects(result)
 
     @mcp.tool(
-        name="List KB categories"
+        name="List_KB_categories"
     )
     async def itop_list_kb_categories() -> str:
         """List all knowledge-base categories. Auto-detects KBCategory vs FAQCategory."""
