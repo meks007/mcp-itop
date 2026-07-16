@@ -15,7 +15,9 @@ from helpers import format_objects, resolve_key, resolve_ticket_ref
 def register(mcp, itop_request):
     """Register all comment tools on the given mcp instance."""
 
-    @mcp.tool()
+    @mcp.tool(
+        name="Add comment to ticket"
+    )
     async def itop_add_comment(
         ticket_class: str,
         text: str,
