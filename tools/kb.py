@@ -84,7 +84,9 @@ def register(mcp, itop_request):
     def _kb_list_fields(text_field: str) -> str:
         return f"id,title,{text_field},category_name,status"
 
-    @mcp.tool()
+    @mcp.tool(
+        name="Search KB articles"
+    )
     async def itop_search_kb(
         query: str,
         oql: str = "",
@@ -152,7 +154,9 @@ def register(mcp, itop_request):
         out.append(format_table(header, rows))
         return "\n".join(out)
 
-    @mcp.tool()
+    @mcp.tool(
+        name="Get KB article"
+    )
     async def itop_get_kb_article(article_id: int) -> str:
         """Get the full content of a knowledge-base article by ID.
 
@@ -176,8 +180,10 @@ def register(mcp, itop_request):
             return f"KB article #{article_id} not found."
 
         return format_objects(result)
-
-    @mcp.tool()
+    
+    @mcp.tool(
+        name="List KB categories"
+    )
     async def itop_list_kb_categories() -> str:
         """List all knowledge-base categories.
 
