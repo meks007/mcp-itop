@@ -33,8 +33,26 @@ logging.basicConfig(
 logger = logging.getLogger("mcp-itop")
 
 if MCP_DEBUG:
+    # Enable DEBUG on the SSE and streamable-http transport loggers so that
+    # SSE chunk output (sse_starlette) and MCP session lifecycle events
+    # (mcp.server.streamable_http) appear in the log alongside our own
+    # debug lines. Without this they stay at WARNING even when basicConfig
+    # sets the root logger to DEBUG, because these libraries set their own
+    # logger level or rely on propagation being cut off upstream.
+    for _lib_logger in (
+        "sse_starlette",
+        "sse_starlette.sse",
+        "mcp.server.streamable_http",
+        "mcp.server",
+    ):
+        logging.getLogger(_lib_logger).setLevel(logging.DEBUG)
+
     logger.debug(
         "MCP_DEBUG is enabled - request/response payloads will be logged (secrets redacted)."
+    )
+    logger.debug(
+        "SSE/streamable-http transport loggers set to DEBUG: "
+        "sse_starlette, mcp.server.streamable_http"
     )
 
 # -- Config ---------------------------------------------------------------
