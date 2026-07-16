@@ -40,23 +40,13 @@ def register(mcp, itop_request):
         page: int = 0,
         full: bool = False,
     ) -> str:
-        """Search iTop objects. Use itop_describe_class for unknown classes/fields.
-        
-        Batch same-class lookups in one call with OQL IN or OR, for example:
-        key="SELECT UserRequest WHERE ref IN ('R-001','R-002')". Do not call itop_get
-        once per object when one query can fetch all results. Use obj_class="Ticket"
-        when the concrete ticket class is unknown.
-        
-        Set full=True for full details, all fields, or comments. This includes
-        suppressed fields such as private_log. Keep full=False for summaries. Never
-        reveal private logs without an explicit request. Read ticket comments with
-        this tool and full=True; no separate log tool exists.
-        
-        A full ticket ref such as R-016271 is direct. A bare number such as 15525 is
-        resolved through Ticket to its real class and ref. Criteria pass through unchanged.
-        
-        Redact passwords. Treat "closed" as closed and "solved" as resolved or
-        proposed."""
+        """Retrieve iTop objects by ID, reference, OQL, or JSON criteria.
+
+        Use obj_class="Ticket" when the ticket class is unknown, then switch to the
+        real class once it is known. Bare ticket numbers are resolved automatically.
+        Set full=True only when complete fields or ticket logs are needed. Do not
+        disclose private_log unless the user explicitly requests it. Batch same-class
+        lookups with OQL rather than calling once per object."""
         # Resolve bare numbers and unknown class via Ticket base class lookup
         obj_class, resolved_key = await resolve_ticket_ref(obj_class, key, itop_request)
 
@@ -92,16 +82,7 @@ def register(mcp, itop_request):
         output_fields: str = "id, friendlyname",
         comment: str = "",
     ) -> str:
-        """Create an iTop object.
-
-        Use itop_describe_class first if the required fields are unknown.
-
-        Args:
-            obj_class: iTop class, e.g. UserRequest, Server, or Person.
-            fields: JSON object containing field values.
-            output_fields: Comma-separated fields to return.
-            comment: Optional comment for change tracking.
-        """
+        """Create an iTop object. Use itop_describe_class first if the required fields are unknown."""
         parsed = parse_json_arg(fields, "fields")
         if isinstance(parsed, str):
             return parsed
@@ -128,22 +109,9 @@ def register(mcp, itop_request):
     ) -> str:
         """Update fields on an existing iTop object.
 
-        Do not set status with this tool. Ticket state changes must use
-        itop_apply_stimulus, for example ev_assign, ev_resolve, ev_reopen, or
-        ev_pending.
-
-        For ticket classes, prefer ticket_ref such as "R-016271". A bare number
-        like "15525" in key is resolved automatically via a Ticket base class
-        lookup -- the real class and ref are determined server-side.
-
-        Args:
-            obj_class: iTop class, e.g. UserRequest, Incident, or "Ticket" when unknown.
-            fields: JSON object with fields to update; must not include status.
-            ticket_ref: Preferred ticket reference, e.g. "R-016271".
-            key: Bare number, OQL, or JSON criteria when ref is unknown.
-            output_fields: Fields to return.
-            comment: Optional comment for change tracking.
-        """
+        For tickets, prefer ticket_ref; bare ticket numbers are resolved automatically.
+        Do not update status with this tool -- use itop_apply_stimulus for lifecycle
+        transitions such as assignment, resolution, reopening, or pending status."""
         parsed = parse_json_arg(fields, "fields")
         if isinstance(parsed, str):
             return parsed
@@ -183,20 +151,10 @@ def register(mcp, itop_request):
         comment: str = "",
         simulate: bool = True,
     ) -> str:
-        """Delete iTop object(s).
+        """Deletion is disabled by policy. Do not use this tool to remove iTop objects.
 
-        Deletion is disabled by policy. Do not use this tool.
-
-        For ticket classes, ticket_ref such as "R-016271" takes priority over key
-        and is resolved automatically. Do not invent numeric IDs.
-
-        Args:
-            obj_class: iTop class.
-            ticket_ref: Preferred ticket reference.
-            key: Fallback numeric ID, OQL query, or JSON criteria.
-            comment: Optional change comment.
-            simulate: If true, performs a dry run without deleting.
-        """
+        It runs in simulation mode by default and is retained only for controlled
+        dry-run checks."""
         obj_class, resolved = await resolve_key(
             obj_class, ticket_ref or None, key or None, itop_request
         )
@@ -220,29 +178,10 @@ def register(mcp, itop_request):
         output_fields: str = "ref, friendlyname, status",
         comment: str = "",
     ) -> str:
-        """Apply an iTop lifecycle transition.
-        
-        Use this, not itop_update, to change status. Finish tickets with ev_resolve and
-        a solution in fields. Never use ev_close.
-        
-        Common stimuli:
-        - ev_assign: assign with agent_id and team_id
-        - ev_reassign: assign to another agent
-        - ev_propose: propose a solution
-        - ev_resolve: resolve with solution
-        - ev_reopen: reopen
-        - ev_pending: hold with pending_reason
-        
-        Prefer ticket_ref. Bare numbers are resolved through Ticket.
-        
-        Args:
-            obj_class: UserRequest, Incident, or "Ticket" when unknown.
-            stimulus: Transition code; never ev_close.
-            ticket_ref: Preferred ticket reference.
-            key: Bare number, OQL, or JSON criteria if the ref is unknown.
-            fields: JSON transition fields.
-            output_fields: Return fields.
-            comment: Optional change comment."""
+        """Apply a ticket lifecycle transition such as assignment, resolution, reopening,
+        or pending status. Use this tool -- not itop_update -- for status changes.
+        Resolve tickets with ev_resolve and include a solution in fields; never use
+        ev_close. Prefer ticket_ref; bare ticket numbers are resolved automatically."""
         parsed = parse_json_arg(fields, "fields")
         if isinstance(parsed, str):
             return parsed
@@ -280,16 +219,7 @@ def register(mcp, itop_request):
         direction: str = "down",
         redundancy: bool = True,
     ) -> str:
-        """Find CIs related to a given object via impact/dependency relations.
-
-        Args:
-            obj_class: iTop class (e.g. Server, ApplicationSolution).
-            key: Object ID or OQL.
-            relation: "impacts" or "depends on".
-            depth: Traversal depth (max 20).
-            direction: "down" or "up".
-            redundancy: Account for redundancy in impact analysis.
-        """
+        """Find CIs related to a given object via impact or dependency relations."""
         result = await itop_request({
             "operation": "core/get_related",
             "class": obj_class,
@@ -328,11 +258,7 @@ def register(mcp, itop_request):
         name="Describe object class"
     )
     async def itop_describe_class(obj_class: str) -> str:
-        """Discover fields for an iTop class by sampling an existing object.
-
-        Args:
-            obj_class: iTop class name (e.g. Server, UserRequest, Person).
-        """
+        """Discover available fields for an iTop class by sampling an existing object."""
         result = await itop_request({
             "operation": "core/get",
             "class": obj_class,
