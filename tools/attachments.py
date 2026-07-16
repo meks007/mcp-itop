@@ -373,7 +373,7 @@ def register(mcp, itop_request, get_token_fn):
     # ------------------------------------------------------------------
 
     @mcp.resource(
-        "itop://attachment/image.png",
+        _STATIC_RESOURCE_URI,
         name="Analyze ticket images",
         description=(
             "All images from the most recent itop_get_ticket_images call "
