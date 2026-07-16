@@ -48,15 +48,15 @@ def register(mcp, itop_request):
 
         log_field = "public_log" if is_public else "private_log"
 
-        # If a bare number is given without a ref, resolve class + ref first
+        # If a bare number is given without a ref, resolve class + ref first.
         if not ticket_ref and ticket_id:
-            resolved_class, resolved_key = await resolve_ticket_ref(
+            resolved_class, key = await resolve_ticket_ref(
                 ticket_class, str(ticket_id), itop_request
             )
             ticket_class = resolved_class
-            key = resolved_key
         else:
-            key = await resolve_key(
+            # resolve_key now returns (resolved_class, numeric_key); override class.
+            ticket_class, key = await resolve_key(
                 ticket_class,
                 ticket_ref or None,
                 str(ticket_id) if ticket_id else None,
