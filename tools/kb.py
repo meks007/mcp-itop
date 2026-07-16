@@ -94,8 +94,10 @@ def register(mcp, itop_request):
     ) -> str:
         """Search knowledge-base articles by title or body text.
 
-        Automatically detects the available KB class and body field. Supply oql
-        to override the built-in LIKE query entirely."""
+        Search with meaningful, likely keywords rather than full phrases so the
+        built-in LIKE search can match relevant articles more reliably. Automatically
+        detects the available KB class and body field. Supply oql to override the
+        built-in LIKE query entirely."""
         kb_cls = await _kb_class()
         if not kb_cls:
             return "No KB module installed (tried KBEntry, FAQ)."
