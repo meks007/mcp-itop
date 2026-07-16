@@ -39,6 +39,7 @@ import base64
 import mimetypes
 
 import httpx
+from mcp.types import CallToolResult, TextContent
 
 from config import ITOP_TIMEOUT, ITOP_URL, ITOP_VERIFY_SSL, MCP_DEBUG, logger
 from helpers import resolve_key
@@ -270,18 +271,20 @@ def register(mcp, itop_request):
     async def itop_download_attachment(
         uri: str,
         name: str = "",
-    ) -> dict:
+    ) -> CallToolResult:
         """Download an iTop image attachment and return it as a file object.
 
         Fetches the binary directly from iTop and returns the image inside
         structuredContent.files so Langdock registers it as an attachment
         before the character limit is applied.
 
-        The previous ResourceLink approach required Langdock to resolve the
-        itop:// URI via resources/read, which only works for statically
-        registered resource URIs. Because attachment URIs are dynamic
-        (per-ticket), that path did not work. This tool fetches the blob
-        directly and encodes it as plain base64 (no data: prefix).
+        Returning CallToolResult directly is required so FastMCP passes the
+        response through unchanged. A plain dict return value would be
+        serialised as a JSON string inside a TextContent element, which means
+        structuredContent would never appear as a top-level field in the MCP
+        tool-call response.
+
+        The base64 string must not carry a data: prefix - only raw base64.
 
         Supported URI schemes:
           itop://attachment/<attachment_id>
@@ -316,9 +319,11 @@ def register(mcp, itop_request):
         file_name = name or _filename_from_uri(validated, mimetype)
         b64 = base64.b64encode(content_bytes).decode("ascii")
 
-        return {
-            "content": [{"type": "text", "text": "Attachment downloaded: " + file_name}],
-            "structuredContent": {
+        return CallToolResult(
+            content=[
+                TextContent(type="text", text="Attachment downloaded: " + file_name),
+            ],
+            structuredContent={
                 "files": [
                     {
                         "fileName": file_name,
@@ -327,7 +332,8 @@ def register(mcp, itop_request):
                     }
                 ]
             },
-        }
+            isError=False,
+        )
 
     # ------------------------------------------------------------------
     # Tool: itop_get_ticket_attachments
