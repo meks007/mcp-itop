@@ -8,12 +8,10 @@ register(mcp, itop_request, get_token_fn)
 
     Tools:
         itop_get_ticket_images(obj_class, ticket_ref, key)
-            List all image attachments for a ticket. Returns a plain text
-            summary with filename, mimetype and download_uri per image.
-            Also persists the image list in the SQLite attachment store so
-            the static resource handler can serve them.
-            After calling this tool, read the MCP resource
-            itop://attachment/images to retrieve all images at once.
+            Fetches image attachments for a ticket, stores them in the
+            SQLite attachment store, and returns only the image count plus
+            the static MCP resource URI itop://attachment/images.
+            The client must read that resource to retrieve the actual images.
 
         itop_get_ticket_attachments(obj_class, ticket_ref, key)
             List all non-image file attachments for a ticket.
@@ -39,8 +37,6 @@ InlineImage : always an image; has a secret field for the download URL.
 
 from __future__ import annotations
 
-import mimetypes
-
 import httpx
 from fastmcp.resources import ResourceResult, ResourceContent
 
@@ -49,6 +45,8 @@ from config import ITOP_TIMEOUT, ITOP_URL, ITOP_VERIFY_SSL, MCP_DEBUG, logger
 from helpers import resolve_key
 
 _IMAGE_PREFIXES = ("image/",)
+
+_STATIC_RESOURCE_URI = "itop://attachment/images"
 
 
 def _is_image(mimetype: str) -> bool:
@@ -144,16 +142,15 @@ def register(mcp, itop_request, get_token_fn):
         ticket_ref: str = "",
         key: str = "",
     ) -> str:
-        """List all image attachments for an iTop ticket.
+        """Fetch image attachments for an iTop ticket and store them for retrieval.
 
         Queries both the Attachment class (image mimetype check) and the
-        InlineImage class (always image). Results from both sources are
-        combined with equal weight.
+        InlineImage class (always image). Persists the results in the SQLite
+        attachment store for the current session.
 
-        Returns a plain text listing with filename, mimetype and download_uri
-        per image. After calling this tool, read the MCP resource
-        itop://attachment/images to retrieve all images at once as binary
-        content.
+        Returns only the image count and the static MCP resource URI
+        itop://attachment/images. The client must read that resource to
+        retrieve the actual image binaries.
 
         For ticket classes (UserRequest, Incident, etc.) prefer ticket_ref
         (e.g. R-016271); it is resolved automatically and takes priority
@@ -177,19 +174,11 @@ def register(mcp, itop_request, get_token_fn):
         )
 
         if resolved is None:
-            logger.debug(
-                "[attachments] itop_get_ticket_images: no resolved key, returning error"
-            )
             return "Error: provide either ticket_ref or key to identify the ticket."
 
         images = []
 
         # -- Attachment (image types only) --
-        logger.debug(
-            "[attachments] itop_get_ticket_images: querying Attachment for "
-            "item_class=%s item_id=%s",
-            obj_class, resolved,
-        )
         att_result = await itop_request({
             "operation": "core/get",
             "class": "Attachment",
@@ -202,49 +191,26 @@ def register(mcp, itop_request, get_token_fn):
         })
         att_objects = att_result.get("objects") or {}
         logger.debug(
-            "[attachments] itop_get_ticket_images: Attachment query returned "
-            "%d object(s), code=%s",
+            "[attachments] itop_get_ticket_images: Attachment query returned %d object(s)",
             len(att_objects),
-            att_result.get("code"),
         )
 
         for obj_key, obj_data in att_objects.items():
             fields = obj_data.get("fields") or {}
             record_id = str(obj_data.get("key") or obj_key.split("::")[-1])
             mimetype, _data, filename = _unpack_contents(fields.get("contents"))
-            logger.debug(
-                "[attachments] itop_get_ticket_images: Attachment record_id=%s "
-                "mimetype=%s filename=%r is_image=%s",
-                record_id, mimetype, filename, _is_image(mimetype),
-            )
             if not _is_image(mimetype):
-                logger.debug(
-                    "[attachments] itop_get_ticket_images: skipping non-image "
-                    "record_id=%s mimetype=%s",
-                    record_id, mimetype,
-                )
                 continue
             if not filename:
                 filename = "attachment_" + record_id
             uri = "itop://attachment/" + record_id
-            images.append({
-                "source": "Attachment",
-                "filename": filename,
-                "mimetype": mimetype,
-                "uri": uri,
-            })
+            images.append({"source": "Attachment", "filename": filename, "mimetype": mimetype, "uri": uri})
             logger.debug(
-                "[attachments] itop_get_ticket_images: added Attachment "
-                "record_id=%s uri=%s mimetype=%s filename=%r",
-                record_id, uri, mimetype, filename,
+                "[attachments] itop_get_ticket_images: added Attachment record_id=%s uri=%s",
+                record_id, uri,
             )
 
         # -- InlineImage (always image) --
-        logger.debug(
-            "[attachments] itop_get_ticket_images: querying InlineImage for "
-            "item_class=%s item_id=%s",
-            obj_class, resolved,
-        )
         ii_result = await itop_request({
             "operation": "core/get",
             "class": "InlineImage",
@@ -257,10 +223,8 @@ def register(mcp, itop_request, get_token_fn):
         })
         ii_objects = ii_result.get("objects") or {}
         logger.debug(
-            "[attachments] itop_get_ticket_images: InlineImage query returned "
-            "%d object(s), code=%s",
+            "[attachments] itop_get_ticket_images: InlineImage query returned %d object(s)",
             len(ii_objects),
-            ii_result.get("code"),
         )
 
         for obj_key, obj_data in ii_objects.items():
@@ -268,11 +232,6 @@ def register(mcp, itop_request, get_token_fn):
             record_id = str(obj_data.get("key") or obj_key.split("::")[-1])
             mimetype, _data, filename = _unpack_contents(fields.get("contents"))
             secret = (fields.get("secret") or "").strip()
-            logger.debug(
-                "[attachments] itop_get_ticket_images: InlineImage record_id=%s "
-                "mimetype=%s filename=%r secret_present=%s",
-                record_id, mimetype, filename, bool(secret),
-            )
             if not filename:
                 filename = fields.get("friendlyname") or ("inlineimage_" + record_id)
             if not mimetype:
@@ -282,27 +241,17 @@ def register(mcp, itop_request, get_token_fn):
                 if secret
                 else "itop://attachment/" + record_id
             )
-            images.append({
-                "source": "InlineImage",
-                "filename": filename,
-                "mimetype": mimetype,
-                "uri": uri,
-            })
+            images.append({"source": "InlineImage", "filename": filename, "mimetype": mimetype, "uri": uri})
             logger.debug(
-                "[attachments] itop_get_ticket_images: added InlineImage "
-                "record_id=%s uri=%s mimetype=%s filename=%r",
-                record_id, uri, mimetype, filename,
+                "[attachments] itop_get_ticket_images: added InlineImage record_id=%s uri=%s",
+                record_id, uri,
             )
 
         logger.debug(
-            "[attachments] itop_get_ticket_images: total images collected=%d",
-            len(images),
+            "[attachments] itop_get_ticket_images: total images collected=%d", len(images)
         )
 
         if not images:
-            logger.debug(
-                "[attachments] itop_get_ticket_images: no images found, returning empty result"
-            )
             return (
                 "No image attachments found for "
                 + obj_class + " " + (ticket_ref or key) + "."
@@ -313,12 +262,6 @@ def register(mcp, itop_request, get_token_fn):
         try:
             token = get_token_fn()
             token_preview = (token[:8] + "...") if token and len(token) > 8 else (token or "(empty)")
-            logger.debug(
-                "[attachments] itop_get_ticket_images: get_token_fn returned "
-                "token=%s (len=%d)",
-                token_preview,
-                len(token) if token else 0,
-            )
             if token:
                 logger.debug(
                     "[attachments] itop_get_ticket_images: writing %d image(s) "
@@ -326,37 +269,22 @@ def register(mcp, itop_request, get_token_fn):
                     len(images), token_preview,
                 )
                 store_images(token, images)
-                logger.debug(
-                    "[attachments] itop_get_ticket_images: attachment_store write complete"
-                )
+                logger.debug("[attachments] itop_get_ticket_images: attachment_store write complete")
             else:
                 logger.debug(
-                    "[attachments] itop_get_ticket_images: empty token from get_token_fn, "
-                    "skipping attachment_store write"
+                    "[attachments] itop_get_ticket_images: empty token, skipping attachment_store write"
                 )
         except Exception as exc:
             logger.warning(
-                "[attachments] itop_get_ticket_images: attachment_store write failed: %s",
-                exc,
+                "[attachments] itop_get_ticket_images: attachment_store write failed: %s", exc
             )
 
         label = ticket_ref or key or str(resolved)
-        lines = [
+        return (
             str(len(images)) + " image attachment(s) found for "
-            + obj_class + " " + label + ".",
-            "Read the MCP resource itop://attachment/images to retrieve all images at once.",
-            "",
-        ]
-        for img in images:
-            lines.append("--- " + img["filename"] + " (" + img["source"] + ") ---")
-            lines.append("  mimetype     : " + img["mimetype"])
-            lines.append("  download_uri : " + img["uri"])
-
-        logger.debug(
-            "[attachments] itop_get_ticket_images: returning text result with %d image(s)",
-            len(images),
+            + obj_class + " " + label + ".\n"
+            + "Read the MCP resource " + _STATIC_RESOURCE_URI + " to retrieve all images at once."
         )
-        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Tool: itop_get_ticket_attachments
@@ -428,7 +356,6 @@ def register(mcp, itop_request, get_token_fn):
             "File attachments for " + obj_class + " " + label
             + " (" + str(len(files)) + " found):"
         ]
-
         for f in files:
             lines.append("\n--- " + f["filename"] + " ---")
             lines.append("  mimetype     : " + f["mimetype"])
@@ -468,8 +395,7 @@ def register(mcp, itop_request, get_token_fn):
             token = get_token_fn()
             token_preview = (token[:8] + "...") if token and len(token) > 8 else (token or "(empty)")
             logger.debug(
-                "[attachments] serve_ticket_images: get_token_fn returned "
-                "token=%s (len=%d)",
+                "[attachments] serve_ticket_images: token=%s (len=%d)",
                 token_preview,
                 len(token) if token else 0,
             )
@@ -478,33 +404,19 @@ def register(mcp, itop_request, get_token_fn):
                 "[attachments] serve_ticket_images: get_token_fn raised: %s", exc
             )
             token = ""
-            token_preview = "(error)"
 
         if not token:
-            logger.debug(
-                "[attachments] serve_ticket_images: no token available, "
-                "returning auth error response"
-            )
             return ResourceResult(
                 contents="No active session token. Connect with a valid iTop bearer token."
             )
 
-        logger.debug(
-            "[attachments] serve_ticket_images: querying attachment_store "
-            "for token=%s", token_preview,
-        )
         entries = get_images(token)
         logger.debug(
-            "[attachments] serve_ticket_images: attachment_store returned "
-            "%d entry/entries for token=%s",
-            len(entries), token_preview,
+            "[attachments] serve_ticket_images: attachment_store returned %d entry/entries",
+            len(entries),
         )
 
         if not entries:
-            logger.debug(
-                "[attachments] serve_ticket_images: no entries in store, "
-                "returning empty result"
-            )
             return ResourceResult(
                 contents=(
                     "No images available for this session. "
@@ -523,48 +435,30 @@ def register(mcp, itop_request, get_token_fn):
             )
             try:
                 http_url = _http_url_from_uri(uri)
-                logger.debug(
-                    "[attachments] serve_ticket_images: [%d] resolved http_url=%s",
-                    i + 1, http_url,
-                )
                 content_bytes, detected_mime = await _download_binary(http_url)
                 mime = detected_mime or entry.get("mimetype", "application/octet-stream")
                 logger.debug(
-                    "[attachments] serve_ticket_images: [%d] uri=%s "
-                    "detected_mime=%s final_mime=%s bytes=%d",
-                    i + 1, uri, detected_mime, mime, len(content_bytes),
+                    "[attachments] serve_ticket_images: [%d] mime=%s bytes=%d",
+                    i + 1, mime, len(content_bytes),
                 )
                 resource_contents.append(
                     ResourceContent(content=content_bytes, mime_type=mime)
                 )
             except Exception as exc:
                 logger.warning(
-                    "[attachments] serve_ticket_images: [%d] download failed "
-                    "uri=%s exc=%s",
+                    "[attachments] serve_ticket_images: [%d] download failed uri=%s exc=%s",
                     i + 1, uri, exc,
                 )
                 errors.append(uri + ": " + str(exc))
 
-        logger.debug(
-            "[attachments] serve_ticket_images: download phase complete "
-            "success=%d errors=%d",
-            len(resource_contents), len(errors),
-        )
-
         if not resource_contents:
             error_detail = "; ".join(errors) if errors else "unknown error"
-            logger.debug(
-                "[attachments] serve_ticket_images: all downloads failed, "
-                "returning error response: %s",
-                error_detail,
-            )
             return ResourceResult(
                 contents="Failed to download all images. Errors: " + error_detail
             )
 
         logger.debug(
-            "[attachments] serve_ticket_images: returning ResourceResult with "
-            "%d ResourceContent(s), %d error(s) skipped",
+            "[attachments] serve_ticket_images: returning %d ResourceContent(s), %d error(s) skipped",
             len(resource_contents), len(errors),
         )
         return ResourceResult(contents=resource_contents)
