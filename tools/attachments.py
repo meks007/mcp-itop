@@ -48,7 +48,7 @@ import mimetypes
 
 import httpx
 from mcp.types import CallToolResult, TextContent
-from mcp.server.fastmcp.resources import ResourceResult, ResourceContent
+from fastmcp.resources import ResourceResult, ResourceContent
 
 from attachment_store import get_images, store_images
 from config import ITOP_TIMEOUT, ITOP_URL, ITOP_VERIFY_SSL, MCP_DEBUG, logger
@@ -390,7 +390,6 @@ def register(mcp, itop_request, get_token_fn):
                     "skipping attachment_store write"
                 )
         except Exception as exc:
-            # Never let store errors break the tool response.
             logger.warning(
                 "[attachments] itop_get_ticket_images: attachment_store write failed: %s",
                 exc,
