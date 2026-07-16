@@ -10,7 +10,7 @@ register(mcp, itop_request, get_token_fn)
         itop_get_ticket_images(obj_class, ticket_ref, key)
             Fetches image attachments for a ticket, stores them in the
             SQLite attachment store, and returns only the image count plus
-            the static MCP resource URI itop://attachment/image.png.
+            the static MCP resource URI _STATIC_RESOURCE_URI.
             The client must read that resource to retrieve the actual images.
 
         itop_get_ticket_attachments(obj_class, ticket_ref, key)
@@ -18,7 +18,7 @@ register(mcp, itop_request, get_token_fn)
             Returns metadata and browser download links only.
 
     Resources:
-        itop://attachment/image.png  (static)
+        _STATIC_RESOURCE_URI  (static)
             Returns all images stored by the most recent
             itop_get_ticket_images call for this client session as a
             multi-content ResourceResult (one ResourceContent per image).
