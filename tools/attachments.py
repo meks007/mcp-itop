@@ -1,36 +1,25 @@
 """
-Attachment tools: fetch image metadata and serve images as MCP resources.
+Attachment tools: fetch image metadata and download attachments as files.
 
 Public API
 ----------
 register(mcp, itop_request)
-    Registers the following MCP tools and resources:
+    Registers the following MCP tools:
 
     Tools:
         itop_get_ticket_images(obj_class, ticket_ref, key)
             List all image attachments for a ticket. Returns a plain text
             summary with filename, mimetype and resource_uri per image.
-            Each resource_uri is a valid MCP resource URI that can be passed
-            directly to resources/read.
 
-        itop_download_attachment(uri)
-            Validate an itop:// attachment URI and return a ResourceLink
-            that the LLM can embed directly in the conversation context.
-            The ResourceLink points at the matching path-parametrised
-            resource handler so resources/read delivers the blob.
+        itop_download_attachment(uri, name)
+            Download an iTop image attachment and return it directly as a
+            base64-encoded file inside structuredContent.files so Langdock
+            can process it as an attachment before the character limit is
+            applied.
 
         itop_get_ticket_attachments(obj_class, ticket_ref, key)
             List all non-image file attachments for a ticket.
             Returns metadata and browser download links only.
-
-    Resources:
-        itop://attachment/{attachment_id}
-            Downloads an iTop Attachment record by its numeric ID.
-            Returns the binary blob directly.
-
-        itop://inlineimage/{secret}/{record_id}
-            Downloads an iTop InlineImage by its secret token and record ID.
-            Returns the binary blob directly.
 
 iTop blob field notes
 ---------------------
@@ -46,8 +35,10 @@ InlineImage : always an image; has a secret field for the download URL.
 
 from __future__ import annotations
 
+import base64
+import mimetypes
+
 import httpx
-from mcp.types import ResourceLink
 
 from config import ITOP_TIMEOUT, ITOP_URL, ITOP_VERIFY_SSL, MCP_DEBUG, logger
 from helpers import resolve_key
@@ -136,84 +127,23 @@ def _validate_itop_uri(uri: str) -> str:
     )
 
 
-def _mime_for_uri(uri: str) -> str:
-    """Best-effort MIME type for a validated itop:// URI.
+def _filename_from_uri(uri: str, mimetype: str) -> str:
+    """Derive a sensible filename from an itop:// URI and MIME type."""
+    ext = mimetypes.guess_extension(mimetype.split(";")[0].strip()) or ""
+    if ext == ".jpe":
+        ext = ".jpg"
 
-    InlineImages are always images; Attachments are treated as image/png
-    as a sensible default since this tool is called from the image flow.
-    """
     if uri.startswith("itop://inlineimage/"):
-        return "image/png"
-    return "image/png"
+        rest = uri[len("itop://inlineimage/"):]
+        record_id = rest.split("/", 1)[1]
+        return "inlineimage_" + record_id + ext
+    else:
+        attachment_id = uri[len("itop://attachment/"):]
+        return "attachment_" + attachment_id + ext
 
 
 def register(mcp, itop_request):
-    """Register attachment tools and resources."""
-
-    # ------------------------------------------------------------------
-    # Resource: itop://attachment/{attachment_id}
-    # ------------------------------------------------------------------
-
-    @mcp.resource(
-        "itop://attachment/{attachment_id}",
-        name="itop-attachment",
-        title="iTop ticket attachment",
-        description="An image or file attached to an iTop ticket",
-        mime_type="image/png",
-    )
-    async def resource_attachment(attachment_id: str) -> bytes:
-        """Download an iTop Attachment by its record ID.
-
-        Called by the LLM via resources/read with the URI
-        itop://attachment/<id> as returned by itop_get_ticket_images.
-        FastMCP extracts the path parameter and passes it here directly.
-        """
-        http_url = _attachment_url(attachment_id)
-        try:
-            content_bytes, mimetype = await _download_binary(http_url)
-        except Exception as exc:
-            logger.debug("resource_attachment error: id=%s exc=%s", attachment_id, exc)
-            raise
-        if MCP_DEBUG:
-            logger.debug(
-                "resource_attachment: id=%s mime=%s bytes=%d",
-                attachment_id, mimetype, len(content_bytes),
-            )
-        return content_bytes
-
-    # ------------------------------------------------------------------
-    # Resource: itop://inlineimage/{secret}/{record_id}
-    # ------------------------------------------------------------------
-
-    @mcp.resource(
-        "itop://inlineimage/{secret}/{record_id}",
-        name="itop-inlineimage",
-        title="iTop inline image",
-        description="An inline image attached to an iTop ticket",
-        mime_type="image/png",
-    )
-    async def resource_inlineimage(secret: str, record_id: str) -> bytes:
-        """Download an iTop InlineImage by its secret token and record ID.
-
-        Called by the LLM via resources/read with the URI
-        itop://inlineimage/<secret>/<record_id> as returned by
-        itop_get_ticket_images. FastMCP extracts both path parameters.
-        """
-        http_url = _inline_image_url(secret, record_id)
-        try:
-            content_bytes, mimetype = await _download_binary(http_url)
-        except Exception as exc:
-            logger.debug(
-                "resource_inlineimage error: secret=%s id=%s exc=%s",
-                secret, record_id, exc,
-            )
-            raise
-        if MCP_DEBUG:
-            logger.debug(
-                "resource_inlineimage: secret=%s id=%s mime=%s bytes=%d",
-                secret, record_id, mimetype, len(content_bytes),
-            )
-        return content_bytes
+    """Register attachment tools."""
 
     # ------------------------------------------------------------------
     # Tool: itop_get_ticket_images
@@ -232,9 +162,8 @@ def register(mcp, itop_request):
         combined with equal weight.
 
         Returns a plain text listing with filename, mimetype and resource_uri
-        per image. Each resource_uri is a valid MCP resource URI that can be
-        read directly via resources/read (or passed to itop_download_attachment
-        to obtain a ResourceLink for embedding in the conversation context).
+        per image. Pass each resource_uri to itop_download_attachment to
+        download the image directly as a file attachment.
 
         For ticket classes (UserRequest, Incident, etc.) prefer ticket_ref
         (e.g. R-016271); it is resolved automatically and takes priority
@@ -323,8 +252,7 @@ def register(mcp, itop_request):
         lines = [
             str(len(images)) + " image attachment(s) found for "
             + obj_class + " " + label + ".",
-            "Pass each resource_uri to itop_download_attachment to get a ResourceLink,",
-            "then read it via resources/read to retrieve the image blob.",
+            "Pass each resource_uri to itop_download_attachment to download the image.",
             "",
         ]
         for img in images:
@@ -342,44 +270,64 @@ def register(mcp, itop_request):
     async def itop_download_attachment(
         uri: str,
         name: str = "",
-        description: str = "",
-    ) -> ResourceLink:
-        """Return a ResourceLink for an iTop image attachment.
+    ) -> dict:
+        """Download an iTop image attachment and return it as a file object.
 
-        Validates the itop:// URI and wraps it in a ResourceLink so the
-        LLM can embed the resource reference directly in the conversation
-        context. The linked resource handler (itop://attachment/{id} or
-        itop://inlineimage/{secret}/{id}) serves the binary blob when the
-        client calls resources/read.
+        Fetches the binary directly from iTop and returns the image inside
+        structuredContent.files so Langdock registers it as an attachment
+        before the character limit is applied.
+
+        The previous ResourceLink approach required Langdock to resolve the
+        itop:// URI via resources/read, which only works for statically
+        registered resource URIs. Because attachment URIs are dynamic
+        (per-ticket), that path did not work. This tool fetches the blob
+        directly and encodes it as plain base64 (no data: prefix).
 
         Supported URI schemes:
           itop://attachment/<attachment_id>
           itop://inlineimage/<secret>/<record_id>
 
         Args:
-            uri:         Resource URI as returned by itop_get_ticket_images.
-            name:        Optional human-readable name for the ResourceLink.
-            description: Optional description for the ResourceLink.
+            uri:  Resource URI as returned by itop_get_ticket_images.
+            name: Optional filename override.
         """
         validated = _validate_itop_uri(uri)
-        mime = _mime_for_uri(validated)
 
-        link_name = name or validated
-        link_description = description or "Read this resource to retrieve the iTop image blob."
+        if validated.startswith("itop://inlineimage/"):
+            rest = validated[len("itop://inlineimage/"):]
+            secret, record_id = rest.split("/", 1)
+            http_url = _inline_image_url(secret, record_id)
+        else:
+            attachment_id = validated[len("itop://attachment/"):]
+            http_url = _attachment_url(attachment_id)
+
+        try:
+            content_bytes, mimetype = await _download_binary(http_url)
+        except Exception as exc:
+            logger.debug("itop_download_attachment error: uri=%s exc=%s", validated, exc)
+            raise
 
         if MCP_DEBUG:
             logger.debug(
-                "itop_download_attachment: uri=%s mime=%s name=%r",
-                validated, mime, link_name,
+                "itop_download_attachment: uri=%s mime=%s bytes=%d",
+                validated, mimetype, len(content_bytes),
             )
 
-        return ResourceLink(
-            type="resource_link",
-            uri=validated,
-            name=link_name,
-            description=link_description,
-            mimeType=mime,
-        )
+        file_name = name or _filename_from_uri(validated, mimetype)
+        b64 = base64.b64encode(content_bytes).decode("ascii")
+
+        return {
+            "content": [{"type": "text", "text": "Attachment downloaded: " + file_name}],
+            "structuredContent": {
+                "files": [
+                    {
+                        "fileName": file_name,
+                        "mimeType": mimetype,
+                        "base64": b64,
+                    }
+                ]
+            },
+        }
 
     # ------------------------------------------------------------------
     # Tool: itop_get_ticket_attachments
