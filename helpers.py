@@ -524,13 +524,23 @@ async def resolve_ticket_ref(
     return obj_class, parsed
 
 
-async def resolve_key(obj_class: str, ref: str | None, numeric_id: Any, itop_request) -> Any:
-    """Resolve a ticket identifier to a numeric key for mutation operations.
+async def resolve_key(
+    obj_class: str,
+    ref: str | None,
+    numeric_id: Any,
+    itop_request,
+) -> tuple[str, Any]:
+    """Resolve a ticket identifier to (resolved_class, numeric_key).
+
+    Returns a tuple so callers can override obj_class with the real iTop
+    class discovered during resolution (e.g. Incident instead of Ticket).
 
     Preference order:
-    1. ref (ticket ref string, e.g. "R-016271") -- looked up via iTop.
-    2. numeric_id as bare number -- triggers Ticket base class lookup.
-    3. numeric_id as fallback (DB id).
+    1. ref (ticket ref string, e.g. "R-016271") -- looked up via iTop;
+       the real class is read from the response object.
+    2. numeric_id as bare number -- triggers Ticket base class lookup,
+       which also returns the real class.
+    3. numeric_id as fallback (DB id) -- class is unchanged.
     """
     if ref and isinstance(ref, str) and _REF_PATTERN.match(ref.strip()):
         result = await itop_request({
@@ -541,10 +551,15 @@ async def resolve_key(obj_class: str, ref: str | None, numeric_id: Any, itop_req
         })
         objects = result.get("objects") or {}
         for _k, obj_data in objects.items():
+            resolved_class = obj_data.get("class") or obj_class
             raw_id = obj_data.get("key") or (obj_data.get("fields") or {}).get("id")
             if raw_id is not None:
                 try:
-                    return int(raw_id)
+                    logger.debug(
+                        "[resolve_key] ref=%r -> class=%r key=%r",
+                        ref, resolved_class, int(raw_id),
+                    )
+                    return resolved_class, int(raw_id)
                 except (ValueError, TypeError):
                     pass
 
@@ -561,17 +576,26 @@ async def resolve_key(obj_class: str, ref: str | None, numeric_id: Any, itop_req
                 })
                 objects = result.get("objects") or {}
                 for _k, obj_data in objects.items():
+                    resolved_class = obj_data.get("class") or found_class
                     raw_id = obj_data.get("key") or (obj_data.get("fields") or {}).get("id")
                     if raw_id is not None:
                         try:
-                            return int(raw_id)
+                            logger.debug(
+                                "[resolve_key] bare number=%r -> class=%r key=%r",
+                                number, resolved_class, int(raw_id),
+                            )
+                            return resolved_class, int(raw_id)
                         except (ValueError, TypeError):
                             pass
         try:
-            return int(numeric_id)
+            logger.debug(
+                "[resolve_key] numeric_id=%r -> class=%r key=%r (fallback)",
+                numeric_id, obj_class, int(numeric_id),
+            )
+            return obj_class, int(numeric_id)
         except (ValueError, TypeError):
-            return numeric_id
-    return numeric_id
+            return obj_class, numeric_id
+    return obj_class, numeric_id
 
 
 # ---------------------------------------------------------------------------
