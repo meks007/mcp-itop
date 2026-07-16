@@ -166,11 +166,13 @@ def register(mcp, itop_request, get_token_fn):
             obj_class, ticket_ref, key,
         )
 
-        resolved = await resolve_key(
+        # resolve_key now returns (resolved_class, numeric_key); override obj_class.
+        obj_class, resolved = await resolve_key(
             obj_class, ticket_ref or None, key or None, itop_request
         )
         logger.debug(
-            "[attachments] itop_get_ticket_images: resolved key=%r", resolved
+            "[attachments] itop_get_ticket_images: resolved class=%r key=%r",
+            obj_class, resolved,
         )
 
         if resolved is None:
@@ -310,7 +312,8 @@ def register(mcp, itop_request, get_token_fn):
             ticket_ref: Preferred ticket reference, e.g. R-016271.
             key:        Fallback numeric ID or OQL query.
         """
-        resolved = await resolve_key(
+        # resolve_key now returns (resolved_class, numeric_key); override obj_class.
+        obj_class, resolved = await resolve_key(
             obj_class, ticket_ref or None, key or None, itop_request
         )
         if resolved is None:
