@@ -14,12 +14,13 @@ Module layout:
   auth.py          - bearer token verifier and accessor
   client.py        - iTop REST/JSON HTTP client
   helpers.py       - shared formatting and parsing utilities
+  attachment_store.py - SQLite store for image URIs (session-keyed by token)
   tools/
     analytics.py   - SLA, workload, idle agents, service/caller quality
     kb.py          - knowledge base search and retrieval
     crud.py        - generic CRUD + stimulus + impact tools
     comments.py    - ticket log read/write
-    attachments.py - image and file attachment tools
+    attachments.py - image and file attachment tools + static image resource
 """
 
 from __future__ import annotations
@@ -116,7 +117,9 @@ def _get_token() -> str:
 
 # -- Register all tools ---------------------------------------------------
 _analytics.register(mcp, itop_request)
-_attachments.register(mcp, itop_request)
+# Pass get_token_fn so attachments.py can write to the SQLite store and
+# read it back inside the static itop://attachment/images resource handler.
+_attachments.register(mcp, itop_request, _get_token)
 _kb.register(mcp, itop_request)
 _crud.register(mcp, itop_request)
 _comments.register(mcp, itop_request)
