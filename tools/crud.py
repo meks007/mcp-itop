@@ -46,8 +46,8 @@ def register(mcp, itop_request):
         real class once it is known. Bare ticket numbers are resolved automatically.
         Set full=True only when complete fields or ticket logs are needed. Do not
         disclose private_log unless the user explicitly requests it. Batch same-class
-        lookups with OQL rather than calling once per object. Do not supply empty 
-        output fields."""
+        lookups with OQL rather than calling once per object. Use describe class to get
+        output fields. Do not supply empty output fields."""
         # Resolve bare numbers and unknown class via Ticket base class lookup
         obj_class, resolved_key = await resolve_ticket_ref(obj_class, key, itop_request)
 
