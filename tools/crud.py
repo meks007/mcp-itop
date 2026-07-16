@@ -30,7 +30,7 @@ def register(mcp, itop_request):
     """Register all CRUD tools on the given mcp instance."""
 
     @mcp.tool(
-        name="Load object"
+        name="Load_object"
     )
     async def itop_get(
         obj_class: str,
@@ -74,7 +74,7 @@ def register(mcp, itop_request):
         return format_objects(result)
 
     @mcp.tool(
-        name="Create object"
+        name="Create_object"
     )
     async def itop_create(
         obj_class: str,
@@ -97,7 +97,7 @@ def register(mcp, itop_request):
         return format_objects(result)
 
     @mcp.tool(
-        name="Update object"
+        name="Update_object"
     )
     async def itop_update(
         obj_class: str,
@@ -142,7 +142,7 @@ def register(mcp, itop_request):
         return format_objects(result)
 
     @mcp.tool(
-        name="Delete object"
+        name="Delete_object"
     )
     async def itop_delete(
         obj_class: str,
@@ -168,7 +168,9 @@ def register(mcp, itop_request):
         })
         return format_objects(result)
 
-    @mcp.tool()
+    @mcp.tool(
+        name="Apply_stimulus_to_object"
+    )
     async def itop_apply_stimulus(
         obj_class: str,
         stimulus: str,
@@ -209,7 +211,7 @@ def register(mcp, itop_request):
         return format_objects(result)
 
     @mcp.tool(
-        name="Get object relations"
+        name="Get_object_relations"
     )
     async def itop_get_related(
         obj_class: str,
@@ -238,7 +240,9 @@ def register(mcp, itop_request):
                     output += "\n  " + origin + " -> " + str_or(target, "key", "?")
         return output
 
-    @mcp.tool()
+    @mcp.tool(
+        name="List_object_operations"
+    )
     async def itop_list_operations() -> str:
         """List all available REST/JSON operations on the iTop server."""
         result = await itop_request({"operation": "list_operations"})
@@ -255,7 +259,7 @@ def register(mcp, itop_request):
         return "\n".join(lines)
 
     @mcp.tool(
-        name="Describe object class"
+        name="Describe_class"
     )
     async def itop_describe_class(obj_class: str) -> str:
         """Discover available fields for an iTop class by sampling an existing object."""
