@@ -19,6 +19,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
+from client import _redact_secret
 from config import logger
 
 # ---------------------------------------------------------------------------
@@ -37,9 +38,10 @@ def get_bearer_token() -> str:
     """
     token = _bearer_token_var.get()
     logger.debug(
-        "[auth] get_bearer_token: token present=%s len=%d",
+        "[auth] get_bearer_token: token present=%s len=%d token_prefix=%s",
         bool(token),
         len(token),
+        _redact_secret(token) if token else "n/a",
     )
     if not token:
         raise ValueError(
@@ -70,10 +72,11 @@ class BearerTokenMiddleware(BaseHTTPMiddleware):
             token = auth_header[len("bearer "):].strip()
 
         logger.debug(
-            "[auth] BearerTokenMiddleware: path=%s token_present=%s len=%d",
+            "[auth] BearerTokenMiddleware: path=%s token_present=%s len=%d token_prefix=%s",
             request.url.path,
             bool(token),
             len(token),
+            _redact_secret(token) if token else "n/a",
         )
 
         # Store token in ContextVar for this request's async context.
