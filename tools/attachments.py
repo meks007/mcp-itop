@@ -58,7 +58,7 @@ def _is_image(mimetype: str) -> bool:
 def _attachment_url(attachment_id: str | int) -> str:
     return (
         f"{ITOP_URL}/webservices/ajax.document.php"
-        f"?operation=download_document&id={attachment_id}"
+        f"?operation=download_document&class=Attachment&field=contents&id={attachment_id}"
     )
 
 
