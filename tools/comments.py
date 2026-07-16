@@ -26,25 +26,11 @@ def register(mcp, itop_request):
         is_public: bool = True,
         format: str = "text",
     ) -> str:
-        """Add a public or private comment to an iTop ticket.
-        
-        Public comments are portal-visible; private comments are agent-only. If the
-        user does not specify visibility, use the public log.
-        
-        Read comments with itop_get and full=True. The full record contains public_log
-        and, when authorized, private_log. No separate log tool exists.
-        
-        Prefer ticket_ref, for example "R-016271". A bare ticket_id such as "15525"
-        is resolved to its real class and reference through Ticket. Use
-        ticket_class="Ticket" when the concrete class is unknown.
-        
-        Args:
-            ticket_class: UserRequest, Incident, or "Ticket" when unknown.
-            text: Comment text.
-            ticket_ref: Preferred ticket reference, for example "R-016271".
-            ticket_id: Bare number or numeric ID when the ref is unknown.
-            is_public: True for public_log; False for private_log.
-            format: "text" or "html"."""
+        """Add a public or private log entry to an iTop ticket.
+
+        Public comments are portal-visible; use private comments only when explicitly
+        required. Prefer ticket_ref; bare ticket IDs are resolved automatically.
+        To read existing comments, use itop_get with full=True."""
         if not ticket_ref and not ticket_id:
             return "Error: supply ticket_ref (e.g. 'R-016271') or ticket_id."
 
