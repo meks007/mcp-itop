@@ -10,6 +10,7 @@ from typing import Union
 from helpers import (
     apply_field_strip,
     ensure_ref_field,
+    fetch_image_counts,
     format_objects,
     is_bare_number,
     parse_json_arg,
@@ -71,6 +72,35 @@ def register(mcp, itop_request):
 
         if post_strip:
             apply_field_strip(result, post_strip)
+
+        # Inject lightweight image summary for ticket classes.
+        # Two cheap iTop calls (id only, no blob) per returned object.
+        # The _images annotation is rendered by format_objects with a
+        # bracketed label and is never sent back to iTop.
+        if obj_class in CLASSES_WITH_REF:
+            objects = result.get("objects") or {}
+            for obj_data in objects.values():
+                oid = obj_data.get("key")
+                if not oid:
+                    continue
+                fields = obj_data.get("fields")
+                if not isinstance(fields, dict):
+                    continue
+                att_count, ii_count = await fetch_image_counts(
+                    obj_class, oid, itop_request
+                )
+                total = att_count + ii_count
+                if total == 0:
+                    continue
+                parts = []
+                if att_count:
+                    parts.append(str(att_count) + " attachment(s)")
+                if ii_count:
+                    parts.append(str(ii_count) + " inline image(s)")
+                fields["_images"] = (
+                    ", ".join(parts)
+                    + " -- call itop_get_ticket_images to fetch"
+                )
 
         return format_objects(result)
 
