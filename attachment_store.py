@@ -18,6 +18,11 @@ TABLE attachment_sessions (
 
 TTL is fixed at IMAGE_STORE_TTL_SECONDS (default 3600 s = 1 h).
 Expired rows are purged automatically on every write.
+
+The database connection is opened eagerly at server startup via init_db().
+Call init_db() once from server.py before the ASGI app starts serving
+requests. All subsequent calls to store_images / get_images reuse the
+module-level connection without any lazy-init overhead.
 """
 
 from __future__ import annotations
@@ -59,10 +64,14 @@ class ImageEntry(TypedDict):
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _connect() -> sqlite3.Connection:
-    """Open (and initialise if necessary) the SQLite database."""
+# Module-level connection. Set by init_db(); never None after startup.
+_conn: sqlite3.Connection | None = None
+
+
+def _open_db() -> sqlite3.Connection:
+    """Open and initialise the SQLite database. Called once at startup."""
     logger.debug(
-        "[attachment_store] connecting to DB at path=%s", IMAGE_STORE_DB_PATH
+        "[attachment_store] opening DB at path=%s", IMAGE_STORE_DB_PATH
     )
     conn = sqlite3.connect(IMAGE_STORE_DB_PATH, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -86,23 +95,39 @@ def _connect() -> sqlite3.Connection:
         "ON attachment_sessions (expires_at)"
     )
     conn.commit()
-    logger.debug("[attachment_store] DB initialised, tables and indexes ready")
+    logger.debug("[attachment_store] DB ready, tables and indexes verified")
     return conn
 
 
-# Module-level connection (created lazily).
-_conn: sqlite3.Connection | None = None
-
-
 def _get_conn() -> sqlite3.Connection:
-    global _conn
+    """Return the module-level DB connection. Raises if init_db() was not called."""
     if _conn is None:
-        logger.debug("[attachment_store] lazy-init: opening DB connection")
-        _conn = _connect()
-        logger.debug("[attachment_store] DB connection established")
-    else:
-        logger.debug("[attachment_store] reusing existing DB connection")
+        raise RuntimeError(
+            "[attachment_store] DB not initialised. "
+            "Call attachment_store.init_db() at server startup."
+        )
     return _conn
+
+
+# ---------------------------------------------------------------------------
+# Startup initialisation
+# ---------------------------------------------------------------------------
+
+def init_db() -> None:
+    """Open the SQLite database and prepare the schema.
+
+    Must be called once at server startup, before any store_images or
+    get_images call. Safe to call multiple times (subsequent calls are
+    no-ops).
+    """
+    global _conn
+    if _conn is not None:
+        logger.debug("[attachment_store] init_db: already initialised, skipping")
+        return
+    _conn = _open_db()
+    logger.info(
+        "[attachment_store] init_db: DB opened at %s", IMAGE_STORE_DB_PATH
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -209,10 +234,7 @@ def get_images(token: str) -> list[ImageEntry]:
     now = time.time()
 
     logger.debug(
-        "[attachment_store] get_images: looking up token=%s now=%.0f db=%s",
-        token_preview,
-        now,
-        IMAGE_STORE_DB_PATH,
+        "[attachment_store] get_images: looking up token=%s", token_preview
     )
 
     conn = _get_conn()
