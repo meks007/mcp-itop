@@ -142,8 +142,7 @@ if MCP_DEBUG:
     class DebugLoggingMiddleware(BaseHTTPMiddleware):
         """Log every HTTP request/response between MCP client and this server.
 
-        Logs request method, path, headers (secrets redacted), and body
-        (truncated to 2000 chars). Logs response status and headers.
+        Headers and body are emitted as separate log lines per direction.
         Response body is not logged because the streamable-http transport
         uses chunked/SSE streaming that cannot be buffered here without
         breaking the connection.
@@ -151,28 +150,28 @@ if MCP_DEBUG:
 
         async def dispatch(self, request: StarletteRequest, call_next):
             body = await request.body()
-            req_headers = _format_headers(
-                request.headers, _REDACTED_REQUEST_HEADERS
-            )
+
             logger.debug(
-                "CLIENT -> MCP  %s %s  headers=[%s]  body=%s",
+                "CLIENT -> MCP  %s %s  headers=[%s]",
                 request.method,
                 request.url.path,
-                req_headers,
+                _format_headers(request.headers, _REDACTED_REQUEST_HEADERS),
+            )
+            logger.debug(
+                "CLIENT -> MCP  %s %s  body=%s",
+                request.method,
+                request.url.path,
                 body[:2000].decode(errors="replace") if body else "(empty)",
             )
 
             response = await call_next(request)
 
-            resp_headers = _format_headers(
-                response.headers, _REDACTED_RESPONSE_HEADERS
-            )
             logger.debug(
                 "CLIENT <- MCP  %s %s  status=%s  headers=[%s]",
                 request.method,
                 request.url.path,
                 response.status_code,
-                resp_headers,
+                _format_headers(response.headers, _REDACTED_RESPONSE_HEADERS),
             )
             return response
 
