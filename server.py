@@ -10,32 +10,36 @@ Provides AI assistants (Claude Desktop, opencode, etc.) with tools to:
 Based on josephstreeter/mcp_itop (CRUD + stimulus) with extended analytics.
 
 Module layout:
-  config.py        - env vars, logging, constants
-  auth.py          - bearer token verifier and accessor
-  client.py        - iTop REST/JSON HTTP client
-  helpers.py       - shared formatting and parsing utilities
+  config.py           - env vars, logging, constants
+  auth.py             - BearerTokenMiddleware ContextVar + get_bearer_token()
+  client.py           - iTop REST/JSON HTTP client
+  helpers.py          - shared formatting and parsing utilities
   attachment_store.py - SQLite store for image URIs (session-keyed by token)
   tools/
-    analytics.py   - SLA, workload, idle agents, service/caller quality
-    kb.py          - knowledge base search and retrieval
-    crud.py        - generic CRUD + stimulus + impact tools
-    comments.py    - ticket log read/write
-    attachments.py - image and file attachment tools + static image resource
+    analytics.py      - SLA, workload, idle agents, service/caller quality
+    kb.py             - knowledge base search and retrieval
+    crud.py           - generic CRUD + stimulus + impact tools
+    comments.py       - ticket log read/write
+    attachments.py    - image and file attachment tools + static image resource
+
+Framework: fastmcp (PrefectHQ) >= 2.11.0
+  - ResourceResult / ResourceContent for multi-image resource responses
+  - DebugTokenVerifier: accepts any non-empty bearer token (iTop validates
+    the actual token on every REST call)
+  - BearerTokenMiddleware (auth.py): stores the raw token in a ContextVar
+    so get_bearer_token() works in both tool and resource handlers
 """
 
 from __future__ import annotations
 
 import os
 import sys
-from urllib.parse import urlparse
 
 import uvicorn
-from pydantic import AnyHttpUrl
-from mcp.server.auth.settings import AuthSettings
-from mcp.server.fastmcp import FastMCP
-from mcp.server.transport_security import TransportSecuritySettings
+from fastmcp import FastMCP
+from fastmcp.server.auth.providers.debug import DebugTokenVerifier
 
-from auth import ItopBearerVerifier, get_bearer_token
+from auth import BearerTokenMiddleware, get_bearer_token
 from client import itop_request as _raw_itop_request
 from config import MCP_DEBUG, logger
 
@@ -45,49 +49,19 @@ import tools.comments as _comments
 import tools.crud as _crud
 import tools.kb as _kb
 
-# -- MCP server URL (used for AuthSettings and transport security) ----------
-# FastMCP requires issuer_url + resource_server_url when a token_verifier
-# is supplied. We use the server's own listen address for both since this
-# server is not a real OAuth issuer - it only validates that a non-empty
-# bearer token was presented (the token's validity is enforced by iTop).
-#
-# MCP_SERVER_URL must be set to the public-facing URL when running behind
-# a reverse proxy (e.g. https://mcp.your-domain.com). Without it the MCP
-# SDK's DNS rebinding protection will reject requests whose Host header
-# does not match localhost, returning 421 Misdirected Request.
+# ---------------------------------------------------------------------------
+# Server config
+# ---------------------------------------------------------------------------
+
 _MCP_HOST = os.getenv("MCP_HOST", "0.0.0.0")
 _MCP_PORT = int(os.getenv("MCP_PORT", "8096"))
-# Use localhost for the URL even when binding to 0.0.0.0
-_SERVER_URL = os.getenv(
-    "MCP_SERVER_URL",
-    f"http://{'localhost' if _MCP_HOST == '0.0.0.0' else _MCP_HOST}:{_MCP_PORT}",
-)
 
-# -- Transport security: allowed hosts ------------------------------------
-# Always permit localhost variants for health checks and local tooling.
-# When MCP_SERVER_URL is set to a public hostname (e.g. behind a reverse
-# proxy), add that hostname to the allowlist so the MCP SDK's DNS rebinding
-# protection does not reject incoming requests with 421.
-_parsed = urlparse(_SERVER_URL)
-_public_host = _parsed.hostname or ""
-_allowed_hosts: list[str] = [
-    "localhost",
-    "localhost:*",
-    "127.0.0.1",
-    "127.0.0.1:*",
-    "[::1]",
-    "[::1]:*",
-]
-if _public_host and _public_host not in ("localhost", "127.0.0.1", "::1"):
-    _allowed_hosts.append(_public_host)
-    _allowed_hosts.append(f"{_public_host}:*")
+# ---------------------------------------------------------------------------
+# FastMCP instance
+# DebugTokenVerifier accepts any non-empty bearer token.
+# iTop itself validates whether the token is a real/valid iTop API key.
+# ---------------------------------------------------------------------------
 
-_transport_security = TransportSecuritySettings(
-    enable_dns_rebinding_protection=True,
-    allowed_hosts=_allowed_hosts,
-)
-
-# -- MCP instance ---------------------------------------------------------
 mcp = FastMCP(
     "iTop",
     instructions=(
@@ -95,27 +69,28 @@ mcp = FastMCP(
         "Provides SLA reports, agent workload analysis, service quality checks, "
         "ticket lifecycle, KB search, and CI impact analysis."
     ),
-    auth=AuthSettings(
-        issuer_url=AnyHttpUrl(_SERVER_URL),
-        resource_server_url=AnyHttpUrl(_SERVER_URL),
-    ),
-    token_verifier=ItopBearerVerifier(),
-    transport_security=_transport_security,
+    auth=DebugTokenVerifier(),
 )
 
 
-# -- Bind bearer token to itop_request ------------------------------------
+# ---------------------------------------------------------------------------
+# Bind bearer token to itop_request
+# ---------------------------------------------------------------------------
+
 async def itop_request(operation: dict) -> dict:
     """Wrapper that injects the per-request bearer token into the HTTP client."""
-    return await _raw_itop_request(operation, lambda: get_bearer_token(mcp))
+    return await _raw_itop_request(operation, get_bearer_token)
 
 
 def _get_token() -> str:
-    """Return the current per-request bearer token (for non-REST tools)."""
-    return get_bearer_token(mcp)
+    """Return the current per-request bearer token (for non-REST callers)."""
+    return get_bearer_token()
 
 
-# -- Register all tools ---------------------------------------------------
+# ---------------------------------------------------------------------------
+# Register all tools and resources
+# ---------------------------------------------------------------------------
+
 _analytics.register(mcp, itop_request)
 # Pass get_token_fn so attachments.py can write to the SQLite store and
 # read it back inside the static itop://attachment/images resource handler.
@@ -125,11 +100,20 @@ _crud.register(mcp, itop_request)
 _comments.register(mcp, itop_request)
 
 
-# -- ASGI app (for uvicorn) -----------------------------------------------
-app = mcp.streamable_http_app()
+# ---------------------------------------------------------------------------
+# ASGI app
+# ---------------------------------------------------------------------------
 
+app = mcp.http_app(transport="streamable-http")
 
-# -- Debug logging middleware (Starlette-level) ----------------------------
+# Inject BearerTokenMiddleware so get_bearer_token() works in resource
+# handlers (which run outside the fastmcp tool-call context).
+app.add_middleware(BearerTokenMiddleware)
+
+# ---------------------------------------------------------------------------
+# Optional debug logging middleware
+# ---------------------------------------------------------------------------
+
 if MCP_DEBUG:
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.requests import Request as StarletteRequest
@@ -158,19 +142,17 @@ if MCP_DEBUG:
     logger.debug("Client<->MCP HTTP debug logging middleware attached.")
 
 
-# -- Entry point ----------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
 def main():
-    """Run the iTop MCP server.
+    """Run the iTop MCP server via uvicorn (Streamable HTTP).
 
-    Runs as a network-reachable Streamable HTTP server via uvicorn. iTop
-    authentication is supplied per-client via an "Authorization: Bearer
-    <itop_token>" header (see auth.py) - no ITOP_TOKEN / ITOP_USER /
-    ITOP_PASSWORD environment variables are read for authentication
-    purposes anymore.
-
-    MCP_DEBUG=true enables verbose logging of all client<->MCP HTTP
-    traffic and iTop REST/JSON API request/response payloads (auth
-    secrets are always redacted).
+    iTop authentication is supplied per-client via an
+    'Authorization: Bearer <itop_token>' HTTP header. The token is
+    forwarded to iTop on every REST call; actual validity is enforced
+    by iTop. MCP_DEBUG=true enables verbose request/response logging.
     """
     from config import ITOP_URL
 
@@ -179,6 +161,10 @@ def main():
         print("Create .env file with ITOP_URL (see .env.example)", file=sys.stderr)
         sys.exit(1)
 
+    logger.info(
+        "Starting iTop MCP server on %s:%d (debug=%s)",
+        _MCP_HOST, _MCP_PORT, MCP_DEBUG,
+    )
     uvicorn.run(app, host=_MCP_HOST, port=_MCP_PORT)
 
 
