@@ -137,7 +137,7 @@ def register(mcp, itop_request, get_token_fn):
     # ------------------------------------------------------------------
 
     @mcp.tool(
-        name="Get ticket images"
+        name="get_ticket_images"
     )
     async def itop_get_ticket_images(
         obj_class: str,
@@ -280,7 +280,9 @@ def register(mcp, itop_request, get_token_fn):
     # Tool: itop_get_ticket_attachments
     # ------------------------------------------------------------------
 
-    @mcp.tool()
+    @mcp.tool(
+        name="Get_ticket_attachments"
+    )
     async def itop_get_ticket_attachments(
         obj_class: str,
         ticket_ref: str = "",
@@ -349,7 +351,7 @@ def register(mcp, itop_request, get_token_fn):
 
     @mcp.resource(
         _STATIC_RESOURCE_URI,
-        name="Analyze ticket images",
+        name="Analyze_ticket_images",
         description=(
             "Returns all images stored by the most recent itop_get_ticket_images call "
             "for this session as one ResourceContent per image. "
