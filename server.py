@@ -19,7 +19,7 @@ Module layout:
     kb.py          - knowledge base search and retrieval
     crud.py        - generic CRUD + stimulus + impact tools
     comments.py    - ticket log read/write
-    attachments.py - image and file attachment tools and MCP resources
+    attachments.py - image and file attachment tools
 """
 
 from __future__ import annotations
