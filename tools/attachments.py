@@ -30,9 +30,14 @@ The contents AttributeBlob is returned by the REST API as a dict:
 
 Attachment  : may be any MIME type; mimetype is checked before including.
               Download via ?operation=download_document&id=<id>
+              NOTE: ajax.document.php requires an active iTop session cookie
+              and does NOT accept the bearer token. Binary is therefore read
+              directly from the REST API response (contents.data base64 field)
+              and stored as a data: URI -- no second HTTP request needed.
 InlineImage : always an image; has a secret field for the download URL.
               Download via ?operation=download_inlineimage&id=<id>&s=<secret>
               Has no filename field; friendlyname or fabricated name is used.
+              InlineImage download works without a session cookie.
 """
 
 from __future__ import annotations
@@ -194,11 +199,19 @@ def register(mcp, itop_request, get_token_fn):
                 continue
             if not filename:
                 filename = "attachment_" + record_id
-            uri = "itop://attachment/" + record_id
+            # Use a data: URI so the resource handler can decode the binary
+            # directly from the REST API response without a second HTTP request.
+            # ajax.document.php requires an active iTop session (cookie) and
+            # does not accept the bearer token -- a GET would return an HTML login page.
+            if b64_data:
+                uri = "data:" + mimetype + ";base64," + b64_data
+            else:
+                uri = "itop://attachment/" + record_id
             images.append({"source": "Attachment", "filename": filename, "mimetype": mimetype, "uri": uri, "b64": b64_data})
             logger.debug(
-                "[attachments] itop_get_ticket_images: added Attachment record_id=%s uri=%s",
-                record_id, uri,
+                "[attachments] itop_get_ticket_images: added Attachment record_id=%s"
+                " uri_scheme=%s",
+                record_id, uri.split(":")[0],
             )
 
         # -- InlineImage (always image) --
@@ -227,6 +240,7 @@ def register(mcp, itop_request, get_token_fn):
                 filename = fields.get("friendlyname") or ("inlineimage_" + record_id)
             if not mimetype:
                 mimetype = "image/unknown"
+            # InlineImage download works without a session cookie -- keep http URI.
             uri = (
                 "itop://inlineimage/" + secret + "/" + record_id
                 if secret
@@ -253,8 +267,8 @@ def register(mcp, itop_request, get_token_fn):
                 if digest in seen_hashes:
                     logger.debug(
                         "[attachments] itop_get_ticket_images: skipping duplicate"
-                        " digest=%s filename=%s uri=%s",
-                        digest[:12], img.get("filename"), img.get("uri"),
+                        " digest=%s filename=%s uri_scheme=%s",
+                        digest[:12], img.get("filename"), img.get("uri", "").split(":")[0],
                     )
                     continue
                 seen_hashes.add(digest)
@@ -444,26 +458,40 @@ def register(mcp, itop_request, get_token_fn):
         for i, entry in enumerate(entries):
             uri = entry["uri"]
             logger.debug(
-                "[attachments] serve_ticket_images: downloading [%d/%d] uri=%s",
-                i + 1, len(entries), uri,
+                "[attachments] serve_ticket_images: processing [%d/%d] filename=%s uri_scheme=%s",
+                i + 1, len(entries), entry.get("filename", "?"), uri.split(":")[0],
             )
             try:
-                http_url = _http_url_from_uri(uri)
-                content_bytes, detected_mime = await _download_binary(http_url)
-                mime = detected_mime or entry.get("mimetype", "application/octet-stream")
-                logger.debug(
-                    "[attachments] serve_ticket_images: [%d] mime=%s bytes=%d",
-                    i + 1, mime, len(content_bytes),
-                )
+                if uri.startswith("data:"):
+                    # Attachment binary was embedded as a base64 data URI at
+                    # collection time -- decode in-memory, no HTTP request needed.
+                    import base64 as _base64
+                    header, b64 = uri.split(",", 1)
+                    mime = header.split(":")[1].split(";")[0]
+                    content_bytes = _base64.b64decode(b64)
+                    logger.debug(
+                        "[attachments] serve_ticket_images: [%d] decoded data URI"
+                        " mime=%s bytes=%d",
+                        i + 1, mime, len(content_bytes),
+                    )
+                else:
+                    # InlineImage (and any Attachment without b64) -- HTTP download.
+                    http_url = _http_url_from_uri(uri)
+                    content_bytes, mime = await _download_binary(http_url)
+                    mime = mime or entry.get("mimetype", "application/octet-stream")
+                    logger.debug(
+                        "[attachments] serve_ticket_images: [%d] downloaded mime=%s bytes=%d",
+                        i + 1, mime, len(content_bytes),
+                    )
                 resource_contents.append(
                     ResourceContent(content=content_bytes, mime_type=mime)
                 )
             except Exception as exc:
                 logger.warning(
-                    "[attachments] serve_ticket_images: [%d] download failed uri=%s exc=%s",
-                    i + 1, uri, exc,
+                    "[attachments] serve_ticket_images: [%d] failed filename=%s exc=%s",
+                    i + 1, entry.get("filename", "?"), exc,
                 )
-                errors.append(uri + ": " + str(exc))
+                errors.append(entry.get("filename", "?") + ": " + str(exc))
 
         if not resource_contents:
             error_detail = "; ".join(errors) if errors else "unknown error"
