@@ -153,7 +153,9 @@ def register(mcp, itop_request):
                 "  ev_pending  - put ticket on hold"
             )
 
-        resolved = await resolve_key(obj_class, ticket_ref or None, key or None, itop_request)
+        obj_class, resolved = await resolve_key(
+            obj_class, ticket_ref or None, key or None, itop_request
+        )
 
         result = await itop_request({
             "operation": "core/update",
@@ -187,7 +189,9 @@ def register(mcp, itop_request):
             comment: Optional change comment.
             simulate: If true, performs a dry run without deleting.
         """
-        resolved = await resolve_key(obj_class, ticket_ref or None, key or None, itop_request)
+        obj_class, resolved = await resolve_key(
+            obj_class, ticket_ref or None, key or None, itop_request
+        )
 
         result = await itop_request({
             "operation": "core/delete",
@@ -242,7 +246,9 @@ def register(mcp, itop_request):
                 'e.g. fields={"solution": "..."}. Resolving is the final step.'
             )
 
-        resolved = await resolve_key(obj_class, ticket_ref or None, key or None, itop_request)
+        obj_class, resolved = await resolve_key(
+            obj_class, ticket_ref or None, key or None, itop_request
+        )
 
         result = await itop_request({
             "operation": "core/apply_stimulus",
