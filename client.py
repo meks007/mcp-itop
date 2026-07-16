@@ -20,12 +20,12 @@ from config import (
 _http_client: httpx.AsyncClient | None = None
 
 
-def _redact_secret(value: object, visible_chars: int = 6) -> str:
-    """Mask a secret while retaining its final characters for identification."""
+def _redact_secret(value: object, visible_chars: int = 7) -> str:
+    """Mask a secret while retaining its first characters for identification."""
     secret = str(value)
     if len(secret) <= visible_chars:
         return "***REDACTED***"
-    return f"***REDACTED***{secret[-visible_chars:]}"
+    return f"{secret[:visible_chars]}***REDACTED***"
 
 
 def _get_http_client() -> httpx.AsyncClient:
@@ -41,6 +41,22 @@ def _redact_form_data(data: dict) -> dict:
     for key in ("auth_token", "auth_pwd"):
         if key in redacted and redacted[key]:
             redacted[key] = _redact_secret(redacted[key])
+    return redacted
+
+
+def _redact_headers(headers: httpx.Headers) -> dict:
+    """Return a plain dict of headers with the Authorization value redacted."""
+    redacted = {}
+    for name, value in headers.items():
+        if name.lower() == "authorization":
+            # Redact the token part after 'Bearer '
+            if value.lower().startswith("bearer "):
+                token_part = value[len("bearer "):]
+                redacted[name] = f"Bearer {_redact_secret(token_part)}"
+            else:
+                redacted[name] = _redact_secret(value)
+        else:
+            redacted[name] = value
     return redacted
 
 
@@ -68,6 +84,17 @@ async def itop_request(operation: dict, get_bearer_token) -> dict:
 
     try:
         resp = await _get_http_client().post(url, data=data)
+
+        if MCP_DEBUG:
+            logger.debug(
+                "MCP -> iTop  request headers=%s",
+                _redact_headers(resp.request.headers),
+            )
+            logger.debug(
+                "MCP <- iTop  response headers=%s",
+                dict(resp.headers),
+            )
+
         resp.raise_for_status()
         result: dict = resp.json()
     except httpx.HTTPStatusError as e:
