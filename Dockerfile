@@ -8,9 +8,9 @@ COPY tools/ ./tools/
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-RUN useradd -m -u 1000 mcp \
- && mkdir -p /app/data \
- && chown mcp:mcp /app/data
+RUN useradd -m -u 1000 mcp
+
+RUN mkdir -p /app/data && chown mcp:mcp /app/data
 
 USER mcp
 
