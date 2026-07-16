@@ -37,6 +37,7 @@ InlineImage : always an image; has a secret field for the download URL.
 
 from __future__ import annotations
 
+import hashlib
 import httpx
 from fastmcp.resources import ResourceResult, ResourceContent
 
@@ -188,13 +189,13 @@ def register(mcp, itop_request, get_token_fn):
         for obj_key, obj_data in att_objects.items():
             fields = obj_data.get("fields") or {}
             record_id = str(obj_data.get("key") or obj_key.split("::")[-1])
-            mimetype, _data, filename = _unpack_contents(fields.get("contents"))
+            mimetype, b64_data, filename = _unpack_contents(fields.get("contents"))
             if not _is_image(mimetype):
                 continue
             if not filename:
                 filename = "attachment_" + record_id
             uri = "itop://attachment/" + record_id
-            images.append({"source": "Attachment", "filename": filename, "mimetype": mimetype, "uri": uri})
+            images.append({"source": "Attachment", "filename": filename, "mimetype": mimetype, "uri": uri, "b64": b64_data})
             logger.debug(
                 "[attachments] itop_get_ticket_images: added Attachment record_id=%s uri=%s",
                 record_id, uri,
@@ -220,7 +221,7 @@ def register(mcp, itop_request, get_token_fn):
         for obj_key, obj_data in ii_objects.items():
             fields = obj_data.get("fields") or {}
             record_id = str(obj_data.get("key") or obj_key.split("::")[-1])
-            mimetype, _data, filename = _unpack_contents(fields.get("contents"))
+            mimetype, b64_data, filename = _unpack_contents(fields.get("contents"))
             secret = (fields.get("secret") or "").strip()
             if not filename:
                 filename = fields.get("friendlyname") or ("inlineimage_" + record_id)
@@ -231,7 +232,7 @@ def register(mcp, itop_request, get_token_fn):
                 if secret
                 else "itop://attachment/" + record_id
             )
-            images.append({"source": "InlineImage", "filename": filename, "mimetype": mimetype, "uri": uri})
+            images.append({"source": "InlineImage", "filename": filename, "mimetype": mimetype, "uri": uri, "b64": b64_data})
             logger.debug(
                 "[attachments] itop_get_ticket_images: added InlineImage record_id=%s uri=%s",
                 record_id, uri,
@@ -241,6 +242,32 @@ def register(mcp, itop_request, get_token_fn):
             "[attachments] itop_get_ticket_images: total images collected=%d", len(images)
         )
 
+        # Deduplicate by SHA-256 of the raw base64 content.
+        # Attachments with no b64 data are kept unconditionally.
+        seen_hashes = set()
+        unique_images = []
+        for img in images:
+            b64 = img.get("b64") or ""
+            if b64:
+                digest = hashlib.sha256(b64.encode("ascii", errors="replace")).hexdigest()
+                if digest in seen_hashes:
+                    logger.debug(
+                        "[attachments] itop_get_ticket_images: skipping duplicate"
+                        " digest=%s filename=%s uri=%s",
+                        digest[:12], img.get("filename"), img.get("uri"),
+                    )
+                    continue
+                seen_hashes.add(digest)
+            unique_images.append(img)
+        duplicates_removed = len(images) - len(unique_images)
+        if duplicates_removed:
+            logger.debug(
+                "[attachments] itop_get_ticket_images: removed %d duplicate(s),"
+                " %d unique image(s) remain",
+                duplicates_removed, len(unique_images),
+            )
+        images = unique_images
+
         if not images:
             return (
                 "No image attachments found for "
@@ -249,6 +276,7 @@ def register(mcp, itop_request, get_token_fn):
 
         # Persist image list in the SQLite store so the static resource
         # handler itop://attachment/images can serve them for this session.
+        # Strip the internal "b64" key -- it is not part of ImageEntry schema.
         try:
             token = get_token_fn()
             token_preview = (token[:8] + "...") if token and len(token) > 8 else (token or "(empty)")
@@ -258,7 +286,7 @@ def register(mcp, itop_request, get_token_fn):
                     "to attachment_store for token=%s",
                     len(images), token_preview,
                 )
-                store_images(token, images)
+                store_images(token, [{k: v for k, v in img.items() if k != "b64"} for img in images])
                 logger.debug("[attachments] itop_get_ticket_images: attachment_store write complete")
             else:
                 logger.debug(
@@ -270,9 +298,14 @@ def register(mcp, itop_request, get_token_fn):
             )
 
         label = ticket_ref or key or str(resolved)
+        dedup_note = (
+            " (" + str(duplicates_removed) + " duplicate(s) removed)"
+            if duplicates_removed
+            else ""
+        )
         return (
             str(len(images)) + " image attachment(s) found for "
-            + obj_class + " " + label + ".\n"
+            + obj_class + " " + label + dedup_note + ".\n"
             + "Read the MCP resource " + _STATIC_RESOURCE_URI + " to retrieve all images at once."
         )
 
