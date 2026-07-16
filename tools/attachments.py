@@ -18,7 +18,7 @@ register(mcp, itop_request, get_token_fn)
             Returns metadata and browser download links only.
 
     Resources:
-        itop://attachment/images  (static)
+        itop://attachment/images.png  (static)
             Returns all images stored by the most recent
             itop_get_ticket_images call for this client session as a
             multi-content ResourceResult (one ResourceContent per image).
