@@ -29,20 +29,9 @@ def register(mcp, itop_request):
         end_date: str = "",
         limit: int = 500,
     ) -> str:
-        """SLA compliance report for a service (or all) over a period.
+        """SLA compliance report showing TTO and TTR pass/breach rates and median resolution time.
 
-        Calculates TTO (Time To Own) and TTR (Time To Resolve) metrics:
-        - passed: SLA target met
-        - breached: SLA target exceeded
-        - N/A: SLA not applicable for this ticket
-        - Median resolution time and mean time_spent
-
-        Args:
-            service_name: Filter by service name (empty = all services).
-            start_date: Start of period (ISO 8601, default: 30 days ago).
-            end_date: End of period (ISO 8601, default: now).
-            limit: Max tickets to fetch (default 500).
-        """
+        Covers all services or a single service over the given period."""
         s, e = parse_date_range(start_date, end_date)
 
         oql = f"SELECT UserRequest WHERE start_date >= '{s}' AND start_date < '{e}'"
@@ -152,18 +141,8 @@ def register(mcp, itop_request):
         end_date: str = "",
         limit: int = 500,
     ) -> str:
-        """Agent workload analysis.
-
-        Shows how many tickets each agent handled (or a specific agent),
-        open/closed breakdown, total time_spent, and current backlog.
-
-        Args:
-            agent_name: Filter by agent name (empty = all agents).
-            team_name: Filter by team (empty = all teams).
-            start_date: Start of period (ISO 8601, default: 30 days ago).
-            end_date: End of period (ISO 8601, default: now).
-            limit: Max tickets to fetch (default 500).
-        """
+        """Agent workload analysis showing ticket counts, open/closed breakdown,
+        total time spent, and current backlog per agent or team."""
         s, e = parse_date_range(start_date, end_date)
 
         oql = f"SELECT UserRequest WHERE start_date >= '{s}' AND start_date < '{e}'"
@@ -237,16 +216,9 @@ def register(mcp, itop_request):
         status: str = "assigned",
         limit: int = 50,
     ) -> str:
-        """Find tickets where agent has been idle (no action) for N hours.
+        """Find assigned tickets with no agent activity for longer than the given threshold.
 
-        Detects tickets that are assigned but have no recent updates,
-        indicating the agent may not be responding.
-
-        Args:
-            hours: Idle threshold in hours (default: 2).
-            status: Ticket status to check (default: 'assigned').
-            limit: Max tickets to check (default: 50).
-        """
+        Helps detect agents who may not be responding."""
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
             "%Y-%m-%d %H:%M:%S"
         )
@@ -321,17 +293,8 @@ def register(mcp, itop_request):
         min_similar: int = 3,
         limit: int = 200,
     ) -> str:
-        """Detect service selection mismatches for similar tickets.
-
-        Groups tickets by common keywords in title, then checks if they
-        were assigned to different services. Helps identify classification
-        quality issues.
-
-        Args:
-            days: Lookback period in days (default: 30).
-            min_similar: Minimum similar tickets to report (default: 3).
-            limit: Max tickets to fetch (default: 200).
-        """
+        """Detect service classification mismatches by grouping similar tickets and
+        checking whether they were routed to different services."""
         import re
 
         s = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
@@ -415,17 +378,9 @@ def register(mcp, itop_request):
         days: int = 60,
         limit: int = 500,
     ) -> str:
-        """Analyse caller service selection accuracy.
+        """Analyse how accurately each caller selects the correct service category.
 
-        For each caller with enough tickets, checks how often the service
-        they selected was changed by an agent. High correction rate = caller
-        often picks wrong service.
-
-        Args:
-            min_tickets: Minimum tickets per caller to include (default: 5).
-            days: Lookback period (default: 60).
-            limit: Max tickets (default: 500).
-        """
+        Callers who frequently pick the wrong service are flagged."""
         s = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
         e = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -494,18 +449,9 @@ def register(mcp, itop_request):
         days: int = 60,
         limit: int = 500,
     ) -> str:
-        """Analyse which agents correct service assignments.
+        """Analyse how often each agent corrects the service category selected by callers.
 
-        Shows how often each agent handles tickets where the final service
-        differs from what the caller initially selected. A high correction
-        rate means the agent actively fixes classification; a low rate may
-        mean they accept incorrect service selections.
-
-        Args:
-            min_tickets: Minimum tickets per agent to include (default: 10).
-            days: Lookback period (default: 60).
-            limit: Max tickets (default: 500).
-        """
+        A high diversity score means the agent actively fixes misclassifications."""
         s = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
         e = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -574,15 +520,8 @@ def register(mcp, itop_request):
         days: int = 30,
         limit: int = 500,
     ) -> str:
-        """High-level ticket summary dashboard.
-
-        Shows created, resolved, closed, open tickets with SLA stats
-        and average resolution times.
-
-        Args:
-            days: Lookback period (default: 30).
-            limit: Max tickets (default: 500).
-        """
+        """High-level dashboard showing ticket volume, status breakdown, SLA breach count,
+        and average resolution time for the given period."""
         s = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
         e = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
