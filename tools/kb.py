@@ -92,21 +92,10 @@ def register(mcp, itop_request):
         oql: str = "",
         limit: int = 20,
     ) -> str:
-        """Search knowledge-base articles by text in title or body.
+        """Search knowledge-base articles by title or body text.
 
-        Auto-detects KBEntry vs FAQ and resolves the body field name against
-        the server's actual field inventory -- never guesses a field that would
-        cause an OQL error. Single quotes in query are stripped (iTop OQL has
-        no backslash-escape support).
-
-        Supply oql to bypass the auto-built LIKE query entirely (same pattern
-        as itop_get). When oql is provided, query is used only in the header.
-
-        Args:
-            query: Search text. Single quotes stripped before OQL use.
-            oql: Optional full OQL override, e.g. "SELECT KBEntry WHERE title LIKE '%vpn%'".
-            limit: Maximum results; default 20.
-        """
+        Automatically detects the available KB class and body field. Supply oql
+        to override the built-in LIKE query entirely."""
         kb_cls = await _kb_class()
         if not kb_cls:
             return "No KB module installed (tried KBEntry, FAQ)."
@@ -158,13 +147,7 @@ def register(mcp, itop_request):
         name="Get KB article"
     )
     async def itop_get_kb_article(article_id: int) -> str:
-        """Get the full content of a knowledge-base article by ID.
-
-        Auto-detects KBEntry vs FAQ. Redact or skip anything resembling a password.
-
-        Args:
-            article_id: Numeric article ID.
-        """
+        """Get the full content of a knowledge-base article by numeric ID. Auto-detects KBEntry vs FAQ."""
         kb_cls = await _kb_class()
         if not kb_cls:
             return "No KB module installed (tried KBEntry, FAQ)."
@@ -180,15 +163,12 @@ def register(mcp, itop_request):
             return f"KB article #{article_id} not found."
 
         return format_objects(result)
-    
+
     @mcp.tool(
         name="List KB categories"
     )
     async def itop_list_kb_categories() -> str:
-        """List all knowledge-base categories.
-
-        Auto-detects KBCategory vs FAQCategory.
-        """
+        """List all knowledge-base categories. Auto-detects KBCategory vs FAQCategory."""
         kb_cls = await _kb_class()
         if not kb_cls:
             return "No KB module installed."
