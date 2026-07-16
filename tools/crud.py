@@ -29,7 +29,9 @@ _LEAN_STRIP: frozenset[str] = frozenset({"private_log"})
 def register(mcp, itop_request):
     """Register all CRUD tools on the given mcp instance."""
 
-    @mcp.tool()
+    @mcp.tool(
+        name="Load object"
+    )
     async def itop_get(
         obj_class: str,
         key: str,
@@ -81,7 +83,9 @@ def register(mcp, itop_request):
 
         return format_objects(result)
 
-    @mcp.tool()
+    @mcp.tool(
+        name="Create object"
+    )
     async def itop_create(
         obj_class: str,
         fields: str,
@@ -111,7 +115,9 @@ def register(mcp, itop_request):
         })
         return format_objects(result)
 
-    @mcp.tool()
+    @mcp.tool(
+        name="Update object"
+    )
     async def itop_update(
         obj_class: str,
         fields: str,
@@ -167,7 +173,9 @@ def register(mcp, itop_request):
         })
         return format_objects(result)
 
-    @mcp.tool()
+    @mcp.tool(
+        name="Delete object"
+    )
     async def itop_delete(
         obj_class: str,
         ticket_ref: str = "",
@@ -261,7 +269,9 @@ def register(mcp, itop_request):
         })
         return format_objects(result)
 
-    @mcp.tool()
+    @mcp.tool(
+        name="Get object relations"
+    )
     async def itop_get_related(
         obj_class: str,
         key: str,
@@ -314,7 +324,9 @@ def register(mcp, itop_request):
             )
         return "\n".join(lines)
 
-    @mcp.tool()
+    @mcp.tool(
+        name="Describe object class"
+    )
     async def itop_describe_class(obj_class: str) -> str:
         """Discover fields for an iTop class by sampling an existing object.
 
