@@ -42,7 +42,6 @@ from fastmcp.server.auth.providers.debug import DebugTokenVerifier
 from auth import BearerTokenMiddleware, get_bearer_token
 from client import itop_request as _raw_itop_request
 from config import MCP_DEBUG, logger
-import attachment_store
 
 import tools.analytics as _analytics
 import tools.attachments as _attachments
@@ -115,27 +114,65 @@ app.add_middleware(BearerTokenMiddleware)
 # Optional debug logging middleware
 # ---------------------------------------------------------------------------
 
+# Headers that contain secrets and must never appear in logs in cleartext.
+_REDACTED_REQUEST_HEADERS = frozenset({"authorization", "cookie"})
+_REDACTED_RESPONSE_HEADERS = frozenset({"set-cookie"})
+_REDACTED_PLACEHOLDER = "<redacted>"
+
+
+def _format_headers(headers, redacted: frozenset[str]) -> str:
+    """Return a compact single-line representation of HTTP headers.
+
+    Headers whose lowercase name appears in the redacted set have their
+    value replaced with <redacted> so secrets never appear in log output.
+    """
+    parts = []
+    for name, value in headers.items():
+        if name.lower() in redacted:
+            parts.append(name + ": " + _REDACTED_PLACEHOLDER)
+        else:
+            parts.append(name + ": " + value)
+    return " | ".join(parts) if parts else "(none)"
+
+
 if MCP_DEBUG:
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.requests import Request as StarletteRequest
 
     class DebugLoggingMiddleware(BaseHTTPMiddleware):
-        """Log every HTTP request/response between MCP client and this server."""
+        """Log every HTTP request/response between MCP client and this server.
+
+        Logs request method, path, headers (secrets redacted), and body
+        (truncated to 2000 chars). Logs response status and headers.
+        Response body is not logged because the streamable-http transport
+        uses chunked/SSE streaming that cannot be buffered here without
+        breaking the connection.
+        """
 
         async def dispatch(self, request: StarletteRequest, call_next):
             body = await request.body()
+            req_headers = _format_headers(
+                request.headers, _REDACTED_REQUEST_HEADERS
+            )
             logger.debug(
-                "CLIENT -> MCP  %s %s  body=%s",
+                "CLIENT -> MCP  %s %s  headers=[%s]  body=%s",
                 request.method,
                 request.url.path,
+                req_headers,
                 body[:2000].decode(errors="replace") if body else "(empty)",
             )
+
             response = await call_next(request)
+
+            resp_headers = _format_headers(
+                response.headers, _REDACTED_RESPONSE_HEADERS
+            )
             logger.debug(
-                "CLIENT <- MCP  %s %s  status=%s",
+                "CLIENT <- MCP  %s %s  status=%s  headers=[%s]",
                 request.method,
                 request.url.path,
                 response.status_code,
+                resp_headers,
             )
             return response
 
@@ -164,6 +201,7 @@ def main():
 
     # Open the SQLite attachment store eagerly so any permission or path
     # problem surfaces immediately at startup, not on the first tool call.
+    import attachment_store
     attachment_store.init_db()
 
     logger.info(
