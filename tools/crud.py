@@ -36,7 +36,7 @@ def register(mcp, itop_request):
     )
     async def itop_get(
         obj_class: str,
-        key: str,
+        key_or_ref: str,
         output_fields: str = "*",
         limit: int = 25,
         page: int = 0,
@@ -44,12 +44,14 @@ def register(mcp, itop_request):
     ) -> str:
         """Retrieve iTop objects by class and key.
 
-        key identifies the object -- always required, never empty:
+        key_or_ref identifies the object.
+        You always have to submit one of:
           "R-016292"  ticket ref (preferred)
           "16292"     bare number, resolved automatically
           "15525"     numeric DB id
           SELECT ...  OQL string
-
+        You CANNOT leave key_or_ref empty.
+        
         Use obj_class="Ticket" when the concrete class is unknown.
         Set full=True only when logs are needed.
         Do not disclose private_log unless explicitly requested.
@@ -69,7 +71,7 @@ def register(mcp, itop_request):
                     "Available fields are * or: " + ", ".join(visible)
             )
 
-        obj_class, resolved_key = await resolve_key(obj_class, key, itop_request)
+        obj_class, resolved_key = await resolve_key(obj_class, key_or_ref, itop_request)
 
         strip = frozenset() if full else _LEAN_STRIP
         fields_to_request, post_strip = await resolve_output_fields(
