@@ -29,19 +29,22 @@ The contents AttributeBlob is returned by the REST API as a dict:
   {"mimetype": "<mime>", "data": "<base64>", "filename": "<name>"}
 
 Attachment  : may be any MIME type; mimetype is checked before including.
-              Download via ?operation=download_document&id=<id>
-              NOTE: ajax.document.php requires an active iTop session cookie
-              and does NOT accept the bearer token. Binary is therefore read
-              directly from the REST API response (contents.data base64 field)
-              and stored as a data: URI -- no second HTTP request needed.
+              The base64 payload is decoded to bytes immediately and stored
+              as a BLOB in the attachment store. The uri column holds only
+              the short itop://attachment/<id> reference.
+              ajax.document.php requires an active iTop session (cookie) and
+              does NOT accept the bearer token, so binary data is taken
+              directly from the REST API response without a second HTTP call.
 InlineImage : always an image; has a secret field for the download URL.
               Download via ?operation=download_inlineimage&id=<id>&s=<secret>
               Has no filename field; friendlyname or fabricated name is used.
               InlineImage download works without a session cookie.
+              content is stored as None; the resource handler downloads on demand.
 """
 
 from __future__ import annotations
 
+import base64 as _base64
 import hashlib
 import httpx
 from fastmcp.resources import ResourceResult, ResourceContent
@@ -88,13 +91,6 @@ def _unpack_contents(contents: object) -> tuple:
             (contents.get("filename") or ""),
         )
     return "", "", ""
-
-
-def _b64_preview(b64_data: str, n: int = 40) -> str:
-    """Return the first n chars of a base64 string followed by an ellipsis."""
-    if not b64_data:
-        return "(empty)"
-    return b64_data[:n] + ("..." if len(b64_data) > n else "")
 
 
 async def _download_binary(url: str) -> tuple[bytes, str]:
@@ -204,19 +200,39 @@ def register(mcp, itop_request, get_token_fn):
                 continue
             if not filename:
                 filename = "attachment_" + record_id
-            # Use a data: URI so the resource handler can decode the binary
-            # directly from the REST API response without a second HTTP request.
-            # ajax.document.php requires an active iTop session (cookie) and
-            # does not accept the bearer token -- a GET would return an HTML login page.
+            uri = "itop://attachment/" + record_id
+            # Decode base64 to raw bytes immediately so the uri column stays short.
+            # ajax.document.php requires an iTop session cookie and does not accept
+            # the bearer token, so we must use the inline data from the REST response.
+            content: bytes | None = None
             if b64_data:
-                uri = "data:" + mimetype + ";base64," + b64_data
-            else:
-                uri = "itop://attachment/" + record_id
-            images.append({"source": "Attachment", "filename": filename, "mimetype": mimetype, "uri": uri, "b64": b64_data})
+                try:
+                    content = _base64.b64decode(b64_data)
+                    logger.debug(
+                        "[attachments] itop_get_ticket_images: decoded Attachment"
+                        " record_id=%s mime=%s bytes=%d",
+                        record_id, mimetype, len(content),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[attachments] itop_get_ticket_images: base64 decode failed"
+                        " record_id=%s exc=%s",
+                        record_id, exc,
+                    )
+            images.append({
+                "source": "Attachment",
+                "filename": filename,
+                "mimetype": mimetype,
+                "uri": uri,
+                "content": content,
+                # keep raw b64 for dedup hashing; stripped before store
+                "_b64": b64_data,
+            })
             logger.debug(
-                "[attachments] itop_get_ticket_images: added Attachment record_id=%s"
-                " uri_scheme=%s b64_preview=%s",
-                record_id, uri.split(":")[0], _b64_preview(b64_data),
+                "[attachments] itop_get_ticket_images: added Attachment"
+                " record_id=%s uri=%s content=%s",
+                record_id, uri,
+                ("%d bytes" % len(content)) if content is not None else "None",
             )
 
         # -- InlineImage (always image) --
@@ -245,36 +261,44 @@ def register(mcp, itop_request, get_token_fn):
                 filename = fields.get("friendlyname") or ("inlineimage_" + record_id)
             if not mimetype:
                 mimetype = "image/unknown"
-            # InlineImage download works without a session cookie -- keep http URI.
+            # InlineImage download works without a session cookie.
+            # Store uri only; content downloaded on demand by the resource handler.
             uri = (
                 "itop://inlineimage/" + secret + "/" + record_id
                 if secret
                 else "itop://attachment/" + record_id
             )
-            images.append({"source": "InlineImage", "filename": filename, "mimetype": mimetype, "uri": uri, "b64": b64_data})
+            images.append({
+                "source": "InlineImage",
+                "filename": filename,
+                "mimetype": mimetype,
+                "uri": uri,
+                "content": None,
+                "_b64": b64_data,
+            })
             logger.debug(
-                "[attachments] itop_get_ticket_images: added InlineImage record_id=%s"
-                " uri=%s b64_preview=%s",
-                record_id, uri, _b64_preview(b64_data),
+                "[attachments] itop_get_ticket_images: added InlineImage"
+                " record_id=%s uri=%s",
+                record_id, uri,
             )
 
         logger.debug(
             "[attachments] itop_get_ticket_images: total images collected=%d", len(images)
         )
 
-        # Deduplicate by SHA-256 of the raw base64 content.
-        # Attachments with no b64 data are kept unconditionally.
+        # Deduplicate by SHA-256 of the raw base64 payload.
+        # Images without a b64 payload (InlineImages) are kept unconditionally.
         seen_hashes = set()
         unique_images = []
         for img in images:
-            b64 = img.get("b64") or ""
+            b64 = img.get("_b64") or ""
             if b64:
                 digest = hashlib.sha256(b64.encode("ascii", errors="replace")).hexdigest()
                 if digest in seen_hashes:
                     logger.debug(
                         "[attachments] itop_get_ticket_images: skipping duplicate"
-                        " digest=%s filename=%s uri_scheme=%s",
-                        digest[:12], img.get("filename"), img.get("uri", "").split(":")[0],
+                        " digest=%s filename=%s uri=%s",
+                        digest[:12], img.get("filename"), img.get("uri"),
                     )
                     continue
                 seen_hashes.add(digest)
@@ -294,9 +318,11 @@ def register(mcp, itop_request, get_token_fn):
                 + obj_class + " " + (ticket_ref or key) + "."
             )
 
-        # Persist image list in the SQLite store so the static resource
-        # handler itop://attachment/images can serve them for this session.
-        # Strip the internal "b64" key -- it is not part of ImageEntry schema.
+        # Persist entries in the SQLite store. Strip internal _b64 key.
+        store_entries = [
+            {k: v for k, v in img.items() if k not in ("source", "_b64")}
+            for img in images
+        ]
         try:
             token = get_token_fn()
             token_preview = (token[:8] + "...") if token and len(token) > 8 else (token or "(empty)")
@@ -304,9 +330,9 @@ def register(mcp, itop_request, get_token_fn):
                 logger.debug(
                     "[attachments] itop_get_ticket_images: writing %d image(s) "
                     "to attachment_store for token=%s",
-                    len(images), token_preview,
+                    len(store_entries), token_preview,
                 )
-                store_images(token, [{k: v for k, v in img.items() if k != "b64"} for img in images])
+                store_images(token, store_entries)
                 logger.debug("[attachments] itop_get_ticket_images: attachment_store write complete")
             else:
                 logger.debug(
@@ -413,10 +439,9 @@ def register(mcp, itop_request, get_token_fn):
     async def serve_ticket_images() -> ResourceResult:
         """Serve all ticket images stored for the current bearer token session.
 
-        Downloads each image binary from iTop and returns them as a list of
-        ResourceContent objects inside a single ResourceResult. The MIME type
-        of each item reflects the actual image format (image/png, image/jpeg,
-        etc.).
+        Attachment images are returned directly from the BLOB stored in the
+        attachment store. InlineImages are downloaded on demand via HTTP.
+        The MIME type of each item reflects the actual image format.
 
         Returns a plain-text ResourceResult when no images are available
         (not yet stored, token mismatch, or TTL expired).
@@ -461,30 +486,27 @@ def register(mcp, itop_request, get_token_fn):
 
         for i, entry in enumerate(entries):
             uri = entry["uri"]
+            stored_content: bytes | None = entry.get("content")
             logger.debug(
-                "[attachments] serve_ticket_images: processing [%d/%d] filename=%s uri_scheme=%s",
-                i + 1, len(entries), entry.get("filename", "?"), uri.split(":")[0],
+                "[attachments] serve_ticket_images: processing [%d/%d]"
+                " filename=%s uri=%s content=%s",
+                i + 1, len(entries),
+                entry.get("filename", "?"),
+                uri,
+                ("%d bytes" % len(stored_content)) if stored_content is not None else "None",
             )
             try:
-                if uri.startswith("data:"):
-                    # Attachment binary was embedded as a base64 data URI at
-                    # collection time -- decode in-memory, no HTTP request needed.
-                    import base64 as _base64
-                    header, b64 = uri.split(",", 1)
-                    mime = header.split(":")[1].split(";")[0]
+                if stored_content is not None:
+                    # Attachment binary stored as BLOB -- serve directly.
+                    content_bytes = stored_content
+                    mime = entry.get("mimetype", "application/octet-stream")
                     logger.debug(
-                        "[attachments] serve_ticket_images: [%d] decoding data URI"
-                        " mime=%s b64_preview=%s",
-                        i + 1, mime, _b64_preview(b64),
-                    )
-                    content_bytes = _base64.b64decode(b64)
-                    logger.debug(
-                        "[attachments] serve_ticket_images: [%d] decoded data URI"
+                        "[attachments] serve_ticket_images: [%d] serving from store"
                         " mime=%s bytes=%d",
                         i + 1, mime, len(content_bytes),
                     )
                 else:
-                    # InlineImage (and any Attachment without b64) -- HTTP download.
+                    # InlineImage -- download via HTTP.
                     http_url = _http_url_from_uri(uri)
                     content_bytes, mime = await _download_binary(http_url)
                     mime = mime or entry.get("mimetype", "application/octet-stream")
@@ -509,7 +531,8 @@ def register(mcp, itop_request, get_token_fn):
             )
 
         logger.debug(
-            "[attachments] serve_ticket_images: returning %d ResourceContent(s), %d error(s) skipped",
+            "[attachments] serve_ticket_images: returning %d ResourceContent(s),"
+            " %d error(s) skipped",
             len(resource_contents), len(errors),
         )
         return ResourceResult(contents=resource_contents)
