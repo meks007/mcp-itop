@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Union
 
+from cache import get_class_fields
 from helpers import (
     apply_field_strip,
     ensure_ref_field,
@@ -19,6 +20,7 @@ from helpers import (
     resolve_output_fields,
     str_or,
     CLASSES_WITH_REF,
+    _SYNTHETIC_FIELDS,
 )
 from config import DEFAULT_COMMENT
 
@@ -41,17 +43,29 @@ def register(mcp, itop_request):
         full: bool = False,
     ) -> str:
         """Retrieve iTop objects by class and key.
-        
+
         key identifies the object -- always required, never empty:
           "R-016292"  ticket ref (preferred)
           "16292"     bare number, resolved automatically
+          "15525"     numeric DB id
           SELECT ...  OQL string
-        
+
         Use obj_class="Ticket" when the concrete class is unknown.
         Set full=True only when logs are needed.
-        Do not disclose private_log unless explicitly requested. Redact everything that looks like a password.
+        Do not disclose private_log unless explicitly requested.
         Batch same-class lookups with OQL instead of one call per object.
         """
+        # Empty output_fields: return available field names only, no content.
+        if not output_fields or not output_fields.strip():
+            fields = await get_class_fields(obj_class, itop_request)
+            visible = sorted(fields - _LEAN_STRIP - _SYNTHETIC_FIELDS)
+            if not visible:
+                return (
+                    "Available fields: (unknown -- no instances found for "
+                    + obj_class + ". Use Describe_class to probe.)"
+                )
+            return "Available fields: " + ", ".join(visible)
+
         obj_class, resolved_key = await resolve_key(obj_class, key, itop_request)
 
         strip = frozenset() if full else _LEAN_STRIP
@@ -76,9 +90,6 @@ def register(mcp, itop_request):
             apply_field_strip(result, post_strip)
 
         # Inject lightweight image summary for ticket classes.
-        # Two cheap iTop calls (id only, no blob) per returned object.
-        # The _images annotation is rendered by format_objects with a
-        # bracketed label and is never sent back to iTop.
         if obj_class in CLASSES_WITH_REF:
             objects = result.get("objects") or {}
             for obj_data in objects.values():
@@ -293,42 +304,17 @@ def register(mcp, itop_request):
     )
     async def itop_describe_class(obj_class: str) -> str:
         """Discover available fields for an iTop class by sampling an existing object."""
-        result = await itop_request({
-            "operation": "core/get",
-            "class": obj_class,
-            "key": "SELECT " + obj_class,
-            "output_fields": "*",
-            "limit": "1",
-        })
+        fields = await get_class_fields(obj_class, itop_request)
 
-        if result.get("code", -1) != 0:
+        if not fields:
             return (
-                "Error (code " + str(result.get("code")) + "): "
-                + str_or(result, "message", "Unknown error")
+                "Class '" + obj_class + "' has zero instances or does not exist.\n"
+                "Cannot sample fields without an existing object."
             )
 
-        objects = result.get("objects") or {}
-        if not objects:
-            return (
-                "Class '" + obj_class + "' has zero instances - cannot sample fields.\n"
-                "Create a test object first with minimal fields; iTop will report missing required fields."
-            )
-
-        _obj_key, obj_data = next(iter(objects.items()))
-        fields = obj_data.get("fields", {}) or {}
-
-        lines = ["Class " + obj_class + " - attributes sampled from " + _obj_key + ":"]
-        for name in sorted(fields.keys()):
-            value = fields[name]
-            if isinstance(value, list):
-                kind = "list[" + str(len(value)) + "]"
-            elif isinstance(value, dict):
-                kind = "object"
-            elif value is None or value == "":
-                kind = "scalar (empty)"
-            else:
-                kind = "scalar (e.g. " + str(value)[:50] + ")"
-            lines.append("  - " + name + ": " + kind)
+        lines = ["Class " + obj_class + " - known fields (" + str(len(fields)) + "):"]
+        for name in sorted(fields):
+            lines.append("  - " + name)
 
         lines.append(
             "\nNote: this is best-effort, not authoritative schema. "
