@@ -22,7 +22,7 @@ register(mcp, itop_request, get_token_fn)
             Returns all images stored by the most recent
             itop_get_ticket_images call for this client session as a
             multi-content ResourceResult (one ResourceContent per image).
-            All images are always served as PNG from the BLOB store.
+            All images are always served as JPEG from the BLOB store.
 
 iTop blob field notes
 ---------------------
@@ -58,7 +58,7 @@ from helpers import resolve_key
 
 _IMAGE_PREFIXES = ("image/",)
 
-_STATIC_RESOURCE_URI = "itop://attachment/image.png"
+_STATIC_RESOURCE_URI = "itop://attachment/image.jpg"
 
 
 def _is_image(mimetype: str) -> bool:
@@ -84,7 +84,7 @@ def _unpack_contents(contents: object) -> tuple:
     """Unpack iTop contents blob into (mimetype, b64_data, filename).
 
     iTop serialises AttributeBlob as:
-      {"mimetype": "image/png", "data": "<base64>", "filename": "foo.png"}
+      {"mimetype": "image/jpeg", "data": "<base64>", "filename": "foo.jpg"}
     Returns empty strings for any missing key.
     """
     if isinstance(contents, dict):
@@ -159,7 +159,7 @@ def register(mcp, itop_request, get_token_fn):
         """Find image attachments for an iTop ticket and store them for the current session.
 
         Prefer ticket_ref for tickets; use key for a numeric ID or OQL query.
-        After this tool returns, read the MCP resource itop://attachment/image.png
+        After this tool returns, read the MCP resource itop://attachment/image.jpg
         to retrieve the actual image binaries."""
         logger.debug(
             "[attachments] itop_get_ticket_images: called obj_class=%s ticket_ref=%r key=%r",
@@ -449,7 +449,7 @@ def register(mcp, itop_request, get_token_fn):
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
-    # Resource: itop://attachment/image.png  (static, no URI template)
+    # Resource: itop://attachment/image.jpg  (static, no URI template)
     # ------------------------------------------------------------------
 
     @mcp.resource(
@@ -458,15 +458,15 @@ def register(mcp, itop_request, get_token_fn):
         description=(
             "Returns all images stored by the most recent itop_get_ticket_images call "
             "for this session as one ResourceContent per image. "
-            "All images are served as PNG directly from the BLOB store. "
+            "All images are served as JPEG directly from the BLOB store. "
             "Call itop_get_ticket_images first to populate this resource."
         ),
-        mime_type="image/png",
+        mime_type="image/jpeg",
     )
     async def serve_ticket_images() -> ResourceResult:
         """Serve all ticket images stored for the current bearer token session.
 
-        All entries are stored as PNG BLOBs (normalization happens at write time
+        All entries are stored as JPEG BLOBs (normalization happens at write time
         in attachment_store.store_images). No HTTP download is needed here.
 
         Returns a plain-text ResourceResult when no images are available
@@ -512,7 +512,7 @@ def register(mcp, itop_request, get_token_fn):
 
         for i, entry in enumerate(entries):
             content_bytes: bytes | None = entry.get("content")
-            mime: str = entry.get("mimetype", "image/png")
+            mime: str = entry.get("mimetype", "image/jpeg")
             logger.debug(
                 "[attachments] serve_ticket_images: [%d/%d] filename=%s uri=%s content=%s",
                 i + 1, len(entries),
