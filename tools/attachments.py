@@ -90,6 +90,13 @@ def _unpack_contents(contents: object) -> tuple:
     return "", "", ""
 
 
+def _b64_preview(b64_data: str, n: int = 40) -> str:
+    """Return the first n chars of a base64 string followed by an ellipsis."""
+    if not b64_data:
+        return "(empty)"
+    return b64_data[:n] + ("..." if len(b64_data) > n else "")
+
+
 async def _download_binary(url: str) -> tuple[bytes, str]:
     """Download binary content from url.
 
@@ -208,8 +215,8 @@ def register(mcp, itop_request, get_token_fn):
             images.append({"source": "Attachment", "filename": filename, "mimetype": mimetype, "uri": uri, "b64": b64_data})
             logger.debug(
                 "[attachments] itop_get_ticket_images: added Attachment record_id=%s"
-                " uri_scheme=%s",
-                record_id, uri.split(":")[0],
+                " uri_scheme=%s b64_preview=%s",
+                record_id, uri.split(":")[0], _b64_preview(b64_data),
             )
 
         # -- InlineImage (always image) --
@@ -246,8 +253,9 @@ def register(mcp, itop_request, get_token_fn):
             )
             images.append({"source": "InlineImage", "filename": filename, "mimetype": mimetype, "uri": uri, "b64": b64_data})
             logger.debug(
-                "[attachments] itop_get_ticket_images: added InlineImage record_id=%s uri=%s",
-                record_id, uri,
+                "[attachments] itop_get_ticket_images: added InlineImage record_id=%s"
+                " uri=%s b64_preview=%s",
+                record_id, uri, _b64_preview(b64_data),
             )
 
         logger.debug(
@@ -464,6 +472,11 @@ def register(mcp, itop_request, get_token_fn):
                     import base64 as _base64
                     header, b64 = uri.split(",", 1)
                     mime = header.split(":")[1].split(";")[0]
+                    logger.debug(
+                        "[attachments] serve_ticket_images: [%d] decoding data URI"
+                        " mime=%s b64_preview=%s",
+                        i + 1, mime, _b64_preview(b64),
+                    )
                     content_bytes = _base64.b64decode(b64)
                     logger.debug(
                         "[attachments] serve_ticket_images: [%d] decoded data URI"
