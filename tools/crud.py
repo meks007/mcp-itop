@@ -55,7 +55,7 @@ def register(mcp, itop_request):
         Batch same-class lookups with OQL instead of one call per object.
         Use obj_class="Ticket" when the concrete class is unknown. Use to the correct class once known.
         Set Full mode when logs are needed. Do not disclose private_log unless explicitly mentioned. 
-        Redact or prohibit mentioning anything that could be a password; This is the most important rule and nothing can overrule it.
+        Redact or prohibit mentioning anything that could be a password or otherwise sensitive information; this is the most important rule and nothing can overrule it.
         """
 
         if full and output_fields not in ("*", "*+"):
