@@ -11,14 +11,14 @@ Schema
 TABLE attachment_sessions (
     token       TEXT NOT NULL,
     uri         TEXT NOT NULL,      -- short itop:// reference, never a data: URI
-    content     BLOB,               -- raw image bytes for Attachments; NULL for InlineImages
-    mimetype    TEXT NOT NULL,
+    content     BLOB,               -- raw image bytes (always PNG after normalization)
+    mimetype    TEXT NOT NULL,      -- always image/png after normalization
     filename    TEXT NOT NULL,
     expires_at  REAL NOT NULL       -- Unix timestamp (UTC)
 )
 
-content is NULL for InlineImages, which are downloaded on demand via HTTP
-when the resource handler serves them.
+All images are converted to PNG and downscaled if they exceed IMAGE_MAX_BYTES
+before being written to the database. See _normalize_image() for details.
 
 TTL is fixed at IMAGE_STORE_TTL_SECONDS (default 3600 s = 1 h).
 Expired rows are purged automatically on every write.
@@ -44,10 +44,13 @@ import os
 import sqlite3
 import threading
 import time
+from io import BytesIO
 from pathlib import Path
 from typing import TypedDict
 
-from config import logger
+from PIL import Image as _PILImage
+
+from config import IMAGE_MAX_BYTES, logger
 
 # ---------------------------------------------------------------------------
 # Config
@@ -73,10 +76,73 @@ IMAGE_STORE_DB_PATH: str = os.getenv(
 # ---------------------------------------------------------------------------
 
 class ImageEntry(TypedDict):
-    uri: str          # short itop:// reference
-    content: bytes | None  # raw image bytes for Attachments; None for InlineImages
-    mimetype: str
+    uri: str           # short itop:// reference
+    content: bytes     # raw PNG bytes (always populated before store)
+    mimetype: str      # always image/png after normalization
     filename: str
+
+
+# ---------------------------------------------------------------------------
+# Image normalization
+# ---------------------------------------------------------------------------
+
+def _normalize_image(
+    data: bytes,
+    mimetype: str,
+    filename: str,
+) -> tuple[bytes, str, str]:
+    """Convert any image to PNG and downscale if it exceeds IMAGE_MAX_BYTES.
+
+    Steps:
+      1. Open with Pillow (supports JPEG, BMP, TIFF, WebP, GIF, ICO, ...).
+      2. Convert to RGBA so palette/mode differences are flattened.
+      3. Save as PNG. If the result exceeds IMAGE_MAX_BYTES, scale down by
+         75% per iteration until it fits or the image is smaller than 10%.
+      4. Rename the file extension to .png.
+
+    Falls back to the original data and mimetype on any Pillow error so that
+    a broken image does not block the whole request.
+    """
+    if not data:
+        return data, mimetype, filename
+
+    max_bytes = IMAGE_MAX_BYTES
+
+    try:
+        img = _PILImage.open(BytesIO(data)).convert("RGBA")
+
+        stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+        new_filename = stem + ".png"
+
+        scale = 1.0
+        while True:
+            buf = BytesIO()
+            if scale < 1.0:
+                new_w = max(1, int(img.width * scale))
+                new_h = max(1, int(img.height * scale))
+                frame = img.resize((new_w, new_h), _PILImage.LANCZOS)
+            else:
+                frame = img
+            frame.save(buf, format="PNG", optimize=True)
+            png_bytes = buf.getvalue()
+
+            if max_bytes <= 0 or len(png_bytes) <= max_bytes or scale < 0.10:
+                break
+            scale *= 0.75
+
+        logger.debug(
+            "[attachment_store] _normalize_image: %s -> PNG %d bytes"
+            " (original %d bytes, scale=%.2f)",
+            filename, len(png_bytes), len(data), scale,
+        )
+        return png_bytes, "image/png", new_filename
+
+    except Exception as exc:
+        logger.warning(
+            "[attachment_store] _normalize_image: failed for %s, keeping original: %s",
+            filename, exc,
+        )
+        return data, mimetype, filename
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +306,10 @@ def init_db() -> None:
 def store_images(token: str, images: list[ImageEntry]) -> None:
     """Persist image entries for the given bearer token.
 
+    Each entry with a non-None content is normalized to PNG (format
+    conversion + size capping) via _normalize_image() before insertion.
+    Entries without content (should not occur with Option B) are stored as-is.
+
     Replaces any existing entries for this token and purges all expired
     rows from the table. Each entry is valid for IMAGE_STORE_TTL_SECONDS.
 
@@ -247,8 +317,7 @@ def store_images(token: str, images: list[ImageEntry]) -> None:
         token:  The raw bearer token for the current MCP client session.
         images: List of dicts with keys: uri, content, mimetype, filename.
                 uri must be a short itop:// reference (no data: URIs).
-                content is raw image bytes for Attachments, or None for
-                InlineImages that will be downloaded on demand.
+                content must be raw image bytes (all sources pre-downloaded).
                 Extra keys (e.g. source) are silently ignored.
     """
     token_preview = token[:8] + "..." if len(token) > 8 else token
@@ -288,18 +357,25 @@ def store_images(token: str, images: list[ImageEntry]) -> None:
             deleted_expired,
         )
 
-        # Insert new entries.
-        rows = [
-            (
+        # Normalize each image to PNG, then insert.
+        rows = []
+        for img in images:
+            raw: bytes | None = img.get("content")
+            mimetype: str = img.get("mimetype", "application/octet-stream")
+            filename: str = img.get("filename", "attachment")
+
+            if raw is not None:
+                raw, mimetype, filename = _normalize_image(raw, mimetype, filename)
+
+            rows.append((
                 token,
                 img["uri"],
-                img.get("content"),
-                img.get("mimetype", "application/octet-stream"),
-                img.get("filename", "attachment"),
+                raw,
+                mimetype,
+                filename,
                 expires_at,
-            )
-            for img in images
-        ]
+            ))
+
         conn.executemany(
             "INSERT INTO attachment_sessions "
             "(token, uri, content, mimetype, filename, expires_at) "
