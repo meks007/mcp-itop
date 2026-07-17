@@ -144,12 +144,13 @@ async def get_class_fields(obj_class: str, itop_request) -> frozenset[str]:
             "[get_class_fields] cls=%r probe failed code=%r msg=%r",
             obj_class, result.get("code"), result.get("message"),
         )
-        entry["exists"] = False
+        seed_field_cache(obj_class, {})
         return frozenset()
 
     objects = result.get("objects") or {}
     if not objects:
         logger.debug("[get_class_fields] cls=%r probe returned no objects", obj_class)
+        seed_field_cache(obj_class, {})
         return frozenset()
 
     for obj_data in objects.values():
