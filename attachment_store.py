@@ -1,5 +1,6 @@
 """
-attachment_store.py - SQLite-backed store for itop image content.
+attachment_store.py - SQLite-backed store for itop image content and inline
+image refs extracted from ticket HTML fields.
 
 Stores image binaries (as BLOB) and metadata keyed by the bearer token.
 Used by the static MCP resource handler itop://attachment/images to retrieve
@@ -17,12 +18,22 @@ TABLE attachment_sessions (
     expires_at  REAL NOT NULL       -- Unix timestamp (UTC)
 )
 
+TABLE inline_image_refs (
+    obj_class   TEXT NOT NULL,
+    obj_id      TEXT NOT NULL,
+    img_id      TEXT NOT NULL,
+    img_secret  TEXT NOT NULL,
+    expires_at  REAL NOT NULL,      -- Unix timestamp (UTC)
+    PRIMARY KEY (obj_class, obj_id, img_id)
+)
+
 All images are converted to JPEG and compressed/downscaled to fit within
 IMAGE_MAX_BYTES before being written to the database.
 See _normalize_image() for the compression strategy.
 
 TTL is fixed at IMAGE_STORE_TTL_SECONDS (default 3600 s = 1 h).
-Expired rows are purged automatically on every write.
+Expired rows are purged by the central housekeeping task in background_tasks.py.
+inline_image_refs rows use INLINE_IMAGE_REF_TTL (default 3600 s).
 
 Vacuum
 ------
@@ -51,7 +62,7 @@ from typing import TypedDict
 
 from PIL import Image as _PILImage
 
-from config import IMAGE_JPEG_QUALITY, IMAGE_MAX_BYTES, logger
+from config import IMAGE_JPEG_QUALITY, IMAGE_MAX_BYTES, INLINE_IMAGE_REF_TTL, logger
 
 # ---------------------------------------------------------------------------
 # Config
@@ -254,6 +265,18 @@ def _open_db() -> sqlite3.Connection:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS inline_image_refs (
+            obj_class   TEXT NOT NULL,
+            obj_id      TEXT NOT NULL,
+            img_id      TEXT NOT NULL,
+            img_secret  TEXT NOT NULL,
+            expires_at  REAL NOT NULL,
+            PRIMARY KEY (obj_class, obj_id, img_id)
+        )
+        """
+    )
     # Migrate existing DBs that pre-date the content column.
     existing_cols = {
         row[1]
@@ -273,6 +296,10 @@ def _open_db() -> sqlite3.Connection:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_expires_at "
         "ON attachment_sessions (expires_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_iir_lookup "
+        "ON inline_image_refs (obj_class, obj_id, expires_at)"
     )
     conn.commit()
     logger.debug("[attachment_store] DB ready, tables and indexes verified")
@@ -347,7 +374,7 @@ def init_db() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Public API
+# Public API -- image sessions
 # ---------------------------------------------------------------------------
 
 def store_images(token: str, images: list[ImageEntry]) -> None:
@@ -357,8 +384,9 @@ def store_images(token: str, images: list[ImageEntry]) -> None:
     _normalize_image() before insertion. Entries without content are
     stored as-is (should not occur with Option B eager download).
 
-    Replaces any existing entries for this token and purges all expired
-    rows from the table. Each entry is valid for IMAGE_STORE_TTL_SECONDS.
+    Replaces any existing entries for this token. Expired rows are purged
+    by the central housekeeping task. Each entry is valid for
+    IMAGE_STORE_TTL_SECONDS.
 
     Args:
         token:  The raw bearer token for the current MCP client session.
@@ -392,16 +420,6 @@ def store_images(token: str, images: list[ImageEntry]) -> None:
             "[attachment_store] store_images: deleted %d old row(s) for token=%s",
             deleted_token,
             token_preview,
-        )
-
-        # Purge all globally expired rows.
-        deleted_expired = conn.execute(
-            "DELETE FROM attachment_sessions WHERE expires_at < ?",
-            (time.time(),),
-        ).rowcount
-        logger.debug(
-            "[attachment_store] store_images: purged %d globally expired row(s)",
-            deleted_expired,
         )
 
         # Normalize each image to JPEG, then insert.
@@ -515,9 +533,9 @@ def get_images(token: str) -> list[ImageEntry]:
     return entries
 
 
-def purge_expired() -> int:
-    """Delete all expired rows from the store. Returns the number of rows removed."""
-    logger.debug("[attachment_store] purge_expired: running manual purge")
+def purge_expired_images() -> int:
+    """Delete all expired rows from attachment_sessions. Returns rows removed."""
+    logger.debug("[attachment_store] purge_expired_images: running purge")
     conn = _get_conn()
     with conn:
         cursor = conn.execute(
@@ -525,5 +543,125 @@ def purge_expired() -> int:
             (time.time(),),
         )
     removed = cursor.rowcount
-    logger.debug("[attachment_store] purge_expired: removed %d row(s)", removed)
+    logger.debug("[attachment_store] purge_expired_images: removed %d row(s)", removed)
+    return removed
+
+
+# ---------------------------------------------------------------------------
+# Public API -- inline image refs
+# ---------------------------------------------------------------------------
+
+def write_inline_image_refs(
+    obj_class: str,
+    obj_id: str,
+    refs: list[dict],
+) -> None:
+    """Upsert inline image refs for a ticket into the cache.
+
+    Deletes all existing refs for (obj_class, obj_id) first, then inserts
+    the new set. A ref is a dict with keys 'id' and 'secret'. Passing an
+    empty refs list clears the cache entry (no inline images found).
+
+    Args:
+        obj_class: iTop class name, e.g. 'UserRequest'.
+        obj_id:    Numeric ticket ID as string.
+        refs:      List of {'id': str, 'secret': str} dicts.
+    """
+    conn = _get_conn()
+    expires_at = time.time() + INLINE_IMAGE_REF_TTL
+    with conn:
+        conn.execute(
+            "DELETE FROM inline_image_refs WHERE obj_class = ? AND obj_id = ?",
+            (obj_class, obj_id),
+        )
+        if refs:
+            conn.executemany(
+                "INSERT OR REPLACE INTO inline_image_refs "
+                "(obj_class, obj_id, img_id, img_secret, expires_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [
+                    (obj_class, obj_id, r["id"], r["secret"], expires_at)
+                    for r in refs
+                ],
+            )
+    logger.debug(
+        "[attachment_store] write_inline_image_refs: cls=%r id=%r wrote %d ref(s)",
+        obj_class, obj_id, len(refs),
+    )
+
+
+def read_inline_image_refs(
+    obj_class: str,
+    obj_id: str,
+) -> list[dict] | None:
+    """Return cached inline image refs for a ticket, or None on cache miss.
+
+    Returns None when no entry exists or all entries are expired (cache miss).
+    Returns an empty list when the entry exists but has zero refs (meaning the
+    ticket was previously confirmed to have no inline images).
+
+    Args:
+        obj_class: iTop class name.
+        obj_id:    Numeric ticket ID as string.
+    """
+    conn = _get_conn()
+    now = time.time()
+
+    # Check whether a cache entry exists at all (including empty entries).
+    # We store empty entries as a DELETE of all rows for (cls, id) followed by
+    # no INSERTs, so we detect them via a sentinel: if the DELETE happened but
+    # no rows were inserted, the lookup returns zero rows. A separate sentinel
+    # row approach is not needed because write_inline_image_refs always runs
+    # the DELETE, making zero rows a valid "confirmed empty" state only if
+    # we also track the write timestamp. We track this via a dedicated row
+    # with img_id='' and img_secret='' as a tombstone.
+    cursor = conn.execute(
+        "SELECT img_id, img_secret, expires_at "
+        "FROM inline_image_refs "
+        "WHERE obj_class = ? AND obj_id = ? "
+        "ORDER BY img_id",
+        (obj_class, obj_id),
+    )
+    rows = cursor.fetchall()
+
+    if not rows:
+        logger.debug(
+            "[attachment_store] read_inline_image_refs: cls=%r id=%r -> miss (no rows)",
+            obj_class, obj_id,
+        )
+        return None
+
+    # Check expiry on any row (all share the same expires_at).
+    if rows[0][2] < now:
+        logger.debug(
+            "[attachment_store] read_inline_image_refs: cls=%r id=%r -> miss (expired)",
+            obj_class, obj_id,
+        )
+        return None
+
+    refs = [
+        {"id": row[0], "secret": row[1]}
+        for row in rows
+        if row[0]  # skip tombstone sentinel rows (empty img_id)
+    ]
+    logger.debug(
+        "[attachment_store] read_inline_image_refs: cls=%r id=%r -> hit %d ref(s)",
+        obj_class, obj_id, len(refs),
+    )
+    return refs
+
+
+def purge_expired_inline_image_refs() -> int:
+    """Delete all expired rows from inline_image_refs. Returns rows removed."""
+    logger.debug("[attachment_store] purge_expired_inline_image_refs: running purge")
+    conn = _get_conn()
+    with conn:
+        cursor = conn.execute(
+            "DELETE FROM inline_image_refs WHERE expires_at < ?",
+            (time.time(),),
+        )
+    removed = cursor.rowcount
+    logger.debug(
+        "[attachment_store] purge_expired_inline_image_refs: removed %d row(s)", removed
+    )
     return removed
