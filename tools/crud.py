@@ -61,10 +61,13 @@ def register(mcp, itop_request):
             visible = sorted(fields - _LEAN_STRIP - _SYNTHETIC_FIELDS)
             if not visible:
                 return (
-                    "Available fields: (unknown -- no instances found for "
-                    + obj_class + ". Use Describe_class to probe.)"
+                    "You need to query with key AND output_fields." +
+                    "No instances of this class found. Available fields are *."
                 )
-            return "Available fields: " + ", ".join(visible)
+            return (
+                    "You need to query with key AND output_fields." +
+                    "Available fields are * or: " + ", ".join(visible)
+            )
 
         obj_class, resolved_key = await resolve_key(obj_class, key, itop_request)
 
