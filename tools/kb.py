@@ -7,7 +7,7 @@ from __future__ import annotations
 from helpers import (
     ensure_class_exists,
     extract_objects,
-    format_objects,
+    format_and_cache,
     format_table,
     registry_get_fields,
     registry_get_meta,
@@ -69,7 +69,7 @@ def register(mcp, itop_request):
             r = await itop_request({
                 "operation": "core/get",
                 "class": kb_cls,
-                "key": f"SELECT {kb_cls}",
+                "key": "SELECT " + kb_cls,
                 "output_fields": field,
                 "limit": "1",
             })
@@ -82,7 +82,7 @@ def register(mcp, itop_request):
         return "description"
 
     def _kb_list_fields(text_field: str) -> str:
-        return f"id,title,{text_field},category_name,status"
+        return "id,title," + text_field + ",category_name,status"
 
     @mcp.tool(
         name="Search_KB_articles"
@@ -109,8 +109,8 @@ def register(mcp, itop_request):
         else:
             safe = query.replace("'", "")
             effective_oql = (
-                f"SELECT {kb_cls} WHERE title LIKE '%{safe}%'"
-                f" OR {text_field} LIKE '%{safe}%'"
+                "SELECT " + kb_cls + " WHERE title LIKE '%" + safe + "%'"
+                " OR " + text_field + " LIKE '%" + safe + "%'"
             )
 
         result = await itop_request({
@@ -124,9 +124,9 @@ def register(mcp, itop_request):
         articles = extract_objects(result)
         if not articles:
             return (
-                f"No KB articles found for query '{query}'.\n"
-                f"OQL used: {effective_oql}\n"
-                f"Body field used: {text_field}\n"
+                "No KB articles found for query '" + query + "'.\n"
+                "OQL used: " + effective_oql + "\n"
+                "Body field used: " + text_field + "\n"
                 "Tip: supply an explicit oql parameter to override the search query."
             )
 
@@ -141,7 +141,7 @@ def register(mcp, itop_request):
                 str_or(f, "status", "?"),
             ])
 
-        out = [f"**{kb_cls} Articles** matching '{query}':", ""]
+        out = ["**" + kb_cls + " Articles** matching '" + query + "':", ""]
         out.append(format_table(header, rows))
         return "\n".join(out)
 
@@ -157,14 +157,14 @@ def register(mcp, itop_request):
         result = await itop_request({
             "operation": "core/get",
             "class": kb_cls,
-            "key": f"SELECT {kb_cls} WHERE id={article_id}",
+            "key": "SELECT " + kb_cls + " WHERE id=" + str(article_id),
             "output_fields": "*+",
         })
 
         if not extract_objects(result):
-            return f"KB article #{article_id} not found."
+            return "KB article #" + str(article_id) + " not found."
 
-        return format_objects(result)
+        return format_and_cache(result)
 
     @mcp.tool(
         name="List_KB_categories"
@@ -180,7 +180,7 @@ def register(mcp, itop_request):
         result = await itop_request({
             "operation": "core/get",
             "class": cat_cls,
-            "key": f"SELECT {cat_cls}",
+            "key": "SELECT " + cat_cls,
             "output_fields": "id,name,description",
             "limit": "100",
         })
