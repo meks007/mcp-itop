@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Optional, Union
 
-from helpers import format_objects, resolve_key
+from helpers import format_and_cache, resolve_key
 
 
 def register(mcp, itop_request):
@@ -54,4 +54,4 @@ def register(mcp, itop_request):
             "output_fields": "id, ref, friendlyname",
             "comment": "MCP: added " + ("public" if is_public else "private") + " comment",
         })
-        return format_objects(result)
+        return format_and_cache(result)
