@@ -49,6 +49,16 @@ services:
       # TTL in seconds for the resolve_key lookup cache (default: 86400 = 24 h).
       # Set to 0 to disable caching entirely.
       RESOLVE_KEY_CACHE_TTL: ${RESOLVE_KEY_CACHE_TTL:-86400}
+      # Interval in seconds between background cleanup cycles.
+      # All periodic activities (resolve_key cache eviction, expired image rows,
+      # expired inline image ref rows) share this single interval.
+      # Default: 300 s (5 min).
+      CLEANUP_INTERVAL: ${CLEANUP_INTERVAL:-300}
+      # TTL in seconds for inline image ref entries written to SQLite by
+      # format_and_cache(). Entries older than this are treated as a cache
+      # miss and refreshed on the next itop_get_ticket_images call.
+      # Default: 3600 s (1 h).
+      INLINE_IMAGE_REF_TTL: ${INLINE_IMAGE_REF_TTL:-3600}
       # NOTE: iTop authentication (ITOP_TOKEN / ITOP_USER / ITOP_PASSWORD)
       # is no longer set here. Each MCP client authenticates by sending
       # its own iTop API token as an "Authorization: Bearer <itop_token>"
