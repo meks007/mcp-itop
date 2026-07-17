@@ -86,3 +86,9 @@ DEFAULT_COMMENT = "Modified via MCP"
 # Entries older than this value are evicted on the next resolve_key call.
 # Set to 0 to disable caching entirely.
 RESOLVE_KEY_CACHE_TTL = int(os.getenv("RESOLVE_KEY_CACHE_TTL", "86400"))
+
+# -- Image normalization --------------------------------------------------
+# Maximum size in bytes for a stored image. Images exceeding this limit are
+# scaled down proportionally (75% steps) until they fit.
+# Default: 1 MB. Set to 0 to disable resizing entirely.
+IMAGE_MAX_BYTES: int = int(os.getenv("IMAGE_MAX_BYTES", str(1 * 1024 * 1024)))
