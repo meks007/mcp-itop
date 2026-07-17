@@ -35,6 +35,7 @@ Framework: fastmcp (PrefectHQ) >= 2.11.0
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import sys
 
@@ -116,10 +117,31 @@ _comments.register(mcp, itop_request)
 
 
 # ---------------------------------------------------------------------------
-# ASGI app
+# ASGI app with lifespan for housekeeping task
 # ---------------------------------------------------------------------------
 
-app = mcp.http_app(transport="streamable-http")
+@contextlib.asynccontextmanager
+async def _lifespan(app):
+    """ASGI lifespan context manager.
+
+    Starts the central housekeeping asyncio task on server startup and
+    cancels it cleanly on shutdown.
+    """
+    from background_tasks import housekeeping_loop
+    task = asyncio.create_task(housekeeping_loop())
+    logger.info("[server] housekeeping task started")
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        logger.info("[server] housekeeping task stopped")
+
+
+app = mcp.http_app(transport="streamable-http", lifespan=_lifespan)
 
 # Inject BearerTokenMiddleware so get_bearer_token() works in resource
 # handlers (which run outside the fastmcp tool-call context).
@@ -227,21 +249,6 @@ def main():
     # problem surfaces immediately at startup, not on the first tool call.
     import attachment_store
     attachment_store.init_db()
-
-    # Schedule the central housekeeping task on the running event loop.
-    # This must be called after the event loop is running (i.e. inside an
-    # async context or after uvicorn has started). We use the on_startup
-    # lifespan hook via a wrapper to ensure the loop is available.
-    from background_tasks import housekeeping_loop
-
-    original_lifespan = getattr(app, "router", None)
-
-    async def _start_housekeeping():
-        asyncio.create_task(housekeeping_loop())
-        logger.info("[server] housekeeping task scheduled")
-
-    # Register the housekeeping starter as a startup event on the ASGI app.
-    app.add_event_handler("startup", _start_housekeeping)
 
     logger.info(
         "Starting iTop MCP server on %s:%d (debug=%s)",
