@@ -14,6 +14,7 @@ from config import (
     ITOP_VERSION,
     ITOP_VERIFY_SSL,
     MCP_DEBUG,
+    MCP_DEBUG_HEADERS,
     logger,
 )
 
@@ -85,7 +86,7 @@ async def itop_request(operation: dict, get_bearer_token) -> dict:
     try:
         resp = await _get_http_client().post(url, data=data)
 
-        if MCP_DEBUG:
+        if MCP_DEBUG and MCP_DEBUG_HEADERS:
             logger.debug(
                 "MCP -> iTop  request headers=%s",
                 _redact_headers(resp.request.headers),
