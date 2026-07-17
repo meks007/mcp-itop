@@ -93,6 +93,10 @@ def seed_field_cache(cls: str, fields: dict) -> None:
     """
     entry = _registry_entry(cls)
     if not fields:
+        logger.warn(
+            "[registry] seed_field_cache cls=%r seed empty fields",
+            cls
+          )
         return
     incoming = frozenset(fields.keys())
     before_set = entry["fields"]
