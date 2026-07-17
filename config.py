@@ -80,3 +80,9 @@ ITOP_VERIFY_SSL = os.getenv("ITOP_VERIFY_SSL", "true").lower() not in ("false", 
 ITOP_TIMEOUT = float(os.getenv("ITOP_TIMEOUT", "30"))
 
 DEFAULT_COMMENT = "Modified via MCP"
+
+# -- resolve_key cache ----------------------------------------------------
+# TTL in seconds for the resolve_key lookup cache.
+# Entries older than this value are evicted on the next resolve_key call.
+# Set to 0 to disable caching entirely.
+RESOLVE_KEY_CACHE_TTL = int(os.getenv("RESOLVE_KEY_CACHE_TTL", "86400"))
