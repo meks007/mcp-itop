@@ -24,6 +24,12 @@ load_dotenv()  # project .env (lower priority)
 # Auth credentials (token, password) are always redacted from log output.
 MCP_DEBUG = os.getenv("MCP_DEBUG", "false").lower() in ("true", "1", "yes")
 
+# -- Header debug flag ----------------------------------------------------
+# Set MCP_DEBUG_HEADERS=true to additionally log HTTP request and response
+# headers for every iTop REST/JSON API call.  Only takes effect when
+# MCP_DEBUG is also enabled.  Auth secrets in headers are always redacted.
+MCP_DEBUG_HEADERS = os.getenv("MCP_DEBUG_HEADERS", "false").lower() in ("true", "1", "yes")
+
 # -- Logging --------------------------------------------------------------
 logging.basicConfig(
     level=logging.DEBUG if MCP_DEBUG else logging.INFO,
@@ -54,6 +60,11 @@ if MCP_DEBUG:
         "SSE/streamable-http transport loggers set to DEBUG: "
         "sse_starlette, mcp.server.streamable_http"
     )
+
+    if MCP_DEBUG_HEADERS:
+        logger.debug(
+            "MCP_DEBUG_HEADERS is enabled - HTTP request/response headers will be logged."
+        )
 
 # -- Config ---------------------------------------------------------------
 # NOTE: iTop authentication is no longer configured via environment
