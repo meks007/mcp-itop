@@ -33,7 +33,6 @@ Framework: fastmcp (PrefectHQ) >= 2.11.0
 
 from __future__ import annotations
 
-import asyncio
 import os
 import sys
 
@@ -42,6 +41,7 @@ from fastmcp import FastMCP
 from fastmcp.server.auth.providers.debug import DebugTokenVerifier
 
 from auth import BearerTokenMiddleware, get_bearer_token
+from cache import preheat_once
 from client import itop_request as _raw_itop_request
 from config import MCP_DEBUG, MCP_DEBUG_HEADERS, logger
 
@@ -80,7 +80,18 @@ mcp = FastMCP(
 # ---------------------------------------------------------------------------
 
 async def itop_request(operation: dict) -> dict:
-    """Wrapper that injects the per-request bearer token into the HTTP client."""
+    """Wrapper that injects the per-request bearer token into the HTTP client.
+
+    preheat_once() is called here on every request but is a no-op once all
+    CLASSES_WITH_REF field caches are warm. This guarantees a valid bearer
+    token is available when the first probe requests hit iTop.
+    """
+    await preheat_once(_raw_itop_request_with_token)
+    return await _raw_itop_request(operation, get_bearer_token)
+
+
+async def _raw_itop_request_with_token(operation: dict) -> dict:
+    """Thin wrapper used exclusively by preheat_once to carry the bearer token."""
     return await _raw_itop_request(operation, get_bearer_token)
 
 
@@ -214,13 +225,6 @@ def main():
     # problem surfaces immediately at startup, not on the first tool call.
     import attachment_store
     attachment_store.init_db()
-
-    # Pre-heat the field cache for all ticket classes. This fires one
-    # core/get per class (output_fields=*, limit=1) so that the first
-    # real tool call does not need to probe iTop for field metadata.
-    # Errors and empty classes are silently ignored inside preheat().
-    from cache import preheat
-    asyncio.run(preheat(itop_request))
 
     logger.info(
         "Starting iTop MCP server on %s:%d (debug=%s)",
