@@ -27,12 +27,23 @@ services:
       # Set to true to log full client<->mcp<->iTop request/response
       # payloads (auth secrets are always redacted). See DOCKER.md.
       MCP_DEBUG: ${MCP_DEBUG:-false}
+      # Set to true to additionally log HTTP request/response headers.
+      # Only takes effect when MCP_DEBUG=true. Secrets are always redacted.
+      MCP_DEBUG_HEADERS: ${MCP_DEBUG_HEADERS:-false}
       # SQLite database path for the attachment image store.
       # Defaults to /app/data/attachment_store.db inside the container.
-      # Set IMAGE_STORE_DB to use a different path, e.g. on a named volume.
       IMAGE_STORE_DB: ${IMAGE_STORE_DB:-/app/data/attachment_store.db}
       # TTL in seconds for stored image entries (default: 3600 = 1 h).
       IMAGE_STORE_TTL: ${IMAGE_STORE_TTL:-3600}
+      # Interval in seconds between background incremental_vacuum runs
+      # on the attachment store DB (default: 3600 = 1 h). Set to 0 to disable.
+      IMAGE_STORE_VACUUM_INTERVAL: ${IMAGE_STORE_VACUUM_INTERVAL:-3600}
+      # Maximum image size in bytes before PNG conversion and downscaling.
+      # Default: 1048576 (1 MB). Set to 0 to disable.
+      IMAGE_MAX_BYTES: ${IMAGE_MAX_BYTES:-1048576}
+      # TTL in seconds for the resolve_key lookup cache (default: 86400 = 24 h).
+      # Set to 0 to disable caching entirely.
+      RESOLVE_KEY_CACHE_TTL: ${RESOLVE_KEY_CACHE_TTL:-86400}
       # NOTE: iTop authentication (ITOP_TOKEN / ITOP_USER / ITOP_PASSWORD)
       # is no longer set here. Each MCP client authenticates by sending
       # its own iTop API token as an "Authorization: Bearer <itop_token>"
