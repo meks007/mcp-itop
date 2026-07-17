@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Optional, Union
 
-from helpers import format_objects, resolve_key, resolve_ticket_ref
+from helpers import format_objects, resolve_key
 
 
 def register(mcp, itop_request):
@@ -36,20 +36,8 @@ def register(mcp, itop_request):
 
         log_field = "public_log" if is_public else "private_log"
 
-        # If a bare number is given without a ref, resolve class + ref first.
-        if not ticket_ref and ticket_id:
-            resolved_class, key = await resolve_ticket_ref(
-                ticket_class, str(ticket_id), itop_request
-            )
-            ticket_class = resolved_class
-        else:
-            # resolve_key now returns (resolved_class, numeric_key); override class.
-            ticket_class, key = await resolve_key(
-                ticket_class,
-                ticket_ref or None,
-                str(ticket_id) if ticket_id else None,
-                itop_request,
-            )
+        ref = str(ticket_ref or ticket_id or "").strip() or None
+        ticket_class, key = await resolve_key(ticket_class, ref, itop_request)
 
         result = await itop_request({
             "operation": "core/update",
