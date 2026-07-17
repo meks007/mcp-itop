@@ -38,9 +38,14 @@ services:
       # Interval in seconds between background incremental_vacuum runs
       # on the attachment store DB (default: 3600 = 1 h). Set to 0 to disable.
       IMAGE_STORE_VACUUM_INTERVAL: ${IMAGE_STORE_VACUUM_INTERVAL:-3600}
-      # Maximum image size in bytes before PNG conversion and downscaling.
-      # Default: 1048576 (1 MB). Set to 0 to disable.
+      # Maximum image size in bytes. Images exceeding this limit are first
+      # compressed via JPEG quality reduction, then downscaled if still too
+      # large. Default: 1048576 (1 MB). Set to 0 to disable size capping.
       IMAGE_MAX_BYTES: ${IMAGE_MAX_BYTES:-1048576}
+      # Starting JPEG quality for image normalization (1-95).
+      # Reduced in steps (75, 60, 45, 30) before falling back to downscaling.
+      # Default: 85.
+      IMAGE_JPEG_QUALITY: ${IMAGE_JPEG_QUALITY:-85}
       # TTL in seconds for the resolve_key lookup cache (default: 86400 = 24 h).
       # Set to 0 to disable caching entirely.
       RESOLVE_KEY_CACHE_TTL: ${RESOLVE_KEY_CACHE_TTL:-86400}
