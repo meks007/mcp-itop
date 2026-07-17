@@ -13,6 +13,20 @@ register(mcp, itop_request, get_token_fn)
             the static MCP resource URI _STATIC_RESOURCE_URI.
             The client must read that resource to retrieve the actual images.
 
+            Inline images are resolved exclusively from refs parsed out of
+            the ticket HTML fields by format_and_cache() (via parse_objects).
+            The core/get InlineImage approach is intentionally NOT used
+            because iTop does not delete InlineImage records when the
+            corresponding <img> tag is removed from a ticket text field,
+            leading to stale/ghost images being returned.
+
+            Cache behaviour:
+              - Cache hit  (inline_image_refs table) : download and store.
+              - Cache miss : call _fetch_and_cache_ticket() which runs
+                             format_and_cache() and populates the cache,
+                             then read the cache. If still empty the ticket
+                             has no inline images.
+
         itop_get_ticket_attachments(obj_class, ticket_ref, key)
             List all non-image file attachments for a ticket.
             Returns metadata and browser download links only.
@@ -36,13 +50,12 @@ Attachment  : may be any MIME type; mimetype is checked before including.
               ajax.document.php requires an active iTop session (cookie) and
               does NOT accept the bearer token, so binary data is taken
               directly from the REST API response without a second HTTP call.
-InlineImage : always an image; has a secret field for the download URL.
-              Download via ?operation=download_inlineimage&id=<id>&s=<secret>
-              Has no filename field; friendlyname or fabricated name is used.
-              InlineImage download works without a session cookie.
-              Content is downloaded eagerly (Option B) so all entries in the
-              store always carry a non-None BLOB. serve_ticket_images then
-              serves every image directly from the store without any HTTP call.
+InlineImage : resolved from <img data-img-id data-img-secret> tags found in
+              ticket HTML fields after format_and_cache() has run. Secret and
+              id are read from the inline_image_refs SQLite cache. Download
+              uses /webservices/ajax.document.php (no session cookie required).
+              Content is downloaded eagerly so all entries in the store always
+              carry a non-None BLOB.
 """
 
 from __future__ import annotations
@@ -52,9 +65,15 @@ import hashlib
 import httpx
 from fastmcp.resources import ResourceResult, ResourceContent
 
-from attachment_store import get_images, store_images
+from attachment_store import (
+    get_images,
+    read_inline_image_refs,
+    store_images,
+    write_inline_image_refs,
+)
 from config import ITOP_TIMEOUT, ITOP_URL, ITOP_VERIFY_SSL, MCP_DEBUG, logger
 from helpers import resolve_key
+from tools.crud import _fetch_and_cache_ticket
 
 _IMAGE_PREFIXES = ("image/",)
 
@@ -73,10 +92,10 @@ def _attachment_url(attachment_id: str | int) -> str:
     )
 
 
-def _inline_image_url(secret: str, record_id: str | int) -> str:
+def _inline_image_url(img_id: str | int, secret: str) -> str:
     return (
         f"{ITOP_URL}/webservices/ajax.document.php"
-        f"?operation=download_inlineimage&id={record_id}&s={secret}"
+        f"?operation=download_inlineimage&id={img_id}&s={secret}"
     )
 
 
@@ -121,19 +140,6 @@ async def _download_binary(url: str) -> tuple[bytes, str]:
         return response.content, mimetype
 
 
-def _http_url_from_uri(uri: str) -> str:
-    """Resolve an itop:// URI to an iTop HTTP download URL."""
-    if uri.startswith("itop://inlineimage/"):
-        rest = uri[len("itop://inlineimage/"):]
-        secret, record_id = rest.split("/", 1)
-        url = _inline_image_url(secret, record_id)
-    else:
-        attachment_id = uri[len("itop://attachment/"):]
-        url = _attachment_url(attachment_id)
-    logger.debug("[attachments] _http_url_from_uri: uri=%s -> url=%s", uri, url)
-    return url
-
-
 def register(mcp, itop_request, get_token_fn):
     """Register attachment tools and the static image resource.
 
@@ -176,6 +182,7 @@ def register(mcp, itop_request, get_token_fn):
         if resolved is None:
             return "Error: provide either ticket_ref or key to identify the ticket."
 
+        obj_id = str(resolved)
         images = []
 
         # -- Attachment (image types only) --
@@ -185,7 +192,7 @@ def register(mcp, itop_request, get_token_fn):
             "key": (
                 "SELECT Attachment"
                 " WHERE item_class = '" + obj_class + "'"
-                " AND item_id = " + str(resolved)
+                " AND item_id = " + obj_id
             ),
             "output_fields": "contents",
         })
@@ -204,9 +211,6 @@ def register(mcp, itop_request, get_token_fn):
             if not filename:
                 filename = "attachment_" + record_id
             uri = "itop://attachment/" + record_id
-            # Decode base64 to raw bytes immediately so the uri column stays short.
-            # ajax.document.php requires an iTop session cookie and does not accept
-            # the bearer token, so we must use the inline data from the REST response.
             content: bytes | None = None
             if b64_data:
                 try:
@@ -228,7 +232,6 @@ def register(mcp, itop_request, get_token_fn):
                 "mimetype": mimetype,
                 "uri": uri,
                 "content": content,
-                # keep raw b64 for dedup hashing; stripped before store
                 "_b64": b64_data,
             })
             logger.debug(
@@ -238,71 +241,71 @@ def register(mcp, itop_request, get_token_fn):
                 ("%d bytes" % len(content)) if content is not None else "None",
             )
 
-        # -- InlineImage (always image) --
-        # Content is downloaded eagerly here (Option B) so the store always
-        # holds a non-None BLOB for every entry.
-        ii_result = await itop_request({
-            "operation": "core/get",
-            "class": "InlineImage",
-            "key": (
-                "SELECT InlineImage"
-                " WHERE item_class = '" + obj_class + "'"
-                " AND item_id = " + str(resolved)
-            ),
-            "output_fields": "contents, secret, friendlyname",
-        })
-        ii_objects = ii_result.get("objects") or {}
+        # -- InlineImage via HTML-parsed refs cache --
+        # Read refs that were written by format_and_cache() when the ticket
+        # was last fetched via itop_get or another tool using format_and_cache.
+        # On a cache miss, fetch the ticket now to populate the cache first.
+        inline_refs = read_inline_image_refs(obj_class, obj_id)
         logger.debug(
-            "[attachments] itop_get_ticket_images: InlineImage query returned %d object(s)",
-            len(ii_objects),
+            "[attachments] itop_get_ticket_images: inline_image_refs cache %s for cls=%r id=%r",
+            "hit" if inline_refs is not None else "miss",
+            obj_class, obj_id,
         )
 
-        for obj_key, obj_data in ii_objects.items():
-            fields = obj_data.get("fields") or {}
-            record_id = str(obj_data.get("key") or obj_key.split("::")[-1])
-            mimetype, b64_data, filename = _unpack_contents(fields.get("contents"))
-            secret = (fields.get("secret") or "").strip()
-            if not filename:
-                filename = fields.get("friendlyname") or ("inlineimage_" + record_id)
-            if not mimetype:
-                mimetype = "image/unknown"
-            uri = (
-                "itop://inlineimage/" + secret + "/" + record_id
-                if secret
-                else "itop://attachment/" + record_id
+        if inline_refs is None:
+            # Cache miss: fetch the ticket so format_and_cache writes the refs.
+            logger.debug(
+                "[attachments] itop_get_ticket_images: fetching ticket cls=%r id=%r"
+                " to populate inline image ref cache",
+                obj_class, obj_id,
             )
+            await _fetch_and_cache_ticket(obj_class, obj_id, itop_request)
+            inline_refs = read_inline_image_refs(obj_class, obj_id)
+            if inline_refs is None:
+                # Ticket has no parseable HTML fields; treat as no inline images.
+                inline_refs = []
+                write_inline_image_refs(obj_class, obj_id, [])
 
-            # Download binary eagerly so content is never None in the store.
+        logger.debug(
+            "[attachments] itop_get_ticket_images: %d inline image ref(s) for cls=%r id=%r",
+            len(inline_refs), obj_class, obj_id,
+        )
+
+        for ref_entry in inline_refs:
+            img_id = ref_entry["id"]
+            secret = ref_entry["secret"]
+            filename = "inlineimage_" + img_id + ".jpg"
+            uri = "itop://inlineimage/" + secret + "/" + img_id
+            mimetype = "image/jpeg"
             content = None
             try:
-                http_url = _http_url_from_uri(uri)
-                content, dl_mime = await _download_binary(http_url)
+                url = _inline_image_url(img_id, secret)
+                content, dl_mime = await _download_binary(url)
                 if dl_mime and dl_mime != "application/octet-stream":
                     mimetype = dl_mime
                 logger.debug(
                     "[attachments] itop_get_ticket_images: downloaded InlineImage"
-                    " record_id=%s mime=%s bytes=%d",
-                    record_id, mimetype, len(content),
+                    " img_id=%s mime=%s bytes=%d",
+                    img_id, mimetype, len(content),
                 )
             except Exception as exc:
                 logger.warning(
                     "[attachments] itop_get_ticket_images: InlineImage download failed"
-                    " record_id=%s exc=%s",
-                    record_id, exc,
+                    " img_id=%s exc=%s",
+                    img_id, exc,
                 )
-
             images.append({
                 "source": "InlineImage",
                 "filename": filename,
                 "mimetype": mimetype,
                 "uri": uri,
                 "content": content,
-                "_b64": b64_data,
+                "_b64": "",
             })
             logger.debug(
                 "[attachments] itop_get_ticket_images: added InlineImage"
-                " record_id=%s uri=%s content=%s",
-                record_id, uri,
+                " img_id=%s uri=%s content=%s",
+                img_id, uri,
                 ("%d bytes" % len(content)) if content is not None else "None",
             )
 
@@ -310,23 +313,49 @@ def register(mcp, itop_request, get_token_fn):
             "[attachments] itop_get_ticket_images: total images collected=%d", len(images)
         )
 
-        # Deduplicate by SHA-256 of the raw base64 payload.
-        # Images without a b64 payload (InlineImages) are kept unconditionally.
-        seen_hashes = set()
+        # Deduplicate: by img_id for InlineImages (already unique from cache),
+        # and by SHA-256 of the raw base64 payload for Attachments.
+        seen_hashes: set[str] = set()
+        seen_inline_ids: set[str] = set()
         unique_images = []
         for img in images:
-            b64 = img.get("_b64") or ""
-            if b64:
-                digest = hashlib.sha256(b64.encode("ascii", errors="replace")).hexdigest()
-                if digest in seen_hashes:
+            if img.get("source") == "InlineImage":
+                img_id_str = img.get("uri", "").split("/")[-1]
+                if img_id_str in seen_inline_ids:
                     logger.debug(
-                        "[attachments] itop_get_ticket_images: skipping duplicate"
-                        " digest=%s filename=%s uri=%s",
-                        digest[:12], img.get("filename"), img.get("uri"),
+                        "[attachments] itop_get_ticket_images: skipping duplicate InlineImage"
+                        " img_id=%s", img_id_str,
                     )
                     continue
-                seen_hashes.add(digest)
+                seen_inline_ids.add(img_id_str)
+            else:
+                b64 = img.get("_b64") or ""
+                if b64:
+                    digest = hashlib.sha256(b64.encode("ascii", errors="replace")).hexdigest()
+                    if digest in seen_hashes:
+                        logger.debug(
+                            "[attachments] itop_get_ticket_images: skipping duplicate"
+                            " digest=%s filename=%s uri=%s",
+                            digest[:12], img.get("filename"), img.get("uri"),
+                        )
+                        continue
+                    seen_hashes.add(digest)
+
+            # Content blob dedup: skip if binary matches an already-accepted image.
+            content_bytes = img.get("content")
+            if content_bytes:
+                content_digest = hashlib.sha256(content_bytes).hexdigest()
+                if content_digest in seen_hashes:
+                    logger.debug(
+                        "[attachments] itop_get_ticket_images: skipping duplicate by content"
+                        " filename=%s uri=%s",
+                        img.get("filename"), img.get("uri"),
+                    )
+                    continue
+                seen_hashes.add(content_digest)
+
             unique_images.append(img)
+
         duplicates_removed = len(images) - len(unique_images)
         if duplicates_removed:
             logger.debug(
@@ -343,8 +372,6 @@ def register(mcp, itop_request, get_token_fn):
             )
 
         # Persist entries in the SQLite store. Strip internal keys.
-        # _normalize_image() is applied inside store_images() for all entries
-        # with non-None content, so no conversion is needed here.
         store_entries = [
             {k: v for k, v in img.items() if k not in ("source", "_b64")}
             for img in images
@@ -523,7 +550,6 @@ def register(mcp, itop_request, get_token_fn):
             )
 
             if content_bytes is None:
-                # Should not happen with Option B, but guard defensively.
                 msg = entry.get("filename", "?") + ": no content in store"
                 logger.warning("[attachments] serve_ticket_images: [%d] %s", i + 1, msg)
                 errors.append(msg)
