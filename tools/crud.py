@@ -51,6 +51,7 @@ def register(mcp, itop_request):
           "15525"     numeric DB id
           SELECT ...  OQL string
         You CANNOT leave key_or_ref empty.
+        You CANNOT leave output_fields empty. If in doubt, use describe class or *
         
         Use obj_class="Ticket" when the concrete class is unknown.
         Set full=True only when logs are needed.
