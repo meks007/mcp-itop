@@ -40,14 +40,18 @@ def register(mcp, itop_request):
         page: int = 0,
         full: bool = False,
     ) -> str:
-        """Retrieve iTop objects by ID, reference, OQL, or JSON criteria.
-
-        Use obj_class="Ticket" when the ticket class is unknown, then switch to the
-        real class once it is known. Bare ticket numbers are resolved automatically.
-        Set full=True only when complete fields or ticket logs are needed. Do not
-        disclose private_log unless the user explicitly requests it. Batch same-class
-        lookups with OQL rather than calling once per object. Use describe class to get
-        output fields. Do not supply empty output fields."""
+        """Retrieve iTop objects by class and key.
+        
+        key identifies the object -- always required, never empty:
+          "R-016292"  ticket ref (preferred)
+          "16292"     bare number, resolved automatically
+          SELECT ...  OQL string
+        
+        Use obj_class="Ticket" when the concrete class is unknown.
+        Set full=True only when logs are needed.
+        Do not disclose private_log unless explicitly requested. Redact everything that looks like a password.
+        Batch same-class lookups with OQL instead of one call per object.
+        """
         obj_class, resolved_key = await resolve_key(obj_class, key, itop_request)
 
         strip = frozenset() if full else _LEAN_STRIP
