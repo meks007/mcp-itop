@@ -8,10 +8,11 @@ import asyncio
 import json
 import logging
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Tuple
 
-from config import ITOP_URL
+from config import ITOP_URL, RESOLVE_KEY_CACHE_TTL
 
 logger = logging.getLogger(__name__)
 
@@ -353,17 +354,14 @@ def apply_field_strip(result: dict, strip: frozenset[str]) -> dict:
 # ---------------------------------------------------------------------------
 
 CLASSES_WITH_REF: frozenset[str] = frozenset({
+    "Ticket",
     "UserRequest",
     "Incident",
     "Problem",
     "Change",
-    "ChangeRequest",
     "NormalChange",
     "EmergencyChange",
     "RoutineChange",
-    "ServiceRequest",
-    "RFC",
-    "RFI",
 })
 
 # Matches a fully-formed iTop ref, e.g. "R-016271" or "I-003"
@@ -414,188 +412,219 @@ def ensure_ref_field(obj_class: str, output_fields: str) -> str:
     return ", ".join(fields)
 
 
-async def resolve_ticket_by_number(number: int, itop_request) -> tuple[str, str] | tuple[None, None]:
-    """Resolve a bare ticket number to (obj_class, ref) via a single OQL call.
+# ---------------------------------------------------------------------------
+# resolve_key lookup cache
+# ---------------------------------------------------------------------------
+# Cache shape: { (obj_class, ref): {"class": str, "id": int, "ts": float} }
+# Eviction is lazy: expired entries are removed at the start of each
+# resolve_key call. Set RESOLVE_KEY_CACHE_TTL=0 to disable caching.
 
-    iTop's Ticket base class covers UserRequest, Incident, Change, Problem, etc.
-    The ref number part is always 6 digits (zero-padded), and is unique across
-    all ticket subclasses -- so a single LIKE query is sufficient to identify
-    both the real class and the full ref string.
+_RESOLVE_KEY_CACHE: dict[tuple[str, str], dict] = {}
+
+
+def _cache_cleanup() -> None:
+    """Remove all cache entries whose TTL has expired."""
+    if RESOLVE_KEY_CACHE_TTL <= 0:
+        return
+    now = time.monotonic()
+    expired = [
+        k for k, v in _RESOLVE_KEY_CACHE.items()
+        if now - v["ts"] > RESOLVE_KEY_CACHE_TTL
+    ]
+    for k in expired:
+        del _RESOLVE_KEY_CACHE[k]
+    if expired:
+        logger.debug("[resolve_key_cache] evicted %d expired entry/entries", len(expired))
+
+
+def _cache_get(obj_class: str, ref: str) -> tuple[str, int] | None:
+    """Return (resolved_class, resolved_id) from cache, or None on miss/expiry."""
+    if RESOLVE_KEY_CACHE_TTL <= 0:
+        return None
+    entry = _RESOLVE_KEY_CACHE.get((obj_class, ref))
+    if entry is None:
+        return None
+    if time.monotonic() - entry["ts"] > RESOLVE_KEY_CACHE_TTL:
+        del _RESOLVE_KEY_CACHE[(obj_class, ref)]
+        logger.debug("[resolve_key_cache] expired entry for class=%r ref=%r", obj_class, ref)
+        return None
+    logger.debug(
+        "[resolve_key_cache] hit class=%r ref=%r -> resolved_class=%r id=%r",
+        obj_class, ref, entry["class"], entry["id"],
+    )
+    return entry["class"], entry["id"]
+
+
+def _cache_set(obj_class: str, ref: str, resolved_class: str, resolved_id: int) -> None:
+    """Store a resolved (class, id) pair in the cache."""
+    if RESOLVE_KEY_CACHE_TTL <= 0:
+        return
+    _RESOLVE_KEY_CACHE[(obj_class, ref)] = {
+        "class": resolved_class,
+        "id": resolved_id,
+        "ts": time.monotonic(),
+    }
+    logger.debug(
+        "[resolve_key_cache] stored class=%r ref=%r -> resolved_class=%r id=%r",
+        obj_class, ref, resolved_class, resolved_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Ticket ref resolver
+# ---------------------------------------------------------------------------
+
+async def resolve_ref_class_by_ref_part(
+    obj_class: str,
+    key: str,
+    itop_request,
+) -> tuple[str, int, str] | tuple[None, None, None]:
+    """Resolve a ref or bare number to (resolved_class, numeric_id, ref_string).
+
+    Builds an OQL query against obj_class using a suffix LIKE match on the
+    ref field. obj_class must be a class that carries a ref field (i.e. a
+    member of CLASSES_WITH_REF, including the abstract Ticket base class).
 
     Example:
-        resolve_ticket_by_number(15525, ...) -> ("Incident", "I-015525")
+        resolve_ref_class_by_ref_part("Ticket", "16271", ...) ->
+            ("Incident", 15525, "I-016271")
 
-    Returns (None, None) when no ticket with that number is found.
+    Returns (None, None, None) when no matching object is found.
     """
-    suffix = str(number).zfill(6)
-    oql = "SELECT Ticket WHERE ref LIKE '%" + suffix + "'"
-    logger.debug("[resolve_ticket_by_number] number=%r suffix=%r oql=%r", number, suffix, oql)
+    suffix = str(key).zfill(6)
+    oql = "SELECT " + obj_class + " WHERE ref LIKE '%" + suffix + "'"
+    logger.debug(
+        "[resolve_ref_class_by_ref_part] key=%r suffix=%r oql=%r", key, suffix, oql
+    )
     result = await itop_request({
         "operation": "core/get",
-        "class": "Ticket",
+        "class": obj_class,
         "key": oql,
-        "output_fields": "ref",
+        "output_fields": "id,ref",
         "limit": "1",
     })
     if result.get("code", -1) != 0:
         logger.debug(
-            "[resolve_ticket_by_number] number=%r -> iTop error code=%r msg=%r",
-            number,
+            "[resolve_ref_class_by_ref_part] key=%r -> iTop error code=%r msg=%r",
+            key,
             result.get("code"),
             result.get("message"),
         )
-        return None, None
+        return None, None, None
     for obj_data in (result.get("objects") or {}).values():
-        obj_class = obj_data.get("class") or ""
-        ref = (obj_data.get("fields") or {}).get("ref") or ""
-        if obj_class and ref:
+        resolved_class = obj_data.get("class") or ""
+        found_ref = (obj_data.get("fields") or {}).get("ref") or ""
+        found_id = (obj_data.get("fields") or {}).get("id") or ""
+        if resolved_class and found_ref and found_id:
             logger.debug(
-                "[resolve_ticket_by_number] number=%r -> resolved class=%r ref=%r",
-                number,
-                obj_class,
-                ref,
+                "[resolve_ref_class_by_ref_part] key=%r -> class=%r id=%r ref=%r",
+                key, resolved_class, found_id, found_ref,
             )
-            return obj_class, ref
-    logger.debug("[resolve_ticket_by_number] number=%r -> not found", number)
-    return None, None
+            try:
+                return resolved_class, int(found_id), found_ref
+            except (ValueError, TypeError):
+                pass
+    logger.debug("[resolve_ref_class_by_ref_part] key=%r -> not found", key)
+    return None, None, None
 
 
-async def resolve_ticket_ref(
-    obj_class: str,
-    key: str,
-    itop_request,
-) -> tuple[str, Any]:
-    """Resolve obj_class + key, performing a bare-number lookup when needed.
-
-    If key is a bare number (e.g. "15525" or 15525) and obj_class is "Ticket"
-    or not a known concrete ticket class, a single OQL probe is fired against
-    the Ticket base class to find the real class and full ref.
-
-    Returns (resolved_class, resolved_key) where resolved_key is either:
-      - {"ref": "R-015525"}  (ref criteria dict)
-      - the original parsed key (OQL string, JSON dict, etc.)
-
-    This function is the single entry point for all tools that accept a
-    user-supplied ticket identifier without knowing the class upfront.
-    """
-    logger.debug("[resolve_ticket_ref] cls=%r key=%r", obj_class, key)
-    parsed = parse_key(key)
-
-    if isinstance(parsed, str) and _REF_PATTERN.match(parsed):
-        logger.debug(
-            "[resolve_ticket_ref] key=%r is a fully-formed ref, returning cls=%r ref=%r",
-            key,
-            obj_class,
-            parsed,
-        )
-        return obj_class, {"ref": parsed}
-
-    if is_bare_number(parsed):
-        number = int(parsed) if isinstance(parsed, str) else parsed
-        logger.debug(
-            "[resolve_ticket_ref] key=%r is bare number=%r, probing Ticket base class",
-            key,
-            number,
-        )
-        found_class, found_ref = await resolve_ticket_by_number(number, itop_request)
-        if found_class and found_ref:
-            logger.debug(
-                "[resolve_ticket_ref] bare number=%r resolved -> cls=%r ref=%r",
-                number,
-                found_class,
-                found_ref,
-            )
-            return found_class, {"ref": found_ref}
-        suffix = str(number).zfill(6)
-        fallback_oql = "SELECT Ticket WHERE ref LIKE '%" + suffix + "'"
-        logger.debug(
-            "[resolve_ticket_ref] bare number=%r not resolved, falling back to OQL=%r",
-            number,
-            fallback_oql,
-        )
-        return obj_class, fallback_oql
-
-    logger.debug(
-        "[resolve_ticket_ref] key=%r parsed as %r (OQL/dict), passing through cls=%r",
-        key,
-        type(parsed).__name__,
-        obj_class,
-    )
-    return obj_class, parsed
-
+# ---------------------------------------------------------------------------
+# Primary identifier resolver
+# ---------------------------------------------------------------------------
 
 async def resolve_key(
     obj_class: str,
     ref: str | None,
-    numeric_id: Any,
     itop_request,
 ) -> tuple[str, Any]:
-    """Resolve a ticket identifier to (resolved_class, numeric_key).
+    """Resolve an object identifier to (resolved_class, numeric_key).
 
-    Returns a tuple so callers can override obj_class with the real iTop
-    class discovered during resolution (e.g. Incident instead of Ticket).
+    Returns a tuple so callers can use the real iTop class discovered during
+    resolution (e.g. Incident instead of Ticket).
 
-    Preference order:
-    1. ref (ticket ref string, e.g. "R-016271") -- looked up via iTop;
-       the real class is read from the response object.
-    2. numeric_id as bare number -- triggers Ticket base class lookup,
-       which also returns the real class.
-    3. numeric_id as fallback (DB id) -- class is unchanged.
+    For classes in CLASSES_WITH_REF (ticket-like objects):
+      - ref is matched via a suffix OQL on the ref field using
+        resolve_ref_class_by_ref_part. Both fully-formed refs ("I-016271")
+        and bare numbers ("16271" or 16271) are accepted.
+      - A lookup cache with TTL (RESOLVE_KEY_CACHE_TTL seconds) avoids
+        repeated iTop round-trips for the same identifier.
+      - Fallback: if the lookup yields nothing, int(ref) is tried as a
+        raw DB id with the class unchanged.
+
+    For all other classes:
+      - ref is passed directly as the key in a core/get call with
+        output_fields=id. This accepts OQL strings, JSON criteria strings,
+        or bare numeric ids.
+      - The real class is read from the response object (iTop may return a
+        concrete subclass even when querying a base class).
+      - A lookup cache with the same TTL applies.
+      - Fallback: int(ref) or raw ref string.
     """
-    if ref and isinstance(ref, str) and _REF_PATTERN.match(ref.strip()):
+    # Lazy TTL cleanup on every call.
+    _cache_cleanup()
+
+    ref_str = str(ref).strip() if ref is not None else ""
+
+    if not ref_str:
+        return obj_class, ref
+
+    # -- Cache lookup --------------------------------------------------------
+    cached = _cache_get(obj_class, ref_str)
+    if cached is not None:
+        return cached[0], cached[1]
+
+    # -- CLASSES_WITH_REF branch ---------------------------------------------
+    if obj_class in CLASSES_WITH_REF:
+        found_class, found_id, found_ref = await resolve_ref_class_by_ref_part(
+            obj_class, ref_str, itop_request
+        )
+        if found_class is not None and found_id is not None:
+            logger.debug(
+                "[resolve_key] ref=%r -> class=%r key=%r ref=%r",
+                ref_str, found_class, found_id, found_ref,
+            )
+            _cache_set(obj_class, ref_str, found_class, found_id)
+            return found_class, found_id
+
+    # -- Non-ref class branch ------------------------------------------------
+    else:
         result = await itop_request({
             "operation": "core/get",
             "class": obj_class,
-            "key": {"ref": ref.strip()},
+            "key": ref_str,
             "output_fields": "id",
         })
         objects = result.get("objects") or {}
-        for _k, obj_data in objects.items():
+        for obj_data in objects.values():
             resolved_class = obj_data.get("class") or obj_class
             raw_id = obj_data.get("key") or (obj_data.get("fields") or {}).get("id")
             if raw_id is not None:
                 try:
+                    numeric_id = int(raw_id)
                     logger.debug(
-                        "[resolve_key] ref=%r -> class=%r key=%r",
-                        ref, resolved_class, int(raw_id),
+                        "[resolve_key] key=%r -> class=%r id=%r",
+                        ref_str, resolved_class, numeric_id,
                     )
-                    return resolved_class, int(raw_id)
+                    _cache_set(obj_class, ref_str, resolved_class, numeric_id)
+                    return resolved_class, numeric_id
                 except (ValueError, TypeError):
                     pass
 
-    if numeric_id is not None:
-        if is_bare_number(numeric_id):
-            number = int(numeric_id)
-            found_class, found_ref = await resolve_ticket_by_number(number, itop_request)
-            if found_class and found_ref:
-                result = await itop_request({
-                    "operation": "core/get",
-                    "class": found_class,
-                    "key": {"ref": found_ref},
-                    "output_fields": "id",
-                })
-                objects = result.get("objects") or {}
-                for _k, obj_data in objects.items():
-                    resolved_class = obj_data.get("class") or found_class
-                    raw_id = obj_data.get("key") or (obj_data.get("fields") or {}).get("id")
-                    if raw_id is not None:
-                        try:
-                            logger.debug(
-                                "[resolve_key] bare number=%r -> class=%r key=%r",
-                                number, resolved_class, int(raw_id),
-                            )
-                            return resolved_class, int(raw_id)
-                        except (ValueError, TypeError):
-                            pass
-        try:
-            logger.debug(
-                "[resolve_key] numeric_id=%r -> class=%r key=%r (fallback)",
-                numeric_id, obj_class, int(numeric_id),
-            )
-            return obj_class, int(numeric_id)
-        except (ValueError, TypeError):
-            return obj_class, numeric_id
-    return obj_class, numeric_id
+    # -- Fallback ------------------------------------------------------------
+    try:
+        numeric = int(ref_str)
+        logger.debug(
+            "[resolve_key] fallback int: ref=%r -> class=%r key=%r",
+            ref_str, obj_class, numeric,
+        )
+        return obj_class, numeric
+    except (ValueError, TypeError):
+        pass
+    logger.debug(
+        "[resolve_key] fallback raw: ref=%r -> class=%r key=%r",
+        ref_str, obj_class, ref_str,
+    )
+    return obj_class, ref_str
 
 
 # ---------------------------------------------------------------------------
