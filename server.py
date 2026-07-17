@@ -41,7 +41,7 @@ from fastmcp.server.auth.providers.debug import DebugTokenVerifier
 
 from auth import BearerTokenMiddleware, get_bearer_token
 from client import itop_request as _raw_itop_request
-from config import MCP_DEBUG, logger
+from config import MCP_DEBUG, MCP_DEBUG_HEADERS, logger
 
 import tools.analytics as _analytics
 import tools.attachments as _attachments
@@ -142,7 +142,8 @@ if MCP_DEBUG:
     class DebugLoggingMiddleware(BaseHTTPMiddleware):
         """Log every HTTP request/response between MCP client and this server.
 
-        Headers and body are emitted as separate log lines per direction.
+        Request/response bodies are always logged when MCP_DEBUG=true.
+        Request/response headers are only logged when MCP_DEBUG_HEADERS=true.
         Response body is not logged because the streamable-http transport
         uses chunked/SSE streaming that cannot be buffered here without
         breaking the connection.
@@ -151,12 +152,13 @@ if MCP_DEBUG:
         async def dispatch(self, request: StarletteRequest, call_next):
             body = await request.body()
 
-            logger.debug(
-                "CLIENT -> MCP  %s %s  headers=[%s]",
-                request.method,
-                request.url.path,
-                _format_headers(request.headers, _REDACTED_REQUEST_HEADERS),
-            )
+            if MCP_DEBUG_HEADERS:
+                logger.debug(
+                    "CLIENT -> MCP  %s %s  headers=[%s]",
+                    request.method,
+                    request.url.path,
+                    _format_headers(request.headers, _REDACTED_REQUEST_HEADERS),
+                )
             logger.debug(
                 "CLIENT -> MCP  %s %s  body=%s",
                 request.method,
@@ -166,13 +168,21 @@ if MCP_DEBUG:
 
             response = await call_next(request)
 
-            logger.debug(
-                "CLIENT <- MCP  %s %s  status=%s  headers=[%s]",
-                request.method,
-                request.url.path,
-                response.status_code,
-                _format_headers(response.headers, _REDACTED_RESPONSE_HEADERS),
-            )
+            if MCP_DEBUG_HEADERS:
+                logger.debug(
+                    "CLIENT <- MCP  %s %s  status=%s  headers=[%s]",
+                    request.method,
+                    request.url.path,
+                    response.status_code,
+                    _format_headers(response.headers, _REDACTED_RESPONSE_HEADERS),
+                )
+            else:
+                logger.debug(
+                    "CLIENT <- MCP  %s %s  status=%s",
+                    request.method,
+                    request.url.path,
+                    response.status_code,
+                )
             return response
 
     app.add_middleware(DebugLoggingMiddleware)
