@@ -22,6 +22,7 @@ register(mcp, itop_request, get_token_fn)
             Returns all images stored by the most recent
             itop_get_ticket_images call for this client session as a
             multi-content ResourceResult (one ResourceContent per image).
+            All images are always served as PNG from the BLOB store.
 
 iTop blob field notes
 ---------------------
@@ -39,7 +40,9 @@ InlineImage : always an image; has a secret field for the download URL.
               Download via ?operation=download_inlineimage&id=<id>&s=<secret>
               Has no filename field; friendlyname or fabricated name is used.
               InlineImage download works without a session cookie.
-              content is stored as None; the resource handler downloads on demand.
+              Content is downloaded eagerly (Option B) so all entries in the
+              store always carry a non-None BLOB. serve_ticket_images then
+              serves every image directly from the store without any HTTP call.
 """
 
 from __future__ import annotations
@@ -236,6 +239,8 @@ def register(mcp, itop_request, get_token_fn):
             )
 
         # -- InlineImage (always image) --
+        # Content is downloaded eagerly here (Option B) so the store always
+        # holds a non-None BLOB for every entry.
         ii_result = await itop_request({
             "operation": "core/get",
             "class": "InlineImage",
@@ -261,25 +266,44 @@ def register(mcp, itop_request, get_token_fn):
                 filename = fields.get("friendlyname") or ("inlineimage_" + record_id)
             if not mimetype:
                 mimetype = "image/unknown"
-            # InlineImage download works without a session cookie.
-            # Store uri only; content downloaded on demand by the resource handler.
             uri = (
                 "itop://inlineimage/" + secret + "/" + record_id
                 if secret
                 else "itop://attachment/" + record_id
             )
+
+            # Download binary eagerly so content is never None in the store.
+            content = None
+            try:
+                http_url = _http_url_from_uri(uri)
+                content, dl_mime = await _download_binary(http_url)
+                if dl_mime and dl_mime != "application/octet-stream":
+                    mimetype = dl_mime
+                logger.debug(
+                    "[attachments] itop_get_ticket_images: downloaded InlineImage"
+                    " record_id=%s mime=%s bytes=%d",
+                    record_id, mimetype, len(content),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[attachments] itop_get_ticket_images: InlineImage download failed"
+                    " record_id=%s exc=%s",
+                    record_id, exc,
+                )
+
             images.append({
                 "source": "InlineImage",
                 "filename": filename,
                 "mimetype": mimetype,
                 "uri": uri,
-                "content": None,
+                "content": content,
                 "_b64": b64_data,
             })
             logger.debug(
                 "[attachments] itop_get_ticket_images: added InlineImage"
-                " record_id=%s uri=%s",
+                " record_id=%s uri=%s content=%s",
                 record_id, uri,
+                ("%d bytes" % len(content)) if content is not None else "None",
             )
 
         logger.debug(
@@ -318,7 +342,9 @@ def register(mcp, itop_request, get_token_fn):
                 + obj_class + " " + (ticket_ref or key) + "."
             )
 
-        # Persist entries in the SQLite store. Strip internal _b64 key.
+        # Persist entries in the SQLite store. Strip internal keys.
+        # _normalize_image() is applied inside store_images() for all entries
+        # with non-None content, so no conversion is needed here.
         store_entries = [
             {k: v for k, v in img.items() if k not in ("source", "_b64")}
             for img in images
@@ -423,7 +449,7 @@ def register(mcp, itop_request, get_token_fn):
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
-    # Resource: itop://attachment/images  (static, no URI template)
+    # Resource: itop://attachment/image.png  (static, no URI template)
     # ------------------------------------------------------------------
 
     @mcp.resource(
@@ -432,6 +458,7 @@ def register(mcp, itop_request, get_token_fn):
         description=(
             "Returns all images stored by the most recent itop_get_ticket_images call "
             "for this session as one ResourceContent per image. "
+            "All images are served as PNG directly from the BLOB store. "
             "Call itop_get_ticket_images first to populate this resource."
         ),
         mime_type="image/png",
@@ -439,9 +466,8 @@ def register(mcp, itop_request, get_token_fn):
     async def serve_ticket_images() -> ResourceResult:
         """Serve all ticket images stored for the current bearer token session.
 
-        Attachment images are returned directly from the BLOB stored in the
-        attachment store. InlineImages are downloaded on demand via HTTP.
-        The MIME type of each item reflects the actual image format.
+        All entries are stored as PNG BLOBs (normalization happens at write time
+        in attachment_store.store_images). No HTTP download is needed here.
 
         Returns a plain-text ResourceResult when no images are available
         (not yet stored, token mismatch, or TTL expired).
@@ -485,49 +511,31 @@ def register(mcp, itop_request, get_token_fn):
         errors: list[str] = []
 
         for i, entry in enumerate(entries):
-            uri = entry["uri"]
-            stored_content: bytes | None = entry.get("content")
+            content_bytes: bytes | None = entry.get("content")
+            mime: str = entry.get("mimetype", "image/png")
             logger.debug(
-                "[attachments] serve_ticket_images: processing [%d/%d]"
-                " filename=%s uri=%s content=%s",
+                "[attachments] serve_ticket_images: [%d/%d] filename=%s uri=%s content=%s",
                 i + 1, len(entries),
                 entry.get("filename", "?"),
-                uri,
-                ("%d bytes" % len(stored_content)) if stored_content is not None else "None",
+                entry.get("uri", "?"),
+                ("%d bytes" % len(content_bytes)) if content_bytes is not None else "None",
             )
-            try:
-                if stored_content is not None:
-                    # Attachment binary stored as BLOB -- serve directly.
-                    content_bytes = stored_content
-                    mime = entry.get("mimetype", "application/octet-stream")
-                    logger.debug(
-                        "[attachments] serve_ticket_images: [%d] serving from store"
-                        " mime=%s bytes=%d",
-                        i + 1, mime, len(content_bytes),
-                    )
-                else:
-                    # InlineImage -- download via HTTP.
-                    http_url = _http_url_from_uri(uri)
-                    content_bytes, mime = await _download_binary(http_url)
-                    mime = mime or entry.get("mimetype", "application/octet-stream")
-                    logger.debug(
-                        "[attachments] serve_ticket_images: [%d] downloaded mime=%s bytes=%d",
-                        i + 1, mime, len(content_bytes),
-                    )
-                resource_contents.append(
-                    ResourceContent(content=content_bytes, mime_type=mime)
-                )
-            except Exception as exc:
-                logger.warning(
-                    "[attachments] serve_ticket_images: [%d] failed filename=%s exc=%s",
-                    i + 1, entry.get("filename", "?"), exc,
-                )
-                errors.append(entry.get("filename", "?") + ": " + str(exc))
+
+            if content_bytes is None:
+                # Should not happen with Option B, but guard defensively.
+                msg = entry.get("filename", "?") + ": no content in store"
+                logger.warning("[attachments] serve_ticket_images: [%d] %s", i + 1, msg)
+                errors.append(msg)
+                continue
+
+            resource_contents.append(
+                ResourceContent(content=content_bytes, mime_type=mime)
+            )
 
         if not resource_contents:
             error_detail = "; ".join(errors) if errors else "unknown error"
             return ResourceResult(
-                contents="Failed to download all images. Errors: " + error_detail
+                contents="Failed to serve all images. Errors: " + error_detail
             )
 
         logger.debug(
