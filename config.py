@@ -87,6 +87,20 @@ DEFAULT_COMMENT = "Modified via MCP"
 # Set to 0 to disable caching entirely.
 RESOLVE_KEY_CACHE_TTL = int(os.getenv("RESOLVE_KEY_CACHE_TTL", "86400"))
 
+# -- Housekeeping ---------------------------------------------------------
+# Interval in seconds between background cleanup cycles.
+# All periodic cleanup activities (resolve_key cache, inline image ref
+# cache, SQLite expired rows) share this single interval.
+# Default: 300 s (5 min).
+CLEANUP_INTERVAL: int = int(os.getenv("CLEANUP_INTERVAL", "300"))
+
+# -- Inline image ref cache -----------------------------------------------
+# TTL in seconds for inline image ref entries written to SQLite by
+# format_and_cache(). After this period the entry is treated as a cache
+# miss and refreshed on the next itop_get_ticket_images call.
+# Default: 3600 s (1 h).
+INLINE_IMAGE_REF_TTL: int = int(os.getenv("INLINE_IMAGE_REF_TTL", "3600"))
+
 # -- Image normalization --------------------------------------------------
 # Maximum size in bytes for a stored image. Images exceeding this limit are
 # first compressed via quality reduction, then scaled down if still too large.
