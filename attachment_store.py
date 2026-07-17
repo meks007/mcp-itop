@@ -19,6 +19,15 @@ TABLE attachment_sessions (
 TTL is fixed at IMAGE_STORE_TTL_SECONDS (default 3600 s = 1 h).
 Expired rows are purged automatically on every write.
 
+Vacuum
+------
+PRAGMA auto_vacuum = INCREMENTAL is set on db open so SQLite tracks free
+pages automatically. A background daemon thread runs PRAGMA incremental_vacuum
+every IMAGE_STORE_VACUUM_INTERVAL seconds (env, default 3600 s). Set the env
+var to 0 to disable the timer entirely. A single incremental_vacuum is also
+run immediately after _open_db() completes to reclaim any leftover free pages
+from a previous process.
+
 The database connection is opened eagerly at server startup via init_db().
 Call init_db() once from server.py before the ASGI app starts serving
 requests. All subsequent calls to store_images / get_images reuse the
@@ -29,6 +38,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import TypedDict
@@ -41,6 +51,10 @@ from config import logger
 
 IMAGE_STORE_TTL_SECONDS: float = float(
     os.getenv("IMAGE_STORE_TTL", "3600")
+)
+
+IMAGE_STORE_VACUUM_INTERVAL: float = float(
+    os.getenv("IMAGE_STORE_VACUUM_INTERVAL", "3600")
 )
 
 # DB file lives next to this module unless overridden by env var.
@@ -67,6 +81,38 @@ class ImageEntry(TypedDict):
 # Module-level connection. Set by init_db(); never None after startup.
 _conn: sqlite3.Connection | None = None
 
+# Background vacuum timer thread. Kept to avoid garbage collection.
+_vacuum_thread: threading.Thread | None = None
+
+
+def _run_incremental_vacuum() -> None:
+    """Execute PRAGMA incremental_vacuum on the module-level connection.
+
+    Reclaims free pages that auto_vacuum has already identified. This is
+    lightweight and does not rebuild the database file.
+    Called from the background timer thread and once at startup.
+    """
+    conn = _get_conn()
+    try:
+        conn.execute("PRAGMA incremental_vacuum")
+        db_size = Path(IMAGE_STORE_DB_PATH).stat().st_size
+        logger.debug(
+            "[attachment_store] incremental_vacuum done, db_size=%d bytes", db_size
+        )
+    except Exception as exc:
+        logger.warning("[attachment_store] incremental_vacuum failed: %s", exc)
+
+
+def _vacuum_loop(interval: float) -> None:
+    """Background thread body: sleep interval seconds, then vacuum, repeat."""
+    logger.debug(
+        "[attachment_store] vacuum_loop: started, interval=%.0fs", interval
+    )
+    while True:
+        time.sleep(interval)
+        logger.debug("[attachment_store] vacuum_loop: running scheduled incremental_vacuum")
+        _run_incremental_vacuum()
+
 
 def _open_db() -> sqlite3.Connection:
     """Open and initialise the SQLite database. Called once at startup."""
@@ -75,6 +121,11 @@ def _open_db() -> sqlite3.Connection:
     )
     conn = sqlite3.connect(IMAGE_STORE_DB_PATH, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
+    # Enable incremental auto_vacuum so SQLite tracks free pages for later
+    # reclamation via PRAGMA incremental_vacuum. Must be set before any tables
+    # exist on a new DB; on an existing DB it is a no-op if the mode was
+    # already set, or ignored if the DB was created without it.
+    conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS attachment_sessions (
@@ -96,6 +147,20 @@ def _open_db() -> sqlite3.Connection:
     )
     conn.commit()
     logger.debug("[attachment_store] DB ready, tables and indexes verified")
+
+    # Reclaim any free pages left by a previous process run.
+    try:
+        conn.execute("PRAGMA incremental_vacuum")
+        db_size = Path(IMAGE_STORE_DB_PATH).stat().st_size
+        logger.debug(
+            "[attachment_store] startup incremental_vacuum done, db_size=%d bytes",
+            db_size,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[attachment_store] startup incremental_vacuum failed: %s", exc
+        )
+
     return conn
 
 
@@ -114,13 +179,17 @@ def _get_conn() -> sqlite3.Connection:
 # ---------------------------------------------------------------------------
 
 def init_db() -> None:
-    """Open the SQLite database and prepare the schema.
+    """Open the SQLite database, prepare the schema, and start the vacuum timer.
 
     Must be called once at server startup, before any store_images or
     get_images call. Safe to call multiple times (subsequent calls are
     no-ops).
+
+    Starts a background daemon thread that runs PRAGMA incremental_vacuum
+    every IMAGE_STORE_VACUUM_INTERVAL seconds. Set IMAGE_STORE_VACUUM_INTERVAL
+    to 0 to disable the timer.
     """
-    global _conn
+    global _conn, _vacuum_thread
     if _conn is not None:
         logger.debug("[attachment_store] init_db: already initialised, skipping")
         return
@@ -128,6 +197,24 @@ def init_db() -> None:
     logger.info(
         "[attachment_store] init_db: DB opened at %s", IMAGE_STORE_DB_PATH
     )
+
+    if IMAGE_STORE_VACUUM_INTERVAL > 0:
+        _vacuum_thread = threading.Thread(
+            target=_vacuum_loop,
+            args=(IMAGE_STORE_VACUUM_INTERVAL,),
+            daemon=True,
+            name="attachment-store-vacuum",
+        )
+        _vacuum_thread.start()
+        logger.info(
+            "[attachment_store] init_db: vacuum timer started,"
+            " interval=%.0fs", IMAGE_STORE_VACUUM_INTERVAL,
+        )
+    else:
+        logger.info(
+            "[attachment_store] init_db: vacuum timer disabled"
+            " (IMAGE_STORE_VACUUM_INTERVAL=0)"
+        )
 
 
 # ---------------------------------------------------------------------------
