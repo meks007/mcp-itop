@@ -93,7 +93,7 @@ def seed_field_cache(cls: str, fields: dict) -> None:
     """
     entry = _registry_entry(cls)
     if not fields:
-        logger.warn(
+        logger.warning(
             "[registry] seed_field_cache cls=%r seed empty fields",
             cls
           )
@@ -122,18 +122,29 @@ async def get_class_fields(obj_class: str, itop_request) -> frozenset[str]:
     If the registry cache is warm for obj_class, returns the cached frozenset
     immediately without any iTop request.
 
+    If the class was already probed and found non-existent or empty (exists=False),
+    returns an empty frozenset immediately without retrying.
+
     If the cache is cold, fires a single probe request (core/get, output_fields=*,
     limit=1) to seed the cache, then returns the resulting frozenset.
-    An empty frozenset is returned when the class has no instances or does not
-    exist on the iTop server.
+    On probe failure or empty result, marks the class as non-existent (exists=False)
+    so subsequent calls do not retry.
     """
     entry = _registry_entry(obj_class)
+
     if entry["fields"]:
         logger.debug(
             "[get_class_fields] cls=%r cache warm, %d fields",
             obj_class, len(entry["fields"]),
         )
         return entry["fields"]
+
+    if entry["exists"] is False:
+        logger.debug(
+            "[get_class_fields] cls=%r known non-existent or empty, skipping probe",
+            obj_class,
+        )
+        return frozenset()
 
     logger.debug("[get_class_fields] cls=%r cache cold, probing iTop", obj_class)
     result = await itop_request({
@@ -148,13 +159,13 @@ async def get_class_fields(obj_class: str, itop_request) -> frozenset[str]:
             "[get_class_fields] cls=%r probe failed code=%r msg=%r",
             obj_class, result.get("code"), result.get("message"),
         )
-        seed_field_cache(obj_class, {})
+        entry["exists"] = False
         return frozenset()
 
     objects = result.get("objects") or {}
     if not objects:
         logger.debug("[get_class_fields] cls=%r probe returned no objects", obj_class)
-        seed_field_cache(obj_class, {})
+        entry["exists"] = False
         return frozenset()
 
     for obj_data in objects.values():
@@ -230,9 +241,9 @@ def cache_set(obj_class: str, ref: str, resolved_class: str, resolved_id: int) -
 async def preheat(itop_request) -> None:
     """Probe all CLASSES_WITH_REF to warm the field cache.
 
-    Each class gets a single core/get (output_fields=*, limit=1). Errors and
-    empty classes are silently ignored -- the cache stays cold for those and
-    will be warmed on the first real request.
+    Each class gets a single core/get (output_fields=*, limit=1). Classes that
+    do not exist or have no objects are marked as non-existent (exists=False)
+    and will not be retried on subsequent requests.
     """
     # Import here to avoid circular import (helpers imports cache).
     from helpers import CLASSES_WITH_REF
@@ -252,10 +263,13 @@ async def preheat_once(itop_request) -> None:
 
     Called at the start of the first real iTop request so that a bearer token
     is guaranteed to be available. Subsequent calls are no-ops once all
-    classes are warm.
+    classes are either warm (fields known) or marked as non-existent.
     """
     from helpers import CLASSES_WITH_REF
 
-    if all(_registry_entry(cls)["fields"] for cls in CLASSES_WITH_REF):
+    if all(
+        _registry_entry(cls)["fields"] or _registry_entry(cls)["exists"] is False
+        for cls in CLASSES_WITH_REF
+    ):
         return
     await preheat(itop_request)
