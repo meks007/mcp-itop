@@ -149,7 +149,7 @@ def register(mcp, itop_request, get_token_fn):
     # ------------------------------------------------------------------
 
     @mcp.tool(
-        name="get_ticket_images"
+        name="List_ticket_images"
     )
     async def itop_get_ticket_images(
         obj_class: str,
@@ -386,7 +386,7 @@ def register(mcp, itop_request, get_token_fn):
     # ------------------------------------------------------------------
 
     @mcp.tool(
-        name="Get_ticket_attachments"
+        name="List_ticket_attachments"
     )
     async def itop_get_ticket_attachments(
         obj_class: str,
@@ -454,12 +454,13 @@ def register(mcp, itop_request, get_token_fn):
 
     @mcp.resource(
         _STATIC_RESOURCE_URI,
-        name="Analyze_ticket_images",
+        name="Download ticket images",
         description=(
             "Returns all images stored by the most recent itop_get_ticket_images call "
             "for this session as one ResourceContent per image. "
-            "All images are served as JPEG directly from the BLOB store. "
+            "All images are served as JPEG directly from the BLOB store."
             "Call itop_get_ticket_images first to populate this resource."
+            "Only call this once, it serves ALL images for a ticket in one call."
         ),
         mime_type="image/jpeg",
     )
