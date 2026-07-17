@@ -57,6 +57,10 @@ def register(mcp, itop_request):
         Do not disclose private_log unless explicitly requested.
         Batch same-class lookups with OQL instead of one call per object.
         """
+
+        if full and output_fields not in ("*", "*+"):
+            output_fields = "*"
+        
         # Empty output_fields: return available field names only, no content.
         if not output_fields or not output_fields.strip():
             fields = await get_class_fields(obj_class, itop_request)
