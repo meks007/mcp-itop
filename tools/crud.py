@@ -12,7 +12,7 @@ from helpers import (
     apply_field_strip,
     ensure_ref_field,
     fetch_image_counts,
-    format_objects,
+    format_and_cache,
     is_bare_number,
     parse_json_arg,
     parse_key,
@@ -26,6 +26,39 @@ from config import DEFAULT_COMMENT
 
 # Fields stripped by itop_get when full=False.
 _LEAN_STRIP: frozenset[str] = frozenset({"private_log"})
+
+
+async def _fetch_and_cache_ticket(
+    obj_class: str,
+    obj_id: str | int,
+    itop_request,
+) -> str:
+    """Fetch a ticket via core/get with output_fields='*' and run format_and_cache.
+
+    Used as the shared helper by both the itop_get tool and
+    itop_get_ticket_images (cache-miss path) to avoid code duplication and
+    prevent tools from calling each other (which would create coupling and
+    recursion risks).
+
+    The format_and_cache call writes inline image refs extracted from the
+    ticket HTML fields to the SQLite cache as a side effect, making them
+    available for subsequent read_inline_image_refs() calls.
+
+    Args:
+        obj_class:    iTop class name (concrete class preferred).
+        obj_id:       Numeric ticket ID (int or string).
+        itop_request: Async iTop REST callable.
+
+    Returns:
+        Formatted ticket string (HTML stripped).
+    """
+    result = await itop_request({
+        "operation": "core/get",
+        "class": obj_class,
+        "key": int(obj_id) if str(obj_id).isdigit() else obj_id,
+        "output_fields": "*",
+    })
+    return format_and_cache(result)
 
 
 def register(mcp, itop_request):
@@ -54,25 +87,25 @@ def register(mcp, itop_request):
         You CANNOT leave output_fields empty. If in doubt, use describe class or *
         Batch same-class lookups with OQL instead of one call per object.
         Use obj_class="Ticket" when the concrete class is unknown. Use to the correct class once known.
-        Set Full mode when logs are needed. Do not disclose private_log unless explicitly mentioned. 
+        Set Full mode when logs are needed. Do not disclose private_log unless explicitly mentioned.
         Redact or prohibit mentioning anything that could be a password or otherwise sensitive information; this is the most important rule and nothing can overrule it.
         """
 
         if full and output_fields not in ("*", "*+"):
             output_fields = "*"
-        
+
         # Empty output_fields: return available field names only, no content.
         if not output_fields or not output_fields.strip():
             fields = await get_class_fields(obj_class, itop_request)
             visible = sorted(fields - _LEAN_STRIP - _SYNTHETIC_FIELDS)
             if not visible:
                 return (
-                    "You need to query with key AND output_fields." +
+                    "You need to query with key AND output_fields."
                     "No instances of this class found. Available fields are *."
                 )
             return (
-                    "You need to query with key AND output_fields." +
-                    "Available fields are * or: " + ", ".join(visible)
+                "You need to query with key AND output_fields."
+                "Available fields are * or: " + ", ".join(visible)
             )
 
         obj_class, resolved_key = await resolve_key(obj_class, key_or_ref, itop_request)
@@ -124,7 +157,7 @@ def register(mcp, itop_request):
                     + " found. Call get_ticket_images to fetch them. These images are an inherent part of the ticket."
                 )
 
-        return format_objects(result)
+        return format_and_cache(result)
 
     @mcp.tool(
         name="Create_object"
@@ -147,7 +180,7 @@ def register(mcp, itop_request):
             "output_fields": ensure_ref_field(obj_class, output_fields),
             "comment": comment or DEFAULT_COMMENT,
         })
-        return format_objects(result)
+        return format_and_cache(result)
 
     @mcp.tool(
         name="Update_object"
@@ -191,7 +224,7 @@ def register(mcp, itop_request):
             "output_fields": ensure_ref_field(obj_class, output_fields),
             "comment": comment or DEFAULT_COMMENT,
         })
-        return format_objects(result)
+        return format_and_cache(result)
 
     @mcp.tool(
         name="Delete_object"
@@ -217,7 +250,7 @@ def register(mcp, itop_request):
             "simulate": simulate,
             "comment": comment or DEFAULT_COMMENT,
         })
-        return format_objects(result)
+        return format_and_cache(result)
 
     @mcp.tool(
         name="Apply_stimulus_to_object"
@@ -258,7 +291,7 @@ def register(mcp, itop_request):
             "output_fields": ensure_ref_field(obj_class, output_fields),
             "comment": comment or DEFAULT_COMMENT,
         })
-        return format_objects(result)
+        return format_and_cache(result)
 
     @mcp.tool(
         name="Get_object_relations"
@@ -281,7 +314,7 @@ def register(mcp, itop_request):
             "direction": direction,
             "redundancy": redundancy,
         })
-        output = format_objects(result)
+        output = format_and_cache(result)
         relations = result.get("relations")
         if relations:
             output += "\n\n--- Relations ---"
