@@ -35,14 +35,12 @@ Framework: fastmcp (PrefectHQ) >= 2.11.0
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import os
 import sys
 
 import uvicorn
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.debug import DebugTokenVerifier
-from starlette.applications import Starlette
 
 from auth import BearerTokenMiddleware, get_bearer_token
 from cache import preheat_once
@@ -121,34 +119,7 @@ _comments.register(mcp, itop_request)
 # ASGI app
 # ---------------------------------------------------------------------------
 
-# The FastMCP-generated ASGI app does not accept a lifespan parameter.
-# We wrap it in a Starlette app that owns the lifespan so we can start
-# the housekeeping asyncio task cleanly on startup and cancel it on shutdown.
-
-_mcp_app = mcp.http_app(transport="streamable-http")
-
-
-@contextlib.asynccontextmanager
-async def _lifespan(app):
-    """ASGI lifespan: start housekeeping task on startup, cancel on shutdown."""
-    from background_tasks import housekeeping_loop
-    task = asyncio.create_task(housekeeping_loop())
-    logger.info("[server] housekeeping task started")
-    try:
-        yield
-    finally:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        logger.info("[server] housekeeping task stopped")
-
-
-app = Starlette(lifespan=_lifespan)
-
-# Mount the FastMCP ASGI app under / so all MCP routes are preserved.
-app.mount("/", _mcp_app)
+app = mcp.http_app(transport="streamable-http")
 
 # Inject BearerTokenMiddleware so get_bearer_token() works in resource
 # handlers (which run outside the fastmcp tool-call context).
@@ -244,8 +215,13 @@ def main():
     'Authorization: Bearer <itop_token>' HTTP header. The token is
     forwarded to iTop on every REST call; actual validity is enforced
     by iTop. MCP_DEBUG=true enables verbose request/response logging.
+
+    The housekeeping task is started via uvicorn's on_startup callback so
+    it runs inside the already-running event loop, after FastMCP has fully
+    initialised its own task group via its internal lifespan handler.
     """
     from config import ITOP_URL
+    from background_tasks import housekeeping_loop
 
     if not ITOP_URL:
         print("Error: ITOP_URL is not set.", file=sys.stderr)
@@ -257,11 +233,74 @@ def main():
     import attachment_store
     attachment_store.init_db()
 
+    async def _on_startup():
+        asyncio.create_task(housekeeping_loop())
+        logger.info("[server] housekeeping task started")
+
     logger.info(
         "Starting iTop MCP server on %s:%d (debug=%s)",
         _MCP_HOST, _MCP_PORT, MCP_DEBUG,
     )
-    uvicorn.run(app, host=_MCP_HOST, port=_MCP_PORT)
+    uvicorn.run(
+        app,
+        host=_MCP_HOST,
+        port=_MCP_PORT,
+        callback_notify=asyncio.Event().set,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Alternate entry: run via uvicorn programmatically with startup hook
+# ---------------------------------------------------------------------------
+
+async def _serve():
+    """Async entry point that lets us register the housekeeping task after
+    uvicorn has started the event loop and FastMCP has initialised its
+    internal task group (via its own lifespan handler).
+
+    uvicorn.run() is synchronous and blocks; to attach an on_startup hook
+    we use uvicorn.Server directly with a Config that sets the lifespan to
+    'on' and register the hook via the server's startup sequence.
+    """
+    from background_tasks import housekeeping_loop
+    import attachment_store
+
+    attachment_store.init_db()
+
+    config = uvicorn.Config(
+        app,
+        host=_MCP_HOST,
+        port=_MCP_PORT,
+        log_config=None,
+    )
+    server = uvicorn.Server(config)
+
+    # Patch the startup so our task launches after uvicorn/FastMCP are ready.
+    _original_startup = server.startup
+
+    async def _patched_startup(sockets=None):
+        await _original_startup(sockets=sockets)
+        asyncio.create_task(housekeeping_loop())
+        logger.info("[server] housekeeping task started")
+
+    server.startup = _patched_startup
+    await server.serve()
+
+
+def main():
+    """Run the iTop MCP server."""
+    from config import ITOP_URL
+
+    if not ITOP_URL:
+        print("Error: ITOP_URL is not set.", file=sys.stderr)
+        print("Create .env file with ITOP_URL (see .env.example)", file=sys.stderr)
+        sys.exit(1)
+
+    logger.info(
+        "Starting iTop MCP server on %s:%d (debug=%s)",
+        _MCP_HOST, _MCP_PORT, MCP_DEBUG,
+    )
+    asyncio.run(_serve())
 
 
 if __name__ == "__main__":
