@@ -11,14 +11,15 @@ Schema
 TABLE attachment_sessions (
     token       TEXT NOT NULL,
     uri         TEXT NOT NULL,      -- short itop:// reference, never a data: URI
-    content     BLOB,               -- raw image bytes (always PNG after normalization)
-    mimetype    TEXT NOT NULL,      -- always image/png after normalization
+    content     BLOB,               -- raw JPEG bytes (always populated after normalization)
+    mimetype    TEXT NOT NULL,      -- always image/jpeg after normalization
     filename    TEXT NOT NULL,
     expires_at  REAL NOT NULL       -- Unix timestamp (UTC)
 )
 
-All images are converted to PNG and downscaled if they exceed IMAGE_MAX_BYTES
-before being written to the database. See _normalize_image() for details.
+All images are converted to JPEG and compressed/downscaled to fit within
+IMAGE_MAX_BYTES before being written to the database.
+See _normalize_image() for the compression strategy.
 
 TTL is fixed at IMAGE_STORE_TTL_SECONDS (default 3600 s = 1 h).
 Expired rows are purged automatically on every write.
@@ -50,7 +51,7 @@ from typing import TypedDict
 
 from PIL import Image as _PILImage
 
-from config import IMAGE_MAX_BYTES, logger
+from config import IMAGE_JPEG_QUALITY, IMAGE_MAX_BYTES, logger
 
 # ---------------------------------------------------------------------------
 # Config
@@ -70,6 +71,12 @@ IMAGE_STORE_DB_PATH: str = os.getenv(
     "IMAGE_STORE_DB", str(_DEFAULT_DB_PATH)
 )
 
+# Quality steps tried in order before falling back to downscaling.
+_JPEG_QUALITY_STEPS = (75, 60, 45, 30)
+
+# Minimum scale factor; below this we stop downscaling.
+_MIN_SCALE = 0.10
+
 
 # ---------------------------------------------------------------------------
 # Types
@@ -77,8 +84,8 @@ IMAGE_STORE_DB_PATH: str = os.getenv(
 
 class ImageEntry(TypedDict):
     uri: str           # short itop:// reference
-    content: bytes     # raw PNG bytes (always populated before store)
-    mimetype: str      # always image/png after normalization
+    content: bytes     # raw JPEG bytes (always populated before store)
+    mimetype: str      # always image/jpeg after normalization
     filename: str
 
 
@@ -91,51 +98,91 @@ def _normalize_image(
     mimetype: str,
     filename: str,
 ) -> tuple[bytes, str, str]:
-    """Convert any image to PNG and downscale if it exceeds IMAGE_MAX_BYTES.
+    """Convert any image to JPEG and compress/downscale to fit IMAGE_MAX_BYTES.
 
-    Steps:
-      1. Open with Pillow (supports JPEG, BMP, TIFF, WebP, GIF, ICO, ...).
-      2. Convert to RGBA so palette/mode differences are flattened.
-      3. Save as PNG. If the result exceeds IMAGE_MAX_BYTES, scale down by
-         75% per iteration until it fits or the image is smaller than 10%.
-      4. Rename the file extension to .png.
+    Strategy:
+      1. Open with Pillow (supports JPEG, BMP, TIFF, WebP, GIF, ICO, PNG ...).
+      2. Flatten alpha channel onto a white background (JPEG has no alpha).
+      3. Try encoding at IMAGE_JPEG_QUALITY. If the result exceeds IMAGE_MAX_BYTES,
+         retry at each quality step in _JPEG_QUALITY_STEPS (75, 60, 45, 30).
+      4. If still too large after all quality steps, downscale by 75% per
+         iteration at minimum quality until the image fits or drops below
+         _MIN_SCALE.
+      5. Rename the file extension to .jpg.
 
     Falls back to the original data and mimetype on any Pillow error so that
     a broken image does not block the whole request.
+    IMAGE_MAX_BYTES <= 0 disables size capping (single encode at base quality).
     """
     if not data:
         return data, mimetype, filename
 
     max_bytes = IMAGE_MAX_BYTES
+    base_quality = IMAGE_JPEG_QUALITY
 
     try:
-        img = _PILImage.open(BytesIO(data)).convert("RGBA")
+        img = _PILImage.open(BytesIO(data))
+
+        # Flatten alpha onto white so JPEG encoding does not error.
+        if img.mode in ("RGBA", "LA", "PA"):
+            bg = _PILImage.new("RGB", img.size, (255, 255, 255))
+            if img.mode == "PA":
+                img = img.convert("RGBA")
+            bg.paste(img, mask=img.split()[-1])
+            img = bg
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
 
         stem = filename.rsplit(".", 1)[0] if "." in filename else filename
-        new_filename = stem + ".png"
+        new_filename = stem + ".jpg"
 
-        scale = 1.0
-        while True:
+        def _encode(frame: _PILImage.Image, quality: int) -> bytes:
             buf = BytesIO()
-            if scale < 1.0:
-                new_w = max(1, int(img.width * scale))
-                new_h = max(1, int(img.height * scale))
-                frame = img.resize((new_w, new_h), _PILImage.LANCZOS)
-            else:
-                frame = img
-            frame.save(buf, format="PNG", optimize=True)
-            png_bytes = buf.getvalue()
+            frame.save(buf, format="JPEG", quality=quality, optimize=True)
+            return buf.getvalue()
 
-            if max_bytes <= 0 or len(png_bytes) <= max_bytes or scale < 0.10:
+        # Step 1: try quality ladder at full resolution.
+        result = _encode(img, base_quality)
+        if max_bytes <= 0 or len(result) <= max_bytes:
+            logger.debug(
+                "[attachment_store] _normalize_image: %s -> JPEG %d bytes"
+                " quality=%d (original %d bytes)",
+                filename, len(result), base_quality, len(data),
+            )
+            return result, "image/jpeg", new_filename
+
+        used_quality = base_quality
+        for q in _JPEG_QUALITY_STEPS:
+            result = _encode(img, q)
+            used_quality = q
+            if len(result) <= max_bytes:
+                break
+
+        if len(result) <= max_bytes:
+            logger.debug(
+                "[attachment_store] _normalize_image: %s -> JPEG %d bytes"
+                " quality=%d after quality reduction (original %d bytes)",
+                filename, len(result), used_quality, len(data),
+            )
+            return result, "image/jpeg", new_filename
+
+        # Step 2: downscale at minimum quality until it fits.
+        scale = 0.75
+        while scale >= _MIN_SCALE:
+            new_w = max(1, int(img.width * scale))
+            new_h = max(1, int(img.height * scale))
+            resized = img.resize((new_w, new_h), _PILImage.LANCZOS)
+            result = _encode(resized, _JPEG_QUALITY_STEPS[-1])
+            if len(result) <= max_bytes:
                 break
             scale *= 0.75
 
         logger.debug(
-            "[attachment_store] _normalize_image: %s -> PNG %d bytes"
-            " (original %d bytes, scale=%.2f)",
-            filename, len(png_bytes), len(data), scale,
+            "[attachment_store] _normalize_image: %s -> JPEG %d bytes"
+            " quality=%d scale=%.2f (original %d bytes)",
+            filename, len(result), _JPEG_QUALITY_STEPS[-1], scale, len(data),
         )
-        return png_bytes, "image/png", new_filename
+        return result, "image/jpeg", new_filename
 
     except Exception as exc:
         logger.warning(
@@ -306,9 +353,9 @@ def init_db() -> None:
 def store_images(token: str, images: list[ImageEntry]) -> None:
     """Persist image entries for the given bearer token.
 
-    Each entry with a non-None content is normalized to PNG (format
-    conversion + size capping) via _normalize_image() before insertion.
-    Entries without content (should not occur with Option B) are stored as-is.
+    Each entry with non-None content is normalized to JPEG via
+    _normalize_image() before insertion. Entries without content are
+    stored as-is (should not occur with Option B eager download).
 
     Replaces any existing entries for this token and purges all expired
     rows from the table. Each entry is valid for IMAGE_STORE_TTL_SECONDS.
@@ -357,7 +404,7 @@ def store_images(token: str, images: list[ImageEntry]) -> None:
             deleted_expired,
         )
 
-        # Normalize each image to PNG, then insert.
+        # Normalize each image to JPEG, then insert.
         rows = []
         for img in images:
             raw: bytes | None = img.get("content")
