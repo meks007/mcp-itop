@@ -10,18 +10,19 @@ Provides AI assistants (Claude Desktop, opencode, etc.) with tools to:
 Based on josephstreeter/mcp_itop (CRUD + stimulus) with extended analytics.
 
 Module layout:
-  config.py           - env vars, logging, constants
-  cache.py            - class field registry, resolve_key cache, preheat
-  auth.py             - BearerTokenMiddleware ContextVar + get_bearer_token()
-  client.py           - iTop REST/JSON HTTP client
-  helpers.py          - shared formatting and parsing utilities
-  attachment_store.py - SQLite store for image URIs (session-keyed by token)
+  config.py             - env vars, logging, constants
+  cache.py              - class field registry, resolve_key cache, preheat
+  auth.py               - BearerTokenMiddleware ContextVar + get_bearer_token()
+  client.py             - iTop REST/JSON HTTP client
+  helpers.py            - shared formatting and parsing utilities
+  attachment_store.py   - SQLite store for image URIs and inline image refs
+  background_tasks.py   - central housekeeping asyncio loop
   tools/
-    analytics.py      - SLA, workload, idle agents, service/caller quality
-    kb.py             - knowledge base search and retrieval
-    crud.py           - generic CRUD + stimulus + impact tools
-    comments.py       - ticket log read/write
-    attachments.py    - image and file attachment tools + static image resource
+    analytics.py        - SLA, workload, idle agents, service/caller quality
+    kb.py               - knowledge base search and retrieval
+    crud.py             - generic CRUD + stimulus + impact tools
+    comments.py         - ticket log read/write
+    attachments.py      - image and file attachment tools + static image resource
 
 Framework: fastmcp (PrefectHQ) >= 2.11.0
   - ResourceResult / ResourceContent for multi-image resource responses
@@ -33,6 +34,7 @@ Framework: fastmcp (PrefectHQ) >= 2.11.0
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 
@@ -225,6 +227,21 @@ def main():
     # problem surfaces immediately at startup, not on the first tool call.
     import attachment_store
     attachment_store.init_db()
+
+    # Schedule the central housekeeping task on the running event loop.
+    # This must be called after the event loop is running (i.e. inside an
+    # async context or after uvicorn has started). We use the on_startup
+    # lifespan hook via a wrapper to ensure the loop is available.
+    from background_tasks import housekeeping_loop
+
+    original_lifespan = getattr(app, "router", None)
+
+    async def _start_housekeeping():
+        asyncio.create_task(housekeeping_loop())
+        logger.info("[server] housekeeping task scheduled")
+
+    # Register the housekeeping starter as a startup event on the ASGI app.
+    app.add_event_handler("startup", _start_housekeeping)
 
     logger.info(
         "Starting iTop MCP server on %s:%d (debug=%s)",
