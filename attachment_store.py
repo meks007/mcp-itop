@@ -1,20 +1,24 @@
 """
-attachment_store.py - SQLite-backed store for itop image URIs.
+attachment_store.py - SQLite-backed store for itop image content.
 
-Stores image metadata (URI, mimetype, filename) keyed by the bearer token
-in cleartext. Used by the static MCP resource handler itop://attachment/images
-to retrieve the image set produced by the most recent itop_get_ticket_images
-tool call for the current client session.
+Stores image binaries (as BLOB) and metadata keyed by the bearer token.
+Used by the static MCP resource handler itop://attachment/images to retrieve
+the image set produced by the most recent itop_get_ticket_images tool call
+for the current client session.
 
 Schema
 ------
 TABLE attachment_sessions (
     token       TEXT NOT NULL,
-    uri         TEXT NOT NULL,
+    uri         TEXT NOT NULL,      -- short itop:// reference, never a data: URI
+    content     BLOB,               -- raw image bytes for Attachments; NULL for InlineImages
     mimetype    TEXT NOT NULL,
     filename    TEXT NOT NULL,
-    expires_at  REAL NOT NULL   -- Unix timestamp (UTC)
+    expires_at  REAL NOT NULL       -- Unix timestamp (UTC)
 )
+
+content is NULL for InlineImages, which are downloaded on demand via HTTP
+when the resource handler serves them.
 
 TTL is fixed at IMAGE_STORE_TTL_SECONDS (default 3600 s = 1 h).
 Expired rows are purged automatically on every write.
@@ -69,7 +73,8 @@ IMAGE_STORE_DB_PATH: str = os.getenv(
 # ---------------------------------------------------------------------------
 
 class ImageEntry(TypedDict):
-    uri: str
+    uri: str          # short itop:// reference
+    content: bytes | None  # raw image bytes for Attachments; None for InlineImages
     mimetype: str
     filename: str
 
@@ -88,8 +93,8 @@ _vacuum_thread: threading.Thread | None = None
 def _run_incremental_vacuum() -> None:
     """Execute PRAGMA incremental_vacuum on the module-level connection.
 
-    Reclaims free pages that auto_vacuum has already identified. This is
-    lightweight and does not rebuild the database file.
+    Reclaims free pages that auto_vacuum has already identified. Lightweight
+    and does not rebuild the database file.
     Called from the background timer thread and once at startup.
     """
     conn = _get_conn()
@@ -122,21 +127,32 @@ def _open_db() -> sqlite3.Connection:
     conn = sqlite3.connect(IMAGE_STORE_DB_PATH, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     # Enable incremental auto_vacuum so SQLite tracks free pages for later
-    # reclamation via PRAGMA incremental_vacuum. Must be set before any tables
-    # exist on a new DB; on an existing DB it is a no-op if the mode was
-    # already set, or ignored if the DB was created without it.
+    # reclamation via PRAGMA incremental_vacuum.
     conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS attachment_sessions (
             token       TEXT NOT NULL,
             uri         TEXT NOT NULL,
+            content     BLOB,
             mimetype    TEXT NOT NULL,
             filename    TEXT NOT NULL,
             expires_at  REAL NOT NULL
         )
         """
     )
+    # Migrate existing DBs that pre-date the content column.
+    existing_cols = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(attachment_sessions)")
+    }
+    if "content" not in existing_cols:
+        logger.info(
+            "[attachment_store] migrating schema: adding content column"
+        )
+        conn.execute(
+            "ALTER TABLE attachment_sessions ADD COLUMN content BLOB"
+        )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_token "
         "ON attachment_sessions (token)"
@@ -222,14 +238,17 @@ def init_db() -> None:
 # ---------------------------------------------------------------------------
 
 def store_images(token: str, images: list[ImageEntry]) -> None:
-    """Persist image metadata for the given bearer token.
+    """Persist image entries for the given bearer token.
 
     Replaces any existing entries for this token and purges all expired
     rows from the table. Each entry is valid for IMAGE_STORE_TTL_SECONDS.
 
     Args:
         token:  The raw bearer token for the current MCP client session.
-        images: List of dicts with keys: uri, mimetype, filename.
+        images: List of dicts with keys: uri, content, mimetype, filename.
+                uri must be a short itop:// reference (no data: URIs).
+                content is raw image bytes for Attachments, or None for
+                InlineImages that will be downloaded on demand.
                 Extra keys (e.g. source) are silently ignored.
     """
     token_preview = token[:8] + "..." if len(token) > 8 else token
@@ -274,6 +293,7 @@ def store_images(token: str, images: list[ImageEntry]) -> None:
             (
                 token,
                 img["uri"],
+                img.get("content"),
                 img.get("mimetype", "application/octet-stream"),
                 img.get("filename", "attachment"),
                 expires_at,
@@ -282,8 +302,8 @@ def store_images(token: str, images: list[ImageEntry]) -> None:
         ]
         conn.executemany(
             "INSERT INTO attachment_sessions "
-            "(token, uri, mimetype, filename, expires_at) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "(token, uri, content, mimetype, filename, expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             rows,
         )
         logger.debug(
@@ -293,12 +313,14 @@ def store_images(token: str, images: list[ImageEntry]) -> None:
         )
 
     for i, img in enumerate(images):
+        content = img.get("content")
         logger.debug(
-            "[attachment_store] store_images: [%d] uri=%s mimetype=%s filename=%s",
+            "[attachment_store] store_images: [%d] uri=%s mimetype=%s filename=%s content=%s",
             i,
             img.get("uri", ""),
             img.get("mimetype", ""),
             img.get("filename", ""),
+            ("%d bytes" % len(content)) if content is not None else "None",
         )
 
     logger.debug(
@@ -326,7 +348,8 @@ def get_images(token: str) -> list[ImageEntry]:
 
     conn = _get_conn()
     cursor = conn.execute(
-        "SELECT uri, mimetype, filename, expires_at FROM attachment_sessions "
+        "SELECT uri, content, mimetype, filename, expires_at "
+        "FROM attachment_sessions "
         "WHERE token = ? AND expires_at >= ? "
         "ORDER BY rowid",
         (token, now),
@@ -341,19 +364,22 @@ def get_images(token: str) -> list[ImageEntry]:
 
     entries: list[ImageEntry] = []
     for i, row in enumerate(rows):
+        content: bytes | None = row[1]
         entry: ImageEntry = {
             "uri": row[0],
-            "mimetype": row[1],
-            "filename": row[2],
+            "content": content,
+            "mimetype": row[2],
+            "filename": row[3],
         }
-        remaining_ttl = row[3] - now
+        remaining_ttl = row[4] - now
         logger.debug(
-            "[attachment_store] get_images: [%d] uri=%s mimetype=%s filename=%s "
-            "remaining_ttl=%.0fs",
+            "[attachment_store] get_images: [%d] uri=%s mimetype=%s filename=%s"
+            " content=%s remaining_ttl=%.0fs",
             i,
             entry["uri"],
             entry["mimetype"],
             entry["filename"],
+            ("%d bytes" % len(content)) if content is not None else "None",
             remaining_ttl,
         )
         entries.append(entry)
