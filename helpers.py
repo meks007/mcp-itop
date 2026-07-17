@@ -54,6 +54,16 @@ _HTML_ENTITIES: dict[str, str] = {
 
 _HTML_ENTITY_RE = re.compile(r"&(?:#\d+|#x[\da-fA-F]+|[a-zA-Z]+);")
 
+# Matches <img> tags that carry data-img-id and data-img-secret attributes.
+# Both attributes may appear in any order and the tag may have other attrs.
+_INLINE_IMG_RE = re.compile(
+    r"<img\b[^>]*\bdata-img-id=[\"']?(\d+)[\"']?"
+    r"[^>]*\bdata-img-secret=[\"']?([0-9a-fA-F]+)[\"']?[^>]*>|"
+    r"<img\b[^>]*\bdata-img-secret=[\"']?([0-9a-fA-F]+)[\"']?"
+    r"[^>]*\bdata-img-id=[\"']?(\d+)[\"']?[^>]*>",
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 def _decode_entity(m: re.Match) -> str:
     raw = m.group(0)
@@ -93,6 +103,63 @@ def strip_html_recursive(obj: Any) -> Any:
     if isinstance(obj, list):
         return [strip_html_recursive(item) for item in obj]
     return obj
+
+
+# ---------------------------------------------------------------------------
+# Inline image parsing
+# ---------------------------------------------------------------------------
+
+def parse_objects(result: dict) -> dict[str, list[dict]]:
+    """Extract inline image refs from all string fields across all objects.
+
+    Scans every string field in result['objects'] for <img> tags that carry
+    both data-img-id and data-img-secret attributes. Returns a mapping of
+    '{obj_class}::{obj_id}' -> [{'id': str, 'secret': str}, ...].
+
+    The field values are NOT modified; stripping happens in format_objects.
+    Deduplication per ticket is applied (same img_id appears only once).
+    """
+    refs: dict[str, list[dict]] = {}
+    objects = result.get("objects")
+    if not objects:
+        return refs
+
+    for _obj_key, obj_data in objects.items():
+        cls = obj_data.get("class") or ""
+        oid = str(obj_data.get("key") or "")
+        if not cls or not oid:
+            continue
+
+        ticket_key = cls + "::" + oid
+        seen_ids: set[str] = set()
+        found: list[dict] = []
+
+        fields = obj_data.get("fields") or {}
+        for fv in fields.values():
+            if not isinstance(fv, str) or "data-img-id" not in fv:
+                continue
+            for m in _INLINE_IMG_RE.finditer(fv):
+                # Group layout: (id-first-img-id, id-first-secret,
+                #                secret-first-secret, secret-first-img-id)
+                if m.group(1) and m.group(2):
+                    img_id = m.group(1)
+                    secret = m.group(2)
+                else:
+                    img_id = m.group(4)
+                    secret = m.group(3)
+                if img_id and img_id not in seen_ids:
+                    seen_ids.add(img_id)
+                    found.append({"id": img_id, "secret": secret})
+
+        if found or ticket_key not in refs:
+            refs[ticket_key] = found
+
+        logger.debug(
+            "[parse_objects] cls=%r id=%r found %d inline img ref(s)",
+            cls, oid, len(found),
+        )
+
+    return refs
 
 
 # ---------------------------------------------------------------------------
@@ -508,19 +575,38 @@ def extract_objects(result: dict) -> list[dict]:
     return out
 
 
-def format_objects(result: dict) -> str:
-    """Format iTop response objects into readable string.
+def format_objects(result: dict) -> tuple[str, dict[str, list[dict]]]:
+    """Format iTop response objects into a readable string and extract inline image refs.
+
+    Returns a tuple of:
+      - text: formatted string suitable for MCP tool output
+      - refs: mapping of '{obj_class}::{obj_id}' -> [{'id', 'secret'}, ...]
+              as returned by parse_objects(). Empty dict when no refs found.
+
+    Processing order:
+      1. parse_objects() scans all string fields for data-img-id/data-img-secret
+         <img> tags and collects refs WITHOUT modifying field values.
+      2. HTML stripping then removes all tags (including <img>) from fields.
+      3. The formatted text is assembled from the stripped values.
 
     Seeds the field registry from every response so resolve_output_fields
     hits the warm-cache path on subsequent calls for the same class.
-    HTML is stripped from all string field values.
     Fields starting with '_' are rendered as bracketed synthetic annotations.
     """
     if result.get("code", -1) != 0:
-        return f"Error (code {result.get('code')}): {str_or(result, 'message', 'Unknown error')}"
+        return (
+            "Error (code " + str(result.get("code")) + "): "
+            + str_or(result, "message", "Unknown error"),
+            {},
+        )
     objects = result.get("objects")
     if not objects:
-        return str_or(result, "message", "No objects found.")
+        return str_or(result, "message", "No objects found."), {}
+
+    # Step 1: extract inline image refs before any stripping.
+    refs = parse_objects(result)
+
+    # Step 2: format and strip.
     lines = [str_or(result, "message", "")]
     for _obj_key, obj_data in objects.items():
         cls = str_or(obj_data, "class", "?")
@@ -529,10 +615,10 @@ def format_objects(result: dict) -> str:
         seed_field_cache(cls, fields)
         ref = fields.get("ref")
         label = ref if ref else oid
-        lines.append(f"\n--- {cls}::{label} ---")
+        lines.append("\n--- " + cls + "::" + label + " ---")
         if ITOP_URL and oid:
             lines.append(
-                f"  link: {ITOP_URL}/pages/UI.php?operation=details&class={cls}&id={oid}"
+                "  link: " + ITOP_URL + "/pages/UI.php?operation=details&class=" + cls + "&id=" + oid
             )
         synthetic = {}
         for fn, fv in fields.items():
@@ -546,11 +632,43 @@ def format_objects(result: dict) -> str:
             elif isinstance(fv, (dict, list)):
                 fv = strip_html_recursive(fv)
                 fv = json.dumps(fv, indent=2, ensure_ascii=False)
-            lines.append(f"  {fn}: {fv}")
+            lines.append("  " + fn + ": " + str(fv))
         for fn, fv in synthetic.items():
             display_name = fn.lstrip("_")
-            lines.append(f"  [{display_name}] {fv}")
-    return "\n".join(lines)
+            lines.append("  [" + display_name + "] " + str(fv))
+    return "\n".join(lines), refs
+
+
+def format_and_cache(result: dict) -> str:
+    """Format iTop response and persist inline image refs to SQLite.
+
+    Calls format_objects() to get the formatted text and the inline image
+    refs map, then writes each ticket's refs to the attachment_store cache
+    via write_inline_image_refs(). Returns only the formatted string so all
+    existing callers can be migrated by replacing format_objects() with
+    format_and_cache() without any other changes.
+
+    The SQLite write is a transparent side effect. The cache entry is keyed
+    by (obj_class, obj_id) and expires after INLINE_IMAGE_REF_TTL seconds.
+    """
+    # Import here to avoid a circular import at module level:
+    # helpers -> attachment_store -> config (safe), but attachment_store
+    # must not import helpers at the top level.
+    from attachment_store import write_inline_image_refs
+
+    text, refs = format_objects(result)
+
+    for ticket_key, img_refs in refs.items():
+        try:
+            cls, oid = ticket_key.split("::", 1)
+            write_inline_image_refs(cls, oid, img_refs)
+        except Exception as exc:
+            logger.warning(
+                "[format_and_cache] failed to write inline image refs for %r: %s",
+                ticket_key, exc,
+            )
+
+    return text
 
 
 def format_table(header: list[str], rows: list[list[str]]) -> str:
