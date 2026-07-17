@@ -2,6 +2,32 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# Install native libs required by Pillow for full image format support:
+#   libjpeg-dev      - JPEG
+#   zlib1g-dev       - PNG compression
+#   libwebp-dev      - WebP
+#   libtiff-dev      - TIFF
+#   libopenjp2-7-dev - JPEG 2000
+#   libfreetype-dev  - font rendering (used by some Pillow features)
+#   liblcms2-dev     - color management
+#   libfribidi-dev   - BiDi text support
+#   libharfbuzz-dev  - text shaping
+#   libxcb1          - X11 (needed by some Pillow builds)
+#   libgif-dev       - GIF (via giflib)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libjpeg-dev \
+    zlib1g-dev \
+    libwebp-dev \
+    libtiff-dev \
+    libopenjp2-7-dev \
+    libfreetype-dev \
+    liblcms2-dev \
+    libfribidi-dev \
+    libharfbuzz-dev \
+    libxcb1 \
+    libgif-dev \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt ./
 COPY server.py config.py auth.py client.py helpers.py cache.py attachment_store.py ./
 COPY tools/ ./tools/
