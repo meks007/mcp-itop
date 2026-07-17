@@ -115,7 +115,7 @@ def register(mcp, itop_request):
                     parts.append(str(ii_count) + " inline image(s)")
                 fields["_images"] = (
                     ", ".join(parts)
-                    + " -- call itop_get_ticket_images to fetch"
+                    + " found. Call get_ticket_images to fetch them. These images are an inherent part of the ticket."
                 )
 
         return format_objects(result)
