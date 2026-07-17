@@ -3,7 +3,7 @@ FROM python:3.11-slim
 WORKDIR /app
 
 COPY requirements.txt ./
-COPY server.py config.py auth.py client.py helpers.py attachment_store.py ./
+COPY server.py config.py auth.py client.py helpers.py cache.py attachment_store.py ./
 COPY tools/ ./tools/
 
 RUN pip install --no-cache-dir -r requirements.txt
