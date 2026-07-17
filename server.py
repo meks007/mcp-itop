@@ -11,6 +11,7 @@ Based on josephstreeter/mcp_itop (CRUD + stimulus) with extended analytics.
 
 Module layout:
   config.py           - env vars, logging, constants
+  cache.py            - class field registry, resolve_key cache, preheat
   auth.py             - BearerTokenMiddleware ContextVar + get_bearer_token()
   client.py           - iTop REST/JSON HTTP client
   helpers.py          - shared formatting and parsing utilities
@@ -32,6 +33,7 @@ Framework: fastmcp (PrefectHQ) >= 2.11.0
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 
@@ -212,6 +214,13 @@ def main():
     # problem surfaces immediately at startup, not on the first tool call.
     import attachment_store
     attachment_store.init_db()
+
+    # Pre-heat the field cache for all ticket classes. This fires one
+    # core/get per class (output_fields=*, limit=1) so that the first
+    # real tool call does not need to probe iTop for field metadata.
+    # Errors and empty classes are silently ignored inside preheat().
+    from cache import preheat
+    asyncio.run(preheat(itop_request))
 
     logger.info(
         "Starting iTop MCP server on %s:%d (debug=%s)",
