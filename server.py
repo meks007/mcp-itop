@@ -42,6 +42,7 @@ import sys
 import uvicorn
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.debug import DebugTokenVerifier
+from starlette.applications import Starlette
 
 from auth import BearerTokenMiddleware, get_bearer_token
 from cache import preheat_once
@@ -117,16 +118,19 @@ _comments.register(mcp, itop_request)
 
 
 # ---------------------------------------------------------------------------
-# ASGI app with lifespan for housekeeping task
+# ASGI app
 # ---------------------------------------------------------------------------
+
+# The FastMCP-generated ASGI app does not accept a lifespan parameter.
+# We wrap it in a Starlette app that owns the lifespan so we can start
+# the housekeeping asyncio task cleanly on startup and cancel it on shutdown.
+
+_mcp_app = mcp.http_app(transport="streamable-http")
+
 
 @contextlib.asynccontextmanager
 async def _lifespan(app):
-    """ASGI lifespan context manager.
-
-    Starts the central housekeeping asyncio task on server startup and
-    cancels it cleanly on shutdown.
-    """
+    """ASGI lifespan: start housekeeping task on startup, cancel on shutdown."""
     from background_tasks import housekeeping_loop
     task = asyncio.create_task(housekeeping_loop())
     logger.info("[server] housekeeping task started")
@@ -141,7 +145,10 @@ async def _lifespan(app):
         logger.info("[server] housekeeping task stopped")
 
 
-app = mcp.http_app(transport="streamable-http", lifespan=_lifespan)
+app = Starlette(lifespan=_lifespan)
+
+# Mount the FastMCP ASGI app under / so all MCP routes are preserved.
+app.mount("/", _mcp_app)
 
 # Inject BearerTokenMiddleware so get_bearer_token() works in resource
 # handlers (which run outside the fastmcp tool-call context).
