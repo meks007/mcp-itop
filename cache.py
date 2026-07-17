@@ -31,7 +31,8 @@ cache_set(obj_class, ref, cls, id)      store resolved pair
 cache_cleanup()                         evict expired entries
 
 # Pre-heat
-preheat(itop_request)                   probe all CLASSES_WITH_REF at startup
+preheat(itop_request)                   probe all CLASSES_WITH_REF
+preheat_once(itop_request)              preheat if any class cache still cold
 """
 
 from __future__ import annotations
@@ -222,7 +223,7 @@ def cache_set(obj_class: str, ref: str, resolved_class: str, resolved_id: int) -
 # ---------------------------------------------------------------------------
 
 async def preheat(itop_request) -> None:
-    """Probe all CLASSES_WITH_REF at server startup to warm the field cache.
+    """Probe all CLASSES_WITH_REF to warm the field cache.
 
     Each class gets a single core/get (output_fields=*, limit=1). Errors and
     empty classes are silently ignored -- the cache stays cold for those and
@@ -239,3 +240,17 @@ async def preheat(itop_request) -> None:
             cls, len(fields),
         )
     logger.info("[cache] pre-heat complete")
+
+
+async def preheat_once(itop_request) -> None:
+    """Run preheat only if any CLASSES_WITH_REF field cache is still cold.
+
+    Called at the start of the first real iTop request so that a bearer token
+    is guaranteed to be available. Subsequent calls are no-ops once all
+    classes are warm.
+    """
+    from helpers import CLASSES_WITH_REF
+
+    if all(_registry_entry(cls)["fields"] for cls in CLASSES_WITH_REF):
+        return
+    await preheat(itop_request)
