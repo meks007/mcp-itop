@@ -160,10 +160,8 @@ def register(mcp, itop_request, get_token_fn):
             obj_class, ticket_ref, key,
         )
 
-        # resolve_key now returns (resolved_class, numeric_key); override obj_class.
-        obj_class, resolved = await resolve_key(
-            obj_class, ticket_ref or None, key or None, itop_request
-        )
+        ref = str(ticket_ref or key or "").strip() or None
+        obj_class, resolved = await resolve_key(obj_class, ref, itop_request)
         logger.debug(
             "[attachments] itop_get_ticket_images: resolved class=%r key=%r",
             obj_class, resolved,
@@ -338,10 +336,8 @@ def register(mcp, itop_request, get_token_fn):
         """List non-image file attachments for an iTop ticket, including MIME type and browser
         download link. Use itop_get_ticket_images for images. Returns metadata and links only,
         no file binaries. Prefer ticket_ref; use key for a numeric ID or OQL query."""
-        # resolve_key now returns (resolved_class, numeric_key); override obj_class.
-        obj_class, resolved = await resolve_key(
-            obj_class, ticket_ref or None, key or None, itop_request
-        )
+        ref = str(ticket_ref or key or "").strip() or None
+        obj_class, resolved = await resolve_key(obj_class, ref, itop_request)
         if resolved is None:
             return "Error: provide either ticket_ref or key to identify the ticket."
 
