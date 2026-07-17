@@ -13,6 +13,17 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Tuple
 
 from config import ITOP_URL, RESOLVE_KEY_CACHE_TTL
+from cache import (
+    cache_cleanup,
+    cache_get,
+    cache_set,
+    get_class_fields,
+    registry_get_fields,
+    registry_get_meta,
+    registry_set_meta,
+    seed_field_cache,
+    _registry_entry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +31,6 @@ logger = logging.getLogger(__name__)
 # HTML stripping
 # ---------------------------------------------------------------------------
 
-# Tags whose opening or closing form represents a line break in the output.
-# Closing a block tag ends that "paragraph"; <br> is always a newline.
 _BLOCK_TAGS = re.compile(
     r"<(?:/?(?:p|div|tr|li|dt|dd|blockquote|pre|"
     r"h[1-6]|ul|ol|dl|table|thead|tbody|tfoot|"
@@ -30,23 +39,19 @@ _BLOCK_TAGS = re.compile(
     re.IGNORECASE,
 )
 
-# MS-Office conditional comments: <![if ...]> ... <![endif]> -- drop entirely.
 _MSO_CONDITIONAL_RE = re.compile(
     r"<!\[if[^\]]*\]>.*?<!\[endif\]>",
     re.IGNORECASE | re.DOTALL,
 )
 
-# Any remaining tag (inline or unknown).
 _ANY_TAG_RE = re.compile(r"<[^>]+>", re.IGNORECASE)
 
-# HTML entities we handle by name.
 _HTML_ENTITIES: dict[str, str] = {
     "&amp;": "&", "&lt;": "<", "&gt;": ">",
     "&quot;": '"', "&apos;": "'", "&nbsp;": " ",
     "&#39;": "'",
 }
 
-# All remaining numeric / named entities.
 _HTML_ENTITY_RE = re.compile(r"&(?:#\d+|#x[\da-fA-F]+|[a-zA-Z]+);")
 
 
@@ -60,43 +65,22 @@ def _decode_entity(m: re.Match) -> str:
             return chr(int(inner[1:]))
     except (ValueError, OverflowError):
         pass
-    return raw  # leave unknown named entities as-is
+    return raw
 
 
 def _strip_html(value: str) -> str:
-    """Convert HTML to clean plain text, preserving meaningful line breaks.
-
-    Steps:
-    1. Drop MS-Office conditional comments wholesale.
-    2. Replace block-level tags and <br> with newlines.
-    3. Strip all remaining tags.
-    4. Decode HTML entities.
-    5. Collapse horizontal whitespace on each line, then collapse excess blank lines.
-    """
+    """Convert HTML to clean plain text, preserving meaningful line breaks."""
     if not value or "<" not in value:
         return value
-
-    # 1. Remove MSO conditional noise
     value = _MSO_CONDITIONAL_RE.sub("", value)
-
-    # 2. Block tags / <br> -> newline
     value = _BLOCK_TAGS.sub("\n", value)
-
-    # 3. Strip everything else
     value = _ANY_TAG_RE.sub("", value)
-
-    # 4. Entities
     for entity, char in _HTML_ENTITIES.items():
         value = value.replace(entity, char)
     value = _HTML_ENTITY_RE.sub(_decode_entity, value)
-
-    # 5. Normalise whitespace:
-    #    - collapse horizontal whitespace within each line
-    #    - collapse runs of 3+ newlines to 2
     lines = [re.sub(r"[ \t]+", " ", line).strip() for line in value.splitlines()]
     value = "\n".join(lines)
     value = re.sub(r"\n{3,}", "\n\n", value)
-
     return value.strip()
 
 
@@ -135,221 +119,6 @@ def sla_is_breached(val: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Universal class registry
-# ---------------------------------------------------------------------------
-# Single process-level cache for all iTop class metadata.
-# Per-entry shape:
-#   {
-#     "exists": bool | None,     # None = not yet probed
-#     "fields": frozenset[str],  # known field names, grown from live responses
-#     "meta":   dict,            # arbitrary per-class metadata (e.g. text_field for KB)
-#   }
-_ITOP_CLASS_REGISTRY: dict[str, dict] = {}
-
-
-def _registry_entry(cls: str) -> dict:
-    """Return (and lazily create) the registry slot for a class."""
-    if cls not in _ITOP_CLASS_REGISTRY:
-        logger.debug("[registry] init slot for class=%r", cls)
-        _ITOP_CLASS_REGISTRY[cls] = {"exists": None, "fields": frozenset(), "meta": {}}
-    return _ITOP_CLASS_REGISTRY[cls]
-
-
-def registry_get_meta(cls: str, key: str, default: Any = None) -> Any:
-    """Read arbitrary per-class metadata from the registry."""
-    value = _registry_entry(cls)["meta"].get(key, default)
-    logger.debug("[registry] get_meta cls=%r key=%r -> %r", cls, key, value)
-    return value
-
-
-def registry_set_meta(cls: str, key: str, value: Any) -> None:
-    """Write arbitrary per-class metadata into the registry."""
-    logger.debug("[registry] set_meta cls=%r key=%r value=%r", cls, key, value)
-    _registry_entry(cls)["meta"][key] = value
-
-
-def registry_get_fields(cls: str) -> frozenset:
-    """Return the known field inventory for a class (may be empty if not yet seen)."""
-    fields = _registry_entry(cls)["fields"]
-    logger.debug("[registry] get_fields cls=%r -> %d fields known", cls, len(fields))
-    return fields
-
-
-def _seed_field_cache(cls: str, fields: dict) -> None:
-    """Grow the field inventory for a class from a live response fields dict.
-
-    Already-known fields are always kept (union, never removed).
-    Only genuinely new fields (not yet in the registry) are added and logged.
-    """
-    entry = _registry_entry(cls)
-    if fields:
-        incoming = frozenset(fields.keys())
-        before_set = entry["fields"]
-        new = incoming - before_set
-        entry["fields"] = before_set | incoming
-        entry["exists"] = True
-        logger.debug(
-            "[registry] seed_field_cache cls=%r fields_before=%d fields_after=%d new=%r",
-            cls,
-            len(before_set),
-            len(entry["fields"]),
-            sorted(new),
-        )
-
-
-async def ensure_class_exists(candidates: list[str], itop_request) -> str:
-    """Return the first class in candidates that exists on the iTop server.
-
-    Each candidate is probed with a minimal core/get (limit 1, output_fields id)
-    unless its existence is already cached in _ITOP_CLASS_REGISTRY. The first
-    confirmed class name is returned; an empty string is returned if none exist.
-
-    All probe results (positive and negative) are cached, so subsequent calls
-    within the same server process pay no network cost.
-    """
-    for cls in candidates:
-        entry = _registry_entry(cls)
-        if entry["exists"] is True:
-            logger.debug("[registry] ensure_class_exists cls=%r -> cached True", cls)
-            return cls
-        if entry["exists"] is False:
-            logger.debug("[registry] ensure_class_exists cls=%r -> cached False, skip", cls)
-            continue
-        r = await itop_request({
-            "operation": "core/get",
-            "class": cls,
-            "key": f"SELECT {cls}",
-            "output_fields": "id",
-            "limit": "1",
-        })
-        if r.get("code") == 0:
-            entry["exists"] = True
-            for obj_data in (r.get("objects") or {}).values():
-                _seed_field_cache(cls, obj_data.get("fields") or {})
-            logger.debug("[registry] ensure_class_exists cls=%r -> exists=True (probed)", cls)
-            return cls
-        else:
-            entry["exists"] = False
-            logger.debug(
-                "[registry] ensure_class_exists cls=%r -> exists=False code=%r msg=%r",
-                cls,
-                r.get("code"),
-                r.get("message"),
-            )
-    logger.debug("[registry] ensure_class_exists candidates=%r -> none found", candidates)
-    return ""
-
-
-async def resolve_output_fields(
-    obj_class: str,
-    output_fields: str,
-    strip: frozenset[str],
-    itop_request,  # noqa: ARG001 - reserved for future warm-miss describe fallback
-) -> tuple[str, frozenset[str]]:
-    """Resolve (output_fields, strip) into (fields_to_request, post_strip_set).
-
-    Three cases:
-
-    1. Explicit field list (not * or *+):
-       Send as-is. Return the full strip set for post-response application.
-       Fields in the strip set that the LLM explicitly requested are silently
-       removed from the result without an error.
-
-    2. Wildcard (* or *+), field cache WARM for obj_class:
-       Build an explicit field list from the cached set minus strip and
-       _SYNTHETIC_FIELDS. Send that explicit list. Return an empty post-strip
-       set -- nothing left to strip.
-
-    3. Wildcard (* or *+), field cache COLD for obj_class:
-       Send the wildcard as-is. Return the strip set for post-response
-       application. The response will seed the cache via apply_field_strip /
-       format_objects, so the next call hits case 2.
-
-    No extra describe request is fired -- the cache grows naturally from every
-    successful core/get response processed by apply_field_strip or format_objects.
-    """
-    logger.debug(
-        "[resolve_output_fields] cls=%r output_fields=%r strip=%r",
-        obj_class,
-        output_fields,
-        sorted(strip),
-    )
-    is_wildcard = output_fields in ("*", "*+")
-
-    if not is_wildcard or not strip:
-        logger.debug(
-            "[resolve_output_fields] passthrough (explicit or no strip) -> %r strip=%r",
-            output_fields,
-            sorted(strip),
-        )
-        return output_fields, strip
-
-    cached_fields = _registry_entry(obj_class)["fields"]
-
-    if cached_fields:
-        explicit = sorted(cached_fields - strip - _SYNTHETIC_FIELDS)
-        if obj_class in CLASSES_WITH_REF:
-            if "ref" in explicit:
-                explicit = ["ref"] + [f for f in explicit if f not in ("ref", "id")]
-        if not explicit:
-            logger.debug(
-                "[resolve_output_fields] cls=%r warm cache but strip removed all fields, fallback to wildcard",
-                obj_class,
-            )
-            return output_fields, strip
-        result_fields = ", ".join(explicit)
-        logger.debug(
-            "[resolve_output_fields] cls=%r WARM cache hit, explicit fields=%r post_strip=empty",
-            obj_class,
-            result_fields,
-        )
-        return result_fields, frozenset()
-
-    logger.debug(
-        "[resolve_output_fields] cls=%r COLD cache miss, using wildcard=%r with post_strip=%r",
-        obj_class,
-        output_fields,
-        sorted(strip),
-    )
-    return output_fields, strip
-
-
-def apply_field_strip(result: dict, strip: frozenset[str]) -> dict:
-    """Remove strip fields from every object in an iTop result dict.
-
-    Mutates result in-place and returns it.
-    Seeds _ITOP_CLASS_REGISTRY with the full field set BEFORE stripping, so
-    the warm-cache path in resolve_output_fields sees the complete inventory
-    on the next call.
-    """
-    if not strip:
-        return result
-    objects = result.get("objects")
-    if not objects:
-        return result
-    for obj_data in objects.values():
-        cls = obj_data.get("class", "")
-        fields = obj_data.get("fields")
-        if not isinstance(fields, dict):
-            continue
-        _seed_field_cache(cls, fields)
-        stripped = [key for key in strip if key in fields]
-        for key in strip:
-            fields.pop(key, None)
-        if stripped:
-            logger.debug(
-                "[apply_field_strip] cls=%r stripped fields=%r", cls, stripped
-            )
-        else:
-            logger.debug(
-                "[apply_field_strip] cls=%r no fields to strip from strip set=%r",
-                cls,
-                sorted(strip),
-            )
-    return result
-
-
-# ---------------------------------------------------------------------------
 # Classes that carry a human-readable "ref" ticket number in iTop
 # ---------------------------------------------------------------------------
 
@@ -384,17 +153,7 @@ def is_bare_number(key: Any) -> bool:
 
 
 def ensure_ref_field(obj_class: str, output_fields: str) -> str:
-    """Inject 'ref' and strip synthetic/redundant fields for ticket classes.
-
-    For classes in CLASSES_WITH_REF:
-    - 'ref' is injected at the front if not already present.
-    - 'id' is always removed (redundant once ref is present).
-    - Synthetic MCP-injected fields (e.g. 'link') are always removed because
-      they do not exist as iTop attributes and would cause API errors.
-
-    '*' and '*+' are passed through unchanged (iTop handles field expansion).
-    Non-ticket classes only have synthetic fields stripped.
-    """
+    """Inject 'ref' and strip synthetic/redundant fields for ticket classes."""
     if output_fields not in ("*", "*+"):
         fields = [f.strip() for f in output_fields.split(",") if f.strip()]
         fields = [f for f in fields if f not in _SYNTHETIC_FIELDS]
@@ -412,62 +171,110 @@ def ensure_ref_field(obj_class: str, output_fields: str) -> str:
     return ", ".join(fields)
 
 
-# ---------------------------------------------------------------------------
-# resolve_key lookup cache
-# ---------------------------------------------------------------------------
-# Cache shape: { (obj_class, ref): {"class": str, "id": int, "ts": float} }
-# Eviction is lazy: expired entries are removed at the start of each
-# resolve_key call. Set RESOLVE_KEY_CACHE_TTL=0 to disable caching.
+async def ensure_class_exists(candidates: list[str], itop_request) -> str:
+    """Return the first class in candidates that exists on the iTop server."""
+    for cls in candidates:
+        entry = _registry_entry(cls)
+        if entry["exists"] is True:
+            logger.debug("[registry] ensure_class_exists cls=%r -> cached True", cls)
+            return cls
+        if entry["exists"] is False:
+            logger.debug("[registry] ensure_class_exists cls=%r -> cached False, skip", cls)
+            continue
+        r = await itop_request({
+            "operation": "core/get",
+            "class": cls,
+            "key": f"SELECT {cls}",
+            "output_fields": "id",
+            "limit": "1",
+        })
+        if r.get("code") == 0:
+            entry["exists"] = True
+            for obj_data in (r.get("objects") or {}).values():
+                seed_field_cache(cls, obj_data.get("fields") or {})
+            logger.debug("[registry] ensure_class_exists cls=%r -> exists=True (probed)", cls)
+            return cls
+        else:
+            entry["exists"] = False
+            logger.debug(
+                "[registry] ensure_class_exists cls=%r -> exists=False code=%r msg=%r",
+                cls, r.get("code"), r.get("message"),
+            )
+    logger.debug("[registry] ensure_class_exists candidates=%r -> none found", candidates)
+    return ""
 
-_RESOLVE_KEY_CACHE: dict[tuple[str, str], dict] = {}
 
-
-def _cache_cleanup() -> None:
-    """Remove all cache entries whose TTL has expired."""
-    if RESOLVE_KEY_CACHE_TTL <= 0:
-        return
-    now = time.monotonic()
-    expired = [
-        k for k, v in _RESOLVE_KEY_CACHE.items()
-        if now - v["ts"] > RESOLVE_KEY_CACHE_TTL
-    ]
-    for k in expired:
-        del _RESOLVE_KEY_CACHE[k]
-    if expired:
-        logger.debug("[resolve_key_cache] evicted %d expired entry/entries", len(expired))
-
-
-def _cache_get(obj_class: str, ref: str) -> tuple[str, int] | None:
-    """Return (resolved_class, resolved_id) from cache, or None on miss/expiry."""
-    if RESOLVE_KEY_CACHE_TTL <= 0:
-        return None
-    entry = _RESOLVE_KEY_CACHE.get((obj_class, ref))
-    if entry is None:
-        return None
-    if time.monotonic() - entry["ts"] > RESOLVE_KEY_CACHE_TTL:
-        del _RESOLVE_KEY_CACHE[(obj_class, ref)]
-        logger.debug("[resolve_key_cache] expired entry for class=%r ref=%r", obj_class, ref)
-        return None
+async def resolve_output_fields(
+    obj_class: str,
+    output_fields: str,
+    strip: frozenset[str],
+    itop_request,
+) -> tuple[str, frozenset[str]]:
+    """Resolve (output_fields, strip) into (fields_to_request, post_strip_set)."""
     logger.debug(
-        "[resolve_key_cache] hit class=%r ref=%r -> resolved_class=%r id=%r",
-        obj_class, ref, entry["class"], entry["id"],
+        "[resolve_output_fields] cls=%r output_fields=%r strip=%r",
+        obj_class, output_fields, sorted(strip),
     )
-    return entry["class"], entry["id"]
+    is_wildcard = output_fields in ("*", "*+")
 
+    if not is_wildcard or not strip:
+        logger.debug(
+            "[resolve_output_fields] passthrough (explicit or no strip) -> %r strip=%r",
+            output_fields, sorted(strip),
+        )
+        return output_fields, strip
 
-def _cache_set(obj_class: str, ref: str, resolved_class: str, resolved_id: int) -> None:
-    """Store a resolved (class, id) pair in the cache."""
-    if RESOLVE_KEY_CACHE_TTL <= 0:
-        return
-    _RESOLVE_KEY_CACHE[(obj_class, ref)] = {
-        "class": resolved_class,
-        "id": resolved_id,
-        "ts": time.monotonic(),
-    }
+    cached_fields = registry_get_fields(obj_class)
+
+    if cached_fields:
+        explicit = sorted(cached_fields - strip - _SYNTHETIC_FIELDS)
+        if obj_class in CLASSES_WITH_REF:
+            if "ref" in explicit:
+                explicit = ["ref"] + [f for f in explicit if f not in ("ref", "id")]
+        if not explicit:
+            logger.debug(
+                "[resolve_output_fields] cls=%r warm cache but strip removed all fields, fallback to wildcard",
+                obj_class,
+            )
+            return output_fields, strip
+        result_fields = ", ".join(explicit)
+        logger.debug(
+            "[resolve_output_fields] cls=%r WARM cache hit, explicit fields=%r post_strip=empty",
+            obj_class, result_fields,
+        )
+        return result_fields, frozenset()
+
     logger.debug(
-        "[resolve_key_cache] stored class=%r ref=%r -> resolved_class=%r id=%r",
-        obj_class, ref, resolved_class, resolved_id,
+        "[resolve_output_fields] cls=%r COLD cache miss, using wildcard=%r with post_strip=%r",
+        obj_class, output_fields, sorted(strip),
     )
+    return output_fields, strip
+
+
+def apply_field_strip(result: dict, strip: frozenset[str]) -> dict:
+    """Remove strip fields from every object in an iTop result dict."""
+    if not strip:
+        return result
+    objects = result.get("objects")
+    if not objects:
+        return result
+    for obj_data in objects.values():
+        cls = obj_data.get("class", "")
+        fields = obj_data.get("fields")
+        if not isinstance(fields, dict):
+            continue
+        seed_field_cache(cls, fields)
+        stripped = [key for key in strip if key in fields]
+        for key in strip:
+            fields.pop(key, None)
+        if stripped:
+            logger.debug("[apply_field_strip] cls=%r stripped fields=%r", cls, stripped)
+        else:
+            logger.debug(
+                "[apply_field_strip] cls=%r no fields to strip from strip set=%r",
+                cls, sorted(strip),
+            )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -482,12 +289,8 @@ async def resolve_ref_class_by_ref_part(
     """Resolve a ref or bare number to (resolved_class, numeric_id, ref_string).
 
     Builds an OQL query against obj_class using a suffix LIKE match on the
-    ref field. obj_class must be a class that carries a ref field (i.e. a
-    member of CLASSES_WITH_REF, including the abstract Ticket base class).
-
-    Example:
-        resolve_ref_class_by_ref_part("Ticket", "16271", ...) ->
-            ("Incident", 15525, "I-016271")
+    ref field. obj_class must be a member of CLASSES_WITH_REF (including the
+    abstract Ticket base class which carries a ref field in iTop).
 
     Returns (None, None, None) when no matching object is found.
     """
@@ -506,9 +309,7 @@ async def resolve_ref_class_by_ref_part(
     if result.get("code", -1) != 0:
         logger.debug(
             "[resolve_ref_class_by_ref_part] key=%r -> iTop error code=%r msg=%r",
-            key,
-            result.get("code"),
-            result.get("message"),
+            key, result.get("code"), result.get("message"),
         )
         return None, None, None
     for obj_data in (result.get("objects") or {}).values():
@@ -528,10 +329,6 @@ async def resolve_ref_class_by_ref_part(
     return None, None, None
 
 
-# ---------------------------------------------------------------------------
-# Primary identifier resolver
-# ---------------------------------------------------------------------------
-
 async def resolve_key(
     obj_class: str,
     ref: str | None,
@@ -539,41 +336,21 @@ async def resolve_key(
 ) -> tuple[str, Any]:
     """Resolve an object identifier to (resolved_class, numeric_key).
 
-    Returns a tuple so callers can use the real iTop class discovered during
-    resolution (e.g. Incident instead of Ticket).
-
-    For classes in CLASSES_WITH_REF (ticket-like objects):
-      - ref is matched via a suffix OQL on the ref field using
-        resolve_ref_class_by_ref_part. Both fully-formed refs ("I-016271")
-        and bare numbers ("16271" or 16271) are accepted.
-      - A lookup cache with TTL (RESOLVE_KEY_CACHE_TTL seconds) avoids
-        repeated iTop round-trips for the same identifier.
-      - Fallback: if the lookup yields nothing, int(ref) is tried as a
-        raw DB id with the class unchanged.
-
-    For all other classes:
-      - ref is passed directly as the key in a core/get call with
-        output_fields=id. This accepts OQL strings, JSON criteria strings,
-        or bare numeric ids.
-      - The real class is read from the response object (iTop may return a
-        concrete subclass even when querying a base class).
-      - A lookup cache with the same TTL applies.
-      - Fallback: int(ref) or raw ref string.
+    For CLASSES_WITH_REF: ref is matched via suffix OQL on the ref field.
+    For all other classes: ref is passed directly as key in a core/get call.
+    A TTL cache avoids repeated iTop round-trips for the same identifier.
+    Fallback: int(ref) or raw ref string.
     """
-    # Lazy TTL cleanup on every call.
-    _cache_cleanup()
+    cache_cleanup()
 
     ref_str = str(ref).strip() if ref is not None else ""
-
     if not ref_str:
         return obj_class, ref
 
-    # -- Cache lookup --------------------------------------------------------
-    cached = _cache_get(obj_class, ref_str)
+    cached = cache_get(obj_class, ref_str)
     if cached is not None:
         return cached[0], cached[1]
 
-    # -- CLASSES_WITH_REF branch ---------------------------------------------
     if obj_class in CLASSES_WITH_REF:
         found_class, found_id, found_ref = await resolve_ref_class_by_ref_part(
             obj_class, ref_str, itop_request
@@ -583,10 +360,8 @@ async def resolve_key(
                 "[resolve_key] ref=%r -> class=%r key=%r ref=%r",
                 ref_str, found_class, found_id, found_ref,
             )
-            _cache_set(obj_class, ref_str, found_class, found_id)
+            cache_set(obj_class, ref_str, found_class, found_id)
             return found_class, found_id
-
-    # -- Non-ref class branch ------------------------------------------------
     else:
         result = await itop_request({
             "operation": "core/get",
@@ -605,12 +380,11 @@ async def resolve_key(
                         "[resolve_key] key=%r -> class=%r id=%r",
                         ref_str, resolved_class, numeric_id,
                     )
-                    _cache_set(obj_class, ref_str, resolved_class, numeric_id)
+                    cache_set(obj_class, ref_str, resolved_class, numeric_id)
                     return resolved_class, numeric_id
                 except (ValueError, TypeError):
                     pass
 
-    # -- Fallback ------------------------------------------------------------
     try:
         numeric = int(ref_str)
         logger.debug(
@@ -636,16 +410,7 @@ async def fetch_image_counts(
     obj_id: str | int,
     itop_request,
 ) -> tuple[int, int]:
-    """Return (attachment_count, inline_image_count) for a ticket object.
-
-    Both queries request only 'id' -- no contents blob is downloaded.
-    Attachment count covers ALL Attachment records regardless of MIME type
-    because mimetype is embedded in the contents blob and cannot be filtered
-    via OQL without fetching it. InlineImage records are always images.
-
-    Returns (0, 0) silently on any iTop error so callers are never blocked.
-    Only called for classes in CLASSES_WITH_REF.
-    """
+    """Return (attachment_count, inline_image_count) for a ticket object."""
     oid = str(obj_id)
 
     att_result = await itop_request({
@@ -746,17 +511,10 @@ def extract_objects(result: dict) -> list[dict]:
 def format_objects(result: dict) -> str:
     """Format iTop response objects into readable string.
 
-    Side effect: seeds _ITOP_CLASS_REGISTRY with the field inventory for
-    every class seen, so resolve_output_fields hits the warm-cache path on
-    subsequent calls for the same class.
-
-    HTML tags and entities are stripped from all string field values before
-    rendering, removing noise from iTop's rich-text fields.
-
-    Fields whose name starts with '_' are treated as synthetic annotations
-    injected by the caller (e.g. '_images'). They are rendered at the end of
-    each object block with a bracketed label instead of the raw underscore
-    name, and are never passed to iTop.
+    Seeds the field registry from every response so resolve_output_fields
+    hits the warm-cache path on subsequent calls for the same class.
+    HTML is stripped from all string field values.
+    Fields starting with '_' are rendered as bracketed synthetic annotations.
     """
     if result.get("code", -1) != 0:
         return f"Error (code {result.get('code')}): {str_or(result, 'message', 'Unknown error')}"
@@ -768,7 +526,7 @@ def format_objects(result: dict) -> str:
         cls = str_or(obj_data, "class", "?")
         oid = str_or(obj_data, "key", "?")
         fields = obj_data.get("fields", {}) or {}
-        _seed_field_cache(cls, fields)
+        seed_field_cache(cls, fields)
         ref = fields.get("ref")
         label = ref if ref else oid
         lines.append(f"\n--- {cls}::{label} ---")
@@ -789,7 +547,6 @@ def format_objects(result: dict) -> str:
                 fv = strip_html_recursive(fv)
                 fv = json.dumps(fv, indent=2, ensure_ascii=False)
             lines.append(f"  {fn}: {fv}")
-        # Render synthetic annotations last, with a bracketed label.
         for fn, fv in synthetic.items():
             display_name = fn.lstrip("_")
             lines.append(f"  [{display_name}] {fv}")
