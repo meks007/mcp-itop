@@ -17,7 +17,6 @@ from helpers import (
     parse_key,
     resolve_key,
     resolve_output_fields,
-    resolve_ticket_ref,
     str_or,
     CLASSES_WITH_REF,
 )
@@ -49,8 +48,7 @@ def register(mcp, itop_request):
         disclose private_log unless the user explicitly requests it. Batch same-class
         lookups with OQL rather than calling once per object. Use describe class to get
         output fields. Do not supply empty output fields."""
-        # Resolve bare numbers and unknown class via Ticket base class lookup
-        obj_class, resolved_key = await resolve_ticket_ref(obj_class, key, itop_request)
+        obj_class, resolved_key = await resolve_key(obj_class, key, itop_request)
 
         strip = frozenset() if full else _LEAN_STRIP
         fields_to_request, post_strip = await resolve_output_fields(
@@ -158,9 +156,8 @@ def register(mcp, itop_request):
                 "  ev_pending  - put ticket on hold"
             )
 
-        obj_class, resolved = await resolve_key(
-            obj_class, ticket_ref or None, key or None, itop_request
-        )
+        ref = str(ticket_ref or key or "").strip() or None
+        obj_class, resolved = await resolve_key(obj_class, ref, itop_request)
 
         result = await itop_request({
             "operation": "core/update",
@@ -186,9 +183,8 @@ def register(mcp, itop_request):
 
         It runs in simulation mode by default and is retained only for controlled
         dry-run checks."""
-        obj_class, resolved = await resolve_key(
-            obj_class, ticket_ref or None, key or None, itop_request
-        )
+        ref = str(ticket_ref or key or "").strip() or None
+        obj_class, resolved = await resolve_key(obj_class, ref, itop_request)
 
         result = await itop_request({
             "operation": "core/delete",
@@ -226,9 +222,8 @@ def register(mcp, itop_request):
                 'e.g. fields={"solution": "..."}. Resolving is the final step.'
             )
 
-        obj_class, resolved = await resolve_key(
-            obj_class, ticket_ref or None, key or None, itop_request
-        )
+        ref = str(ticket_ref or key or "").strip() or None
+        obj_class, resolved = await resolve_key(obj_class, ref, itop_request)
 
         result = await itop_request({
             "operation": "core/apply_stimulus",
