@@ -89,6 +89,11 @@ RESOLVE_KEY_CACHE_TTL = int(os.getenv("RESOLVE_KEY_CACHE_TTL", "86400"))
 
 # -- Image normalization --------------------------------------------------
 # Maximum size in bytes for a stored image. Images exceeding this limit are
-# scaled down proportionally (75% steps) until they fit.
-# Default: 1 MB. Set to 0 to disable resizing entirely.
+# first compressed via quality reduction, then scaled down if still too large.
+# Default: 1 MB. Set to 0 to disable size capping entirely.
 IMAGE_MAX_BYTES: int = int(os.getenv("IMAGE_MAX_BYTES", str(1 * 1024 * 1024)))
+
+# Starting JPEG quality (1-95). Reduced in steps (75, 60, 45, 30) when the
+# encoded size exceeds IMAGE_MAX_BYTES before falling back to downscaling.
+# Default: 85.
+IMAGE_JPEG_QUALITY: int = max(1, min(95, int(os.getenv("IMAGE_JPEG_QUALITY", "85"))))
