@@ -30,6 +30,14 @@ MCP_DEBUG = os.getenv("MCP_DEBUG", "false").lower() in ("true", "1", "yes")
 # MCP_DEBUG is also enabled.  Auth secrets in headers are always redacted.
 MCP_DEBUG_HEADERS = os.getenv("MCP_DEBUG_HEADERS", "false").lower() in ("true", "1", "yes")
 
+# -- SSE transport debug flag ---------------------------------------------
+# Set MCP_DEBUG_SSE=true to additionally log raw SSE chunks emitted by
+# sse_starlette. Only takes effect when MCP_DEBUG is also enabled.
+# WARNING: when base64-encoded data is transmitted these log lines can be
+# extremely large and make the debug output essentially unreadable.
+# Leave this off unless you need low-level SSE transport debugging.
+MCP_DEBUG_SSE = os.getenv("MCP_DEBUG_SSE", "false").lower() in ("true", "1", "yes")
+
 # -- Logging --------------------------------------------------------------
 logging.basicConfig(
     level=logging.DEBUG if MCP_DEBUG else logging.INFO,
@@ -39,26 +47,45 @@ logging.basicConfig(
 logger = logging.getLogger("mcp-itop")
 
 if MCP_DEBUG:
-    # Enable DEBUG on the SSE and streamable-http transport loggers so that
-    # SSE chunk output (sse_starlette) and MCP session lifecycle events
-    # (mcp.server.streamable_http) appear in the log alongside our own
-    # debug lines. Without this they stay at WARNING even when basicConfig
-    # sets the root logger to DEBUG, because these libraries set their own
-    # logger level or rely on propagation being cut off upstream.
+    # MCP session lifecycle loggers -- always enabled together with MCP_DEBUG
+    # so that streamable-http session events appear alongside our own lines.
     for _lib_logger in (
-        "sse_starlette",
-        "sse_starlette.sse",
         "mcp.server.streamable_http",
         "mcp.server",
     ):
         logging.getLogger(_lib_logger).setLevel(logging.DEBUG)
 
+    # SSE chunk loggers -- opt-in only.
+    # sse_starlette logs every raw SSE chunk at DEBUG level. When the server
+    # sends base64-encoded attachments this produces extremely large log lines
+    # that drown out everything else. Keep them at WARNING by default and only
+    # promote to DEBUG when MCP_DEBUG_SSE is explicitly requested.
+    if MCP_DEBUG_SSE:
+        for _lib_logger in (
+            "sse_starlette",
+            "sse_starlette.sse",
+        ):
+            logging.getLogger(_lib_logger).setLevel(logging.DEBUG)
+        logger.debug(
+            "MCP_DEBUG_SSE is enabled - raw SSE chunks will be logged "
+            "(may produce very large lines for b64 payloads)."
+        )
+    else:
+        for _lib_logger in (
+            "sse_starlette",
+            "sse_starlette.sse",
+        ):
+            logging.getLogger(_lib_logger).setLevel(logging.WARNING)
+        logger.debug(
+            "SSE chunk logging suppressed (MCP_DEBUG_SSE not set). "
+            "Set MCP_DEBUG_SSE=true to enable."
+        )
+
     logger.debug(
         "MCP_DEBUG is enabled - request/response payloads will be logged (secrets redacted)."
     )
     logger.debug(
-        "SSE/streamable-http transport loggers set to DEBUG: "
-        "sse_starlette, mcp.server.streamable_http"
+        "Transport loggers set to DEBUG: mcp.server.streamable_http, mcp.server"
     )
 
     if MCP_DEBUG_HEADERS:
