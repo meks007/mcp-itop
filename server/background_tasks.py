@@ -7,8 +7,8 @@ that needs periodic maintenance registers its cleanup function here so there
 is exactly one interval knob in the environment.
 
 Registered cleanup activities:
-  - cache_cleanup()                    : evict stale resolve_key cache entries
-  - evict_stale_token_cache()          : evict expired token validation entries
+  - key_cache.cleanup()                : evict stale resolve_key cache entries
+  - token_cache.evict_stale()          : evict expired token validation entries
   - purge_expired_images()             : delete expired attachment_sessions rows
   - purge_expired_inline_image_refs()  : delete expired inline_image_refs rows
 
@@ -20,8 +20,7 @@ from __future__ import annotations
 
 import asyncio
 
-from auth import evict_stale_token_cache
-from cache import cache_cleanup
+from cache import key_cache, token_cache
 from attachment_store import purge_expired_images, purge_expired_inline_image_refs
 from config import CLEANUP_INTERVAL, logger
 
@@ -41,14 +40,22 @@ async def housekeeping_loop() -> None:
         logger.debug("[housekeeping] cycle start")
 
         try:
-            cache_cleanup()
+            removed = key_cache.cleanup()
+            if removed:
+                logger.debug(
+                    "[housekeeping] key_cache.cleanup: evicted %d entry(s)", removed
+                )
         except Exception as exc:
-            logger.warning("[housekeeping] cache_cleanup failed: %s", exc)
+            logger.warning("[housekeeping] key_cache.cleanup failed: %s", exc)
 
         try:
-            await evict_stale_token_cache()
+            removed = await token_cache.evict_stale()
+            if removed:
+                logger.debug(
+                    "[housekeeping] token_cache.evict_stale: removed %d entry(s)", removed
+                )
         except Exception as exc:
-            logger.warning("[housekeeping] evict_stale_token_cache failed: %s", exc)
+            logger.warning("[housekeeping] token_cache.evict_stale failed: %s", exc)
 
         try:
             removed = purge_expired_images()
