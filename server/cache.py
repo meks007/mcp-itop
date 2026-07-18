@@ -120,15 +120,22 @@ class TTLCache(Cache[K, V]):
                 logger.debug("[%s] miss key=%r", self._name, key)
             return None
         now = time.monotonic()
-        if now - entry.ts > self._ttl:
+        age = now - entry.ts
+        if age > self._ttl:
             del self._store[key]
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug("[%s] miss (expired) key=%r", self._name, key)
             return None
         if self._sliding:
             entry.ts = now
+            remaining = self._ttl
+        else:
+            remaining = self._ttl - age
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("[%s] hit key=%r", self._name, key)
+            logger.debug(
+                "[%s] hit key=%r ttl_remaining=%.0fs",
+                self._name, key, remaining,
+            )
         return entry.value
 
     def set(self, key: K, value: V) -> None:
@@ -338,7 +345,7 @@ class TokenValidationCache(TTLCache[str, TokenEntry]):
           2. Slow path: acquire per-key lock, re-check, then call probe_fn.
         """
         # Fast path -- no lock needed for a plain dict read.
-        # TTLCache.get() handles sliding reset and logs hit/miss.
+        # TTLCache.get() handles sliding reset and logs hit/miss + ttl_remaining.
         entry = self.get(token_hash)
         if entry is not None:
             return entry.valid
@@ -363,7 +370,8 @@ class TokenValidationCache(TTLCache[str, TokenEntry]):
 
             self.set(token_hash, TokenEntry(valid=valid, last_seen=time.monotonic()))
             logger.debug(
-                "[token_cache] validated: valid=%s hash_prefix=%s", valid, token_hash[:8]
+                "[token_cache] validated: valid=%s hash_prefix=%s ttl=%.0fs",
+                valid, token_hash[:8], self._ttl,
             )
             return valid
 
