@@ -9,6 +9,10 @@ set_client(c)     Bind an ItopClient to the current async context.
 Both are called by ItopMiddleware (auth.py) so that every request handler
 and helper function can reach the client without an explicit parameter.
 
+The bearer token is read from the current request context via
+auth.get_bearer_token() inside itop_request() -- it is never passed as a
+parameter through ItopClient or any caller.
+
 ItopClient.get_raw          -- thin core/get wrapper, returns the raw iTop dict.
 ItopClient.get              -- same as get_raw but applies _LEAN_STRIP when full=False.
 ItopClient.get_class_fields -- field discovery for a class, stripped by _LEAN_STRIP.
@@ -95,19 +99,23 @@ def _redact_headers(headers: httpx.Headers) -> dict:
 # Low-level request function
 # ---------------------------------------------------------------------------
 
-async def itop_request(operation: dict, get_bearer_token: Callable[[], str]) -> dict:
+async def itop_request(operation: dict) -> dict:
     """Send a raw operation dict to the iTop REST/JSON API.
+
+    The bearer token is read from the current request context via
+    auth.get_bearer_token(). No token parameter is accepted or forwarded.
 
     When iTop returns code==1 (UNAUTH), the token is immediately evicted
     from the validation cache so the next request is forced to re-validate.
 
     Args:
-        operation:        iTop operation dict.
-        get_bearer_token: Zero-argument callable returning the bearer token.
+        operation: iTop operation dict.
     """
     if not ITOP_URL:
         raise ValueError("ITOP_URL is not configured. Set it in .env or environment.")
 
+    # Lazy import to avoid the circular dependency (client <- auth <- client).
+    from auth import get_bearer_token  # noqa: PLC0415
     token = get_bearer_token()
 
     url = ITOP_URL + "/webservices/rest.php"
@@ -218,22 +226,22 @@ def set_client(client: "ItopClient") -> Token:
 class ItopClient:
     """High-level async client for the iTop REST/JSON API.
 
+    The bearer token is resolved on every request from the current async
+    context via auth.get_bearer_token() -- it is not accepted as a
+    constructor parameter.
+
     Args:
-        get_bearer_token: Zero-argument callable returning the current bearer
-                          token string for every outgoing request.
-        on_request:       Optional async hook called at the start of every
-                          request() invocation. Receives the ItopClient
-                          instance. Used by server.py to trigger preheat_once()
-                          without monkey-patching.
+        on_request: Optional async hook called at the start of every
+                    request() invocation. Receives the ItopClient instance.
+                    Used by server.py to trigger preheat_once() without
+                    monkey-patching.
     """
 
     def __init__(
         self,
-        get_bearer_token: Callable[[], str],
         *,
         on_request: Callable[["ItopClient"], Awaitable[None]] | None = None,
     ) -> None:
-        self._get_bearer_token = get_bearer_token
         self._on_request = on_request
 
     # ------------------------------------------------------------------
@@ -247,7 +255,7 @@ class ItopClient:
         """
         if self._on_request is not None:
             await self._on_request(self)
-        return await itop_request(op, self._get_bearer_token)
+        return await itop_request(op)
 
     # ------------------------------------------------------------------
     # core/get -- raw
@@ -318,12 +326,12 @@ class ItopClient:
         """
         if full and fields not in ("*", "*+"):
             fields = "*"
-            
+
         result = await self.get_raw(cls, key, fields=fields, limit=limit, page=page)
-        
+
         if not full:
             apply_field_strip(result, _LEAN_STRIP)
-            
+
         return result
 
     # ------------------------------------------------------------------
