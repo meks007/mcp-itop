@@ -13,7 +13,7 @@ Module layout:
   auth.py               - ItopMiddleware, get_bearer_token(), token validation
   client.py             - iTop REST/JSON HTTP client, ItopClient, get_client()
   helpers/              - shared formatting and parsing utilities
-  db/                   - backend-agnostic database layer (init_db, get_db)
+  db/                   - backend-agnostic database layer (set_db, get_db)
   attachment_store/     - SQLite store for image URIs and inline image refs
   background_tasks.py   - central housekeeping asyncio loop
   tools/
@@ -68,7 +68,7 @@ mcp = FastMCP(
 )
 
 # ---------------------------------------------------------------------------
-# ItopClient
+# ItopClient -- process-global, token resolved per-request via ContextVar
 # ---------------------------------------------------------------------------
 
 # Single shared ItopClient. Bearer token is resolved lazily via ContextVar on
@@ -172,10 +172,17 @@ async def _serve():
     from background_tasks import housekeeping_loop
     import db
     import attachment_store
+    from db.sqlite import SqliteDbBackend
+    from attachment_store.db import IMAGE_STORE_DB_PATH
 
-    # Initialise the database backend first so that attachment_store can call
-    # get_db() when it registers its schema at import / init time.
-    db.init_db()
+    # Construct and register the db backend -- mirrors how ItopClient is wired.
+    # All domain modules call db.get_db(); none import the backend type directly.
+    db_backend = SqliteDbBackend(IMAGE_STORE_DB_PATH)
+    db_backend.connect()
+    db.set_db(db_backend)
+    logger.info("[server] db backend ready: %s", IMAGE_STORE_DB_PATH)
+
+    # Let attachment_store register its schema against the now-live backend.
     attachment_store.init_db()
 
     config = uvicorn.Config(
