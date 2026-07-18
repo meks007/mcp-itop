@@ -69,7 +69,6 @@ from cache import (
     registry_get_meta,
     registry_set_meta,
     seed_field_cache,
-    get_class_fields,
     _registry_entry,
 )
 
@@ -95,7 +94,7 @@ __all__ = [
     "format_and_cache", "format_table", "format_duration",
     # cache pass-throughs
     "registry_get_fields", "registry_get_meta", "registry_set_meta",
-    "seed_field_cache", "get_class_fields", "_registry_entry",
+    "seed_field_cache", "_registry_entry",
     # client context
     "get_client", "set_client",
 ]
