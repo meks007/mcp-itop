@@ -27,6 +27,11 @@ register(mcp, client)
                              then read the cache. If still empty the ticket
                              has no inline images.
 
+            The inline_image_refs cache is keyed per token (SHA-256 digest).
+            A token that did not originally fetch the ticket will always miss
+            and be forced to re-fetch, so refs never cross permission
+            boundaries regardless of TTL.
+
         itop_get_ticket_attachments(obj_class, ticket_ref, key)
             List all non-image file attachments for a ticket.
             Returns metadata and browser download links only.
@@ -48,7 +53,8 @@ Attachment  : may be any MIME type; mimetype is checked before including.
               as a BLOB in the attachment store.
 InlineImage : resolved from <img data-img-id data-img-secret> tags found in
               ticket HTML fields after format_and_cache() has run. Secret and
-              id are read from the inline_image_refs SQLite cache.
+              id are read from the inline_image_refs SQLite cache, scoped to
+              the caller's token hash.
 """
 
 from __future__ import annotations
@@ -159,6 +165,10 @@ def register(mcp, client: ItopClient):
             obj_class, ticket_ref, key,
         )
 
+        # Resolve the token once. All cache reads/writes use this token so
+        # that refs are never shared across token boundaries.
+        token = get_bearer_token()
+
         ref = coerce_ref(ticket_ref, key)
         obj_class, resolved = await resolve_key(obj_class, ref)
         logger.debug(
@@ -226,7 +236,8 @@ def register(mcp, client: ItopClient):
             )
 
         # -- InlineImage via HTML-parsed refs cache --
-        inline_refs = read_inline_image_refs(obj_class, obj_id)
+        # Pass token so only refs fetched by this token are returned.
+        inline_refs = read_inline_image_refs(obj_class, obj_id, token=token)
         logger.debug(
             "[attachments] itop_get_ticket_images: inline_image_refs cache %s for cls=%r id=%r",
             "hit" if inline_refs is not None else "miss",
@@ -239,11 +250,11 @@ def register(mcp, client: ItopClient):
                 " to populate inline image ref cache",
                 obj_class, obj_id,
             )
-            await _fetch_and_cache_ticket(obj_class, obj_id, client)
-            inline_refs = read_inline_image_refs(obj_class, obj_id)
+            await _fetch_and_cache_ticket(obj_class, obj_id, client, token=token)
+            inline_refs = read_inline_image_refs(obj_class, obj_id, token=token)
             if inline_refs is None:
                 inline_refs = []
-                write_inline_image_refs(obj_class, obj_id, [])
+                write_inline_image_refs(obj_class, obj_id, [], token=token)
 
         logger.debug(
             "[attachments] itop_get_ticket_images: %d inline image ref(s) for cls=%r id=%r",
@@ -353,7 +364,6 @@ def register(mcp, client: ItopClient):
             for img in images
         ]
         try:
-            token = get_bearer_token()
             token_preview = (
                 (token[:8] + "...") if token and len(token) > 8 else (token or "(empty)")
             )
