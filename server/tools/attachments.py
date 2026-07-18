@@ -149,11 +149,12 @@ def register(mcp, client: ItopClient):
         ticket_ref: str = "",
         key: str = "",
     ) -> str:
-        """List image attachments for an iTop ticket.
-        Use this tool to populate the resource Download ticket images.
-        Prefer ticket_ref for tickets; use key for a numeric ID or OQL query.
-        After this tool returns, query the resource Download ticket images
-        to retrieve the actual image binaries."""
+        """Fetch and store all image attachments for an iTop ticket (file attachments
+        and inline images). Downloads binaries, deduplicates by content hash, and
+        writes them to the session image store. Returns the image count.
+        After this tool returns, read the resource Download ticket images
+        to retrieve all image binaries at once.
+        Prefer ticket_ref; use key for a numeric ID or OQL query."""
         logger.debug(
             "[attachments] itop_get_ticket_images: called obj_class=%s ticket_ref=%r key=%r",
             obj_class, ticket_ref, key,
