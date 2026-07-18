@@ -36,7 +36,7 @@ import uvicorn
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.debug import DebugTokenVerifier
 
-from auth import ItopMiddleware, _validate_itop_token, get_bearer_token
+from auth import ItopMiddleware, _validate_itop_token
 from client import ItopClient
 from config import MCP_DEBUG, MCP_DEBUG_HEADERS, logger
 
