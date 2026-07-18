@@ -57,10 +57,10 @@ _HTML_ENTITY_RE = re.compile(r"&(?:#\d+|#x[\da-fA-F]+|[a-zA-Z]+);")
 # Matches <img> tags that carry data-img-id and data-img-secret attributes.
 # Both attributes may appear in any order and the tag may have other attrs.
 _INLINE_IMG_RE = re.compile(
-    r"<img\b[^>]*\bdata-img-id=[\"']?(\d+)[\"']?"
-    r"[^>]*\bdata-img-secret=[\"']?([0-9a-fA-F]+)[\"']?[^>]*>|"
-    r"<img\b[^>]*\bdata-img-secret=[\"']?([0-9a-fA-F]+)[\"']?"
-    r"[^>]*\bdata-img-id=[\"']?(\d+)[\"']?[^>]*>",
+    r'<img\b[^>]*\bdata-img-id=["\']?(\d+)["\']?'
+    r'[^>]*\bdata-img-secret=["\']?([0-9a-fA-F]+)["\']?[^>]*>|'
+    r'<img\b[^>]*\bdata-img-secret=["\']?([0-9a-fA-F]+)["\']?'
+    r'[^>]*\bdata-img-id=["\']?(\d+)["\']?[^>]*>',
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -112,8 +112,10 @@ def strip_html_recursive(obj: Any) -> Any:
 def parse_objects(result: dict) -> dict[str, list[dict]]:
     """Extract inline image refs from all string fields across all objects.
 
-    Scans every string field in result['objects'] for <img> tags that carry
-    both data-img-id and data-img-secret attributes. Returns a mapping of
+    Scans every string value in result['objects'] -- including strings nested
+    inside dicts and lists (e.g. private_log.entries[].message_html) -- for
+    <img> tags that carry both data-img-id and data-img-secret attributes.
+    Returns a mapping of
     '{obj_class}::{obj_id}' -> [{'id': str, 'secret': str}, ...].
 
     The field values are NOT modified; stripping happens in format_objects.
@@ -134,8 +136,18 @@ def parse_objects(result: dict) -> dict[str, list[dict]]:
         seen_ids: set[str] = set()
         found: list[dict] = []
 
-        fields = obj_data.get("fields") or {}
-        for fv in fields.values():
+        # Use an explicit stack to descend into nested dicts and lists so
+        # that strings buried in e.g. private_log.entries[].message_html
+        # are scanned. No helper function is used; traversal is inline.
+        stack = list((obj_data.get("fields") or {}).values())
+        while stack:
+            fv = stack.pop()
+            if isinstance(fv, dict):
+                stack.extend(fv.values())
+                continue
+            if isinstance(fv, list):
+                stack.extend(fv)
+                continue
             if not isinstance(fv, str) or "data-img-id" not in fv:
                 continue
             for m in _INLINE_IMG_RE.finditer(fv):
@@ -584,8 +596,9 @@ def format_objects(result: dict) -> tuple[str, dict[str, list[dict]]]:
               as returned by parse_objects(). Empty dict when no refs found.
 
     Processing order:
-      1. parse_objects() scans all string fields for data-img-id/data-img-secret
-         <img> tags and collects refs WITHOUT modifying field values.
+      1. parse_objects() scans all string values (including nested dicts/lists)
+         for data-img-id/data-img-secret <img> tags and collects refs WITHOUT
+         modifying field values.
       2. HTML stripping then removes all tags (including <img>) from fields.
       3. The formatted text is assembled from the stripped values.
 
