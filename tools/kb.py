@@ -4,6 +4,7 @@ Knowledge base tools: search, get article, list categories.
 
 from __future__ import annotations
 
+from client import itop_core_get
 from helpers import (
     ensure_class_exists,
     extract_objects,
@@ -28,12 +29,12 @@ _KB_CAT_MAP = {"KBEntry": "KBCategory", "FAQ": "FAQCategory"}
 _KB_TEXT_FIELD_CANDIDATES = ["description", "summary", "solution", "document"]
 
 
-def register(mcp, itop_request):
+def register(mcp, itop_request_fn):
     """Register all KB tools on the given mcp instance."""
 
     async def _kb_class() -> str:
         """Return the confirmed KB article class, probing once if needed."""
-        return await ensure_class_exists(_KB_CANDIDATES, itop_request)
+        return await ensure_class_exists(_KB_CANDIDATES, itop_request_fn)
 
     async def _kb_text_field(kb_cls: str) -> str:
         """Return the confirmed text body field for kb_cls.
@@ -66,13 +67,13 @@ def register(mcp, itop_request):
         # We must use a real request here; we accept the false-positive risk
         # because there is no better option for an empty class.
         for field in _KB_TEXT_FIELD_CANDIDATES:
-            r = await itop_request({
-                "operation": "core/get",
-                "class": kb_cls,
-                "key": "SELECT " + kb_cls,
-                "output_fields": field,
-                "limit": "1",
-            })
+            r = await itop_core_get(
+                itop_request_fn,
+                kb_cls,
+                "SELECT " + kb_cls,
+                fields=field,
+                limit=1,
+            )
             if r.get("code") == 0:
                 registry_set_meta(kb_cls, "text_field", field)
                 return field
@@ -113,13 +114,13 @@ def register(mcp, itop_request):
                 " OR " + text_field + " LIKE '%" + safe + "%'"
             )
 
-        result = await itop_request({
-            "operation": "core/get",
-            "class": kb_cls,
-            "key": effective_oql,
-            "output_fields": _kb_list_fields(text_field),
-            "limit": str(limit),
-        })
+        result = await itop_core_get(
+            itop_request_fn,
+            kb_cls,
+            effective_oql,
+            fields=_kb_list_fields(text_field),
+            limit=limit,
+        )
 
         articles = extract_objects(result)
         if not articles:
@@ -154,12 +155,12 @@ def register(mcp, itop_request):
         if not kb_cls:
             return "No KB module installed (tried KBEntry, FAQ)."
 
-        result = await itop_request({
-            "operation": "core/get",
-            "class": kb_cls,
-            "key": "SELECT " + kb_cls + " WHERE id=" + str(article_id),
-            "output_fields": "*+",
-        })
+        result = await itop_core_get(
+            itop_request_fn,
+            kb_cls,
+            "SELECT " + kb_cls + " WHERE id=" + str(article_id),
+            fields="*+",
+        )
 
         if not extract_objects(result):
             return "KB article #" + str(article_id) + " not found."
@@ -177,13 +178,13 @@ def register(mcp, itop_request):
 
         cat_cls = _KB_CAT_MAP.get(kb_cls, "KBCategory")
 
-        result = await itop_request({
-            "operation": "core/get",
-            "class": cat_cls,
-            "key": "SELECT " + cat_cls,
-            "output_fields": "id,name,description",
-            "limit": "100",
-        })
+        result = await itop_core_get(
+            itop_request_fn,
+            cat_cls,
+            "SELECT " + cat_cls,
+            fields="id,name,description",
+            limit=100,
+        )
 
         cats = extract_objects(result)
         if not cats:
