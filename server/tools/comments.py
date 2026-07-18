@@ -1,7 +1,7 @@
 """
 Comment tools: add ticket log entries.
 
-Reading logs: use itop_get with full=True -- public_log and private_log are
+Reading logs: use Load_object with full=True -- public_log and private_log are
 included in the full record, so a separate log-fetch call is never needed.
 """
 
@@ -31,7 +31,7 @@ def register(mcp, client: ItopClient):
 
         Public comments are portal-visible; use private comments only when explicitly
         required. Prefer ticket_ref; bare ticket IDs are resolved automatically.
-        To read existing comments, use itop_get with full=True."""
+        To read existing comments, use Load_object with full=True."""
         if not ticket_ref and not ticket_id:
             return "Error: supply ticket_ref (e.g. 'R-016271') or ticket_id."
 
