@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from typing import Union
 
-from cache import get_class_fields
 from client import ItopClient
 from helpers import (
     coerce_ref,
@@ -17,7 +16,6 @@ from helpers import (
     parse_json_arg,
     parse_key,
     resolve_key,
-    resolve_output_fields,
     str_or,
     CLASSES_WITH_REF,
     _LEAN_STRIP,
@@ -91,8 +89,9 @@ def register(mcp, client: ItopClient):
             output_fields = "*"
 
         if not output_fields or not output_fields.strip():
-            fields = await get_class_fields(obj_class)
-            visible = sorted(fields - _LEAN_STRIP - _SYNTHETIC_FIELDS)
+            visible = sorted(
+                await client.get_class_fields(obj_class) - _SYNTHETIC_FIELDS
+            )
             if not visible:
                 return (
                     "You need to query with key AND output_fields. "
@@ -105,26 +104,14 @@ def register(mcp, client: ItopClient):
 
         obj_class, resolved_key = await resolve_key(obj_class, key_or_ref)
 
-        strip = frozenset() if full else _LEAN_STRIP
-        fields_to_request, post_strip = await resolve_output_fields(
-            obj_class, ensure_ref_field(obj_class, output_fields), strip
-        )
-
         result = await client.get(
             obj_class,
             resolved_key,
-            fields=fields_to_request,
+            fields=ensure_ref_field(obj_class, output_fields),
             limit=limit if limit > 0 else None,
             page=page if page > 0 else None,
             full=full,
         )
-
-        # resolve_output_fields may return a post_strip set when the field
-        # cache was cold and a wildcard was used. Apply it now so the caller
-        # never sees fields that should have been excluded.
-        if post_strip:
-            from helpers import apply_field_strip
-            apply_field_strip(result, post_strip)
 
         if obj_class in CLASSES_WITH_REF:
             objects = result.get("objects") or {}
@@ -335,7 +322,7 @@ def register(mcp, client: ItopClient):
     )
     async def itop_describe_class(obj_class: str) -> str:
         """Discover available fields for an iTop class by sampling an existing object."""
-        fields = await get_class_fields(obj_class)
+        fields = await client.get_class_fields(obj_class)
 
         if not fields:
             return (
