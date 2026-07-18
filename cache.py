@@ -1,38 +1,36 @@
 """
 Process-level caches for iTop class metadata and resolve_key lookups.
 
-Two independent caches live here:
+Two independent caches:
 
 1. _ITOP_CLASS_REGISTRY
-   Stores field inventories and arbitrary metadata per iTop class.
-   Seeded passively from every core/get response that passes through
-   format_objects() or apply_field_strip(). Never expires -- iTop class
-   schemas do not change at runtime.
+   Field inventories and arbitrary metadata per iTop class.
+   Seeded passively from every core/get response. Never expires.
 
 2. _RESOLVE_KEY_CACHE
-   Stores (obj_class, ref) -> (resolved_class, numeric_id) mappings.
+   (obj_class, ref) -> (resolved_class, numeric_id) mappings.
    TTL-based eviction; lazy cleanup on every resolve_key call.
    TTL is read from RESOLVE_KEY_CACHE_TTL (env, default 86400 s).
 
 Public API
 ----------
 # Class registry
-registry_get_meta(cls, key, default)    read per-class metadata
-registry_set_meta(cls, key, value)      write per-class metadata
-registry_get_fields(cls)                frozenset of known field names
-seed_field_cache(cls, fields)           grow field inventory from response
+registry_get_meta(cls, key, default)
+registry_set_meta(cls, key, value)
+registry_get_fields(cls)
+seed_field_cache(cls, fields)
 
-# Field helper
-get_class_fields(cls, itop_request)     warm-or-probe field inventory
+# Field helper  (uses get_client() internally -- no itop_request_fn param)
+get_class_fields(cls)
 
 # resolve_key cache
-cache_get(obj_class, ref)               -> (resolved_class, id) | None
-cache_set(obj_class, ref, cls, id)      store resolved pair
-cache_cleanup()                         evict expired entries
+cache_get(obj_class, ref)
+cache_set(obj_class, ref, cls, id)
+cache_cleanup()
 
-# Pre-heat
-preheat(itop_request)                   probe all CLASSES_WITH_REF
-preheat_once(itop_request)              preheat if any class cache still cold
+# Pre-heat  (uses get_client() internally -- no itop_request_fn param)
+preheat()
+preheat_once()
 """
 
 from __future__ import annotations
@@ -79,7 +77,7 @@ def registry_set_meta(cls: str, key: str, value: Any) -> None:
 
 
 def registry_get_fields(cls: str) -> frozenset:
-    """Return the known field inventory for a class (may be empty if not yet seen)."""
+    """Return the known field inventory for a class (may be empty)."""
     fields = _registry_entry(cls)["fields"]
     logger.debug("[registry] get_fields cls=%r -> %d fields known", cls, len(fields))
     return fields
@@ -89,14 +87,10 @@ def seed_field_cache(cls: str, fields: dict) -> None:
     """Grow the field inventory for a class from a live response fields dict.
 
     Already-known fields are always kept (union, never removed).
-    Only genuinely new fields (not yet in the registry) are added and logged.
     """
     entry = _registry_entry(cls)
     if not fields:
-        logger.warning(
-            "[registry] seed_field_cache cls=%r seed empty fields",
-            cls
-          )
+        logger.warning("[registry] seed_field_cache cls=%r seed empty fields", cls)
         return
     incoming = frozenset(fields.keys())
     before_set = entry["fields"]
@@ -116,21 +110,15 @@ def seed_field_cache(cls: str, fields: dict) -> None:
 # Field helper
 # ---------------------------------------------------------------------------
 
-async def get_class_fields(obj_class: str, itop_request_fn) -> frozenset[str]:
+async def get_class_fields(obj_class: str) -> frozenset[str]:
     """Return the field inventory for obj_class.
 
-    If the registry cache is warm for obj_class, returns the cached frozenset
-    immediately without any iTop request.
-
-    If the class was already probed and found non-existent or empty (exists=False),
-    returns an empty frozenset immediately without retrying.
-
-    If the cache is cold, fires a single probe request (core/get, output_fields=*,
-    limit=1) to seed the cache, then returns the resulting frozenset.
-    On probe failure or empty result, marks the class as non-existent (exists=False)
-    so subsequent calls do not retry.
+    Uses the ItopClient from the current async context (get_client()).
+    Returns the cached frozenset immediately when warm.
+    Marks the class as non-existent (exists=False) on probe failure so
+    subsequent calls skip the round-trip.
     """
-    from client import itop_core_get
+    from client import get_client
 
     entry = _registry_entry(obj_class)
 
@@ -143,14 +131,14 @@ async def get_class_fields(obj_class: str, itop_request_fn) -> frozenset[str]:
 
     if entry["exists"] is False:
         logger.debug(
-            "[get_class_fields] cls=%r known non-existent or empty, skipping probe",
+            "[get_class_fields] cls=%r known non-existent, skipping probe",
             obj_class,
         )
         return frozenset()
 
     logger.debug("[get_class_fields] cls=%r cache cold, probing iTop", obj_class)
-    result = await itop_core_get(
-        itop_request_fn,
+    client = get_client()
+    result = await client.get(
         obj_class,
         "SELECT " + obj_class,
         fields="*",
@@ -240,32 +228,27 @@ def cache_set(obj_class: str, ref: str, resolved_class: str, resolved_id: int) -
 # Pre-heat
 # ---------------------------------------------------------------------------
 
-async def preheat(itop_request_fn) -> None:
+async def preheat() -> None:
     """Probe all CLASSES_WITH_REF to warm the field cache.
 
-    Each class gets a single core/get (output_fields=*, limit=1). Classes that
-    do not exist or have no objects are marked as non-existent (exists=False)
-    and will not be retried on subsequent requests.
+    Uses the ItopClient from the current async context (get_client()).
+    Classes that do not exist or have no objects are marked exists=False
+    and will not be retried.
     """
-    # Import here to avoid circular import (helpers imports cache).
     from helpers import CLASSES_WITH_REF
 
     logger.info("[cache] pre-heating field cache for %d classes", len(CLASSES_WITH_REF))
     for cls in sorted(CLASSES_WITH_REF):
-        fields = await get_class_fields(cls, itop_request_fn)
-        logger.info(
-            "[cache] preheat cls=%r -> %d fields cached",
-            cls, len(fields),
-        )
+        fields = await get_class_fields(cls)
+        logger.info("[cache] preheat cls=%r -> %d fields cached", cls, len(fields))
     logger.info("[cache] pre-heat complete")
 
 
-async def preheat_once(itop_request_fn) -> None:
+async def preheat_once() -> None:
     """Run preheat only if any CLASSES_WITH_REF field cache is still cold.
 
-    Called at the start of the first real iTop request so that a bearer token
-    is guaranteed to be available. Subsequent calls are no-ops once all
-    classes are either warm (fields known) or marked as non-existent.
+    No-op once all classes are warm or marked non-existent.
+    Uses the ItopClient from the current async context (get_client()).
     """
     from helpers import CLASSES_WITH_REF
 
@@ -274,4 +257,4 @@ async def preheat_once(itop_request_fn) -> None:
         for cls in CLASSES_WITH_REF
     ):
         return
-    await preheat(itop_request_fn)
+    await preheat()
