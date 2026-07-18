@@ -49,7 +49,12 @@ def _is_empty(fv) -> bool:
     return False
 
 
-def _format_objects(result: dict, *, strip_empty: bool = True) -> tuple[str, dict[str, list[dict]]]:
+def _format_objects(
+    result: dict,
+    *,
+    strip_empty: bool = True,
+    annotations: dict[str, str] | None = None,
+) -> tuple[str, dict[str, list[dict]]]:
     """Format iTop response objects into a readable string and extract inline image refs.
 
     Internal implementation -- call format_and_cache() from tool code instead.
@@ -70,6 +75,11 @@ def _format_objects(result: dict, *, strip_empty: bool = True) -> tuple[str, dic
     string (including strings that were HTML-only and stripped to nothing),
     an empty dict, or an empty list are omitted from the output. Integers,
     floats, and booleans (including 0 and False) are never omitted.
+
+    annotations is an optional dict mapping numeric object id (as str) to a
+    pre-formatted annotation line. When provided, each object's annotation is
+    appended directly after that object's field block, keeping multi-object
+    responses readable.
 
     Seeds the field registry from every response so resolve_output_fields
     hits the warm-cache path on subsequent calls for the same class.
@@ -123,15 +133,27 @@ def _format_objects(result: dict, *, strip_empty: bool = True) -> tuple[str, dic
         for fn, fv in synthetic.items():
             display_name = fn.lstrip("_")
             lines.append("  [" + display_name + "] " + str(fv))
+        if annotations and oid in annotations:
+            lines.append("  " + annotations[oid])
     return "\n".join(lines), refs
 
 
-def format_objects(result: dict, *, strip_empty: bool = True) -> tuple[str, dict[str, list[dict]]]:
+def format_objects(
+    result: dict,
+    *,
+    strip_empty: bool = True,
+    annotations: dict[str, str] | None = None,
+) -> tuple[str, dict[str, list[dict]]]:
     """Public alias for _format_objects. Kept for external callers."""
-    return _format_objects(result, strip_empty=strip_empty)
+    return _format_objects(result, strip_empty=strip_empty, annotations=annotations)
 
 
-def format_and_cache(result: dict, *, strip_empty: bool = True) -> str:
+def format_and_cache(
+    result: dict,
+    *,
+    strip_empty: bool = True,
+    annotations: dict[str, str] | None = None,
+) -> str:
     """Format iTop response and persist inline image refs to SQLite.
 
     Calls _format_objects() to get the formatted text and the inline image
@@ -142,13 +164,16 @@ def format_and_cache(result: dict, *, strip_empty: bool = True) -> str:
     (None, empty string, empty dict, empty list) are omitted from output.
     Integers, floats, and booleans (including 0 and False) are never omitted.
 
+    annotations is an optional dict mapping numeric object id (as str) to a
+    pre-formatted annotation line appended after each object's field block.
+
     The deferred import of attachment_store avoids a circular import:
       helpers -> attachment_store -> config  (safe)
       attachment_store must NOT import helpers at module level.
     """
     from attachment_store import write_inline_image_refs
 
-    text, refs = _format_objects(result, strip_empty=strip_empty)
+    text, refs = _format_objects(result, strip_empty=strip_empty, annotations=annotations)
 
     for ticket_key, img_refs in refs.items():
         try:
