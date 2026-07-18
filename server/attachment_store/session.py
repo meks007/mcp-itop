@@ -2,7 +2,7 @@
 attachment_store/session.py - Session-bound image storage.
 
 Stores and retrieves image entries keyed by the current client bearer token.
-Each entry is valid for IMAGE_STORE_TTL_SECONDS (from config.py).
+Each entry is valid for IMAGE_STORE_TTL (from config.py).
 
 Schema registered at module import time via db.register_schema() so that
 db.init() creates the table without any explicit init_db() call from callers.
@@ -15,7 +15,7 @@ import logging
 from typing import TypedDict
 
 import db
-from config import IMAGE_STORE_TTL_SECONDS
+from config import IMAGE_STORE_TTL
 from attachment_store.image import _normalize_image
 
 logger = logging.getLogger(__name__)
@@ -87,7 +87,7 @@ def store_images(token: str, images: list[ImageEntry]) -> None:
 
     Replaces any existing entries for this token. Expired rows are purged
     by the central housekeeping task. Each entry is valid for
-    IMAGE_STORE_TTL_SECONDS.
+    IMAGE_STORE_TTL.
 
     Args:
         token:  The raw bearer token for the current MCP client session.
@@ -97,14 +97,14 @@ def store_images(token: str, images: list[ImageEntry]) -> None:
                 Extra keys (e.g. source) are silently ignored.
     """
     token_preview = token[:8] + "..." if len(token) > 8 else token
-    expires_at = time.time() + IMAGE_STORE_TTL_SECONDS
+    expires_at = time.time() + IMAGE_STORE_TTL
 
     logger.debug(
         "[attachment_store] store_images: token=%s image_count=%d "
         "ttl=%.0fs expires_at=%.0f",
         token_preview,
         len(images),
-        IMAGE_STORE_TTL_SECONDS,
+        IMAGE_STORE_TTL,
         expires_at,
     )
 
