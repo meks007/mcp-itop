@@ -127,20 +127,32 @@ def register(mcp, client: ItopClient):
                 fields = obj_data.get("fields")
                 if not isinstance(fields, dict):
                     continue
+
                 att_count, ii_count = await fetch_image_counts(obj_class, oid)
-                total = att_count + ii_count
-                if total == 0:
-                    continue
+
+                # ii_count is None when the inline image ref cache has never
+                # been populated for this ticket (format_and_cache not yet
+                # called). In that case we show a generic hint -- the ticket
+                # will be cached by format_and_cache() below so subsequent
+                # Load_object calls will have an accurate count.
                 parts = []
                 if att_count:
                     parts.append(str(att_count) + " attachment(s)")
                 if ii_count:
                     parts.append(str(ii_count) + " inline image(s)")
-                fields["_images"] = (
-                    ", ".join(parts)
-                    + " found. Call get_ticket_images to fetch them."
-                    " These images are an inherent part of the ticket."
-                )
+                elif ii_count is None:
+                    # Cache miss: inline image presence unknown yet.
+                    # format_and_cache below will populate the cache for
+                    # the next call. Show hint if there are attachments or
+                    # always hint so the AI knows to check.
+                    parts.append("possible inline image(s) -- call get_ticket_images to check")
+
+                if parts:
+                    fields["_images"] = (
+                        ", ".join(parts)
+                        + ". Call get_ticket_images to fetch them."
+                        " These images are an inherent part of the ticket."
+                    )
 
         return format_and_cache(result)
 
