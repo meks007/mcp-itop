@@ -9,18 +9,21 @@ set_client(c)     Bind an ItopClient to the current async context.
 Both are called by ItopMiddleware (auth.py) so that every request handler
 and helper function can reach the client without an explicit parameter.
 
-ItopClient.get_raw  -- thin core/get wrapper, returns the raw iTop dict.
-ItopClient.get      -- same as get_raw but applies _LEAN_STRIP when full=False.
-                       Use get_raw when you need the unfiltered response (e.g.
-                       internal resolvers, attachment queries). Use get everywhere
-                       else so that privacy-sensitive fields are stripped
-                       consistently.
+ItopClient.get_raw          -- thin core/get wrapper, returns the raw iTop dict.
+ItopClient.get              -- same as get_raw but applies _LEAN_STRIP when full=False.
+ItopClient.get_class_fields -- field discovery for a class, stripped by _LEAN_STRIP.
+
+Use get_raw when you need the unfiltered response (e.g. internal resolvers,
+attachment queries). Use get everywhere else so that privacy-sensitive fields
+are stripped consistently. Use get_class_fields for any field inventory lookup
+that will be surfaced to callers or used to build output_fields lists.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar, Token
 from typing import TYPE_CHECKING
@@ -317,6 +320,63 @@ class ItopClient:
         if not full:
             apply_field_strip(result, _LEAN_STRIP)
         return result
+
+    # ------------------------------------------------------------------
+    # Field discovery
+    # ------------------------------------------------------------------
+
+    async def get_class_fields(self, obj_class: str) -> frozenset[str]:
+        """Return the visible field inventory for obj_class, minus _LEAN_STRIP.
+
+        Uses the registry cache when warm. On a cold cache, probes iTop with
+        a single core/get call and seeds the registry from the response.
+        Marks the class as non-existent on probe failure so subsequent calls
+        skip the round-trip.
+
+        The returned set never contains fields in _LEAN_STRIP -- it reflects
+        what callers are permitted to see, not the raw iTop schema.
+        """
+        from cache import _registry_entry, seed_field_cache
+
+        entry = _registry_entry(obj_class)
+
+        if entry["fields"]:
+            logger.debug(
+                "[get_class_fields] cls=%r warm cache (%d fields)",
+                obj_class, len(entry["fields"]),
+            )
+            return entry["fields"] - _LEAN_STRIP
+
+        if entry["exists"] is False:
+            logger.debug("[get_class_fields] cls=%r known non-existent", obj_class)
+            return frozenset()
+
+        logger.debug("[get_class_fields] cls=%r cache cold, probing iTop", obj_class)
+        result = await self.get_raw(
+            obj_class,
+            "SELECT " + obj_class,
+            fields="*",
+            limit=1,
+        )
+        if result.get("code", -1) != 0:
+            logger.debug(
+                "[get_class_fields] cls=%r probe failed code=%r msg=%r",
+                obj_class, result.get("code"), result.get("message"),
+            )
+            entry["exists"] = False
+            return frozenset()
+
+        objects = result.get("objects") or {}
+        if not objects:
+            logger.debug("[get_class_fields] cls=%r probe returned no objects", obj_class)
+            entry["exists"] = False
+            return frozenset()
+
+        for obj_data in objects.values():
+            seed_field_cache(obj_class, obj_data.get("fields") or {})
+            break
+
+        return entry["fields"] - _LEAN_STRIP
 
     # ------------------------------------------------------------------
     # core/create
