@@ -41,11 +41,10 @@ def register(mcp, client: ItopClient):
             ticket_class, coerce_ref(ticket_ref or "", ticket_id or "")
         )
 
-        result = await client.request({
-            "operation": "core/update",
-            "class": ticket_class,
-            "key": key,
-            "fields": {
+        result = await client.update(
+            ticket_class,
+            key,
+            {
                 log_field: {
                     "add_item": {
                         "message": text,
@@ -53,7 +52,7 @@ def register(mcp, client: ItopClient):
                     }
                 }
             },
-            "output_fields": "id, ref, friendlyname",
-            "comment": "MCP: added " + ("public" if is_public else "private") + " comment",
-        })
+            output_fields="id, ref, friendlyname",
+            comment="MCP: added " + ("public" if is_public else "private") + " comment",
+        )
         return format_and_cache(result)
