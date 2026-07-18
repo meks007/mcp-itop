@@ -9,10 +9,18 @@ Token validation is delegated to token_cache.validate() in cache.py which
 caches results server-side with a sliding TTL to avoid redundant iTop
 round-trips. A token is evicted immediately when iTop returns code==1
 (UNAUTH) on any REST call.
+
+Hashing
+-------
+get_bearer_token_hash() is the single authoritative place where the raw
+bearer token is converted to a SHA-256 hex digest. cache.py stores and
+looks up entries exclusively by this hash, so the raw token never enters
+the cache layer.
 """
 
 from __future__ import annotations
 
+import hashlib
 from contextvars import ContextVar
 
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -46,7 +54,7 @@ async def _validate_itop_token(token: str) -> bool:
         except Exception:
             return False
 
-    return await token_cache.validate(token, probe_fn)
+    return await token_cache.validate(get_bearer_token_hash(token), probe_fn)
 
 
 async def evict_token(token: str) -> None:
@@ -55,7 +63,7 @@ async def evict_token(token: str) -> None:
     Called by itop_request() whenever iTop returns code==1 (UNAUTH).
     Safe to call even when the token is not cached (no-op in that case).
     """
-    await token_cache.evict_by_token(token)
+    await token_cache.evict_by_token(get_bearer_token_hash(token))
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +92,21 @@ def get_bearer_token() -> str:
             "'Authorization: Bearer <itop_token>' HTTP header."
         )
     return token
+
+
+def get_bearer_token_hash(token: str | None = None) -> str:
+    """Return the SHA-256 hex digest of the bearer token.
+
+    When called without an argument the token is read from the current
+    request context via get_bearer_token(). Pass an explicit token string
+    when the raw value is already available (e.g. during token validation
+    before the ContextVar has been set).
+
+    This is the single place in the codebase responsible for hashing the
+    bearer token. cache.py accepts and stores only pre-computed hashes.
+    """
+    raw = token if token is not None else get_bearer_token()
+    return hashlib.sha256(raw.encode()).hexdigest()
 
 
 # ---------------------------------------------------------------------------
