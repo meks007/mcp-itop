@@ -9,10 +9,11 @@ Provides AI assistants (Claude Desktop, opencode, etc.) with tools to:
 
 Module layout:
   config.py             - env vars, logging, constants
-  cache.py              - class field registry, resolve_key cache (lazy fill)
-  auth.py               - ItopMiddleware, get_bearer_token(), token validation cache
+  cache.py              - class field registry, resolve_key cache, token cache
+  auth.py               - ItopMiddleware, get_bearer_token(), token validation
   client.py             - iTop REST/JSON HTTP client, ItopClient, get_client()
   helpers/              - shared formatting and parsing utilities
+  db/                   - backend-agnostic database layer (init_db, get_db)
   attachment_store/     - SQLite store for image URIs and inline image refs
   background_tasks.py   - central housekeeping asyncio loop
   tools/
@@ -169,8 +170,12 @@ if MCP_DEBUG:
 
 async def _serve():
     from background_tasks import housekeeping_loop
+    import db
     import attachment_store
 
+    # Initialise the database backend first so that attachment_store can call
+    # get_db() when it registers its schema at import / init time.
+    db.init_db()
     attachment_store.init_db()
 
     config = uvicorn.Config(
