@@ -7,6 +7,10 @@ parameter is accepted or forwarded anywhere.
 
 apply_field_strip and _LEAN_STRIP live in helpers/stripping.py so that
 client.py can import them without a circular dependency on this module.
+
+resolve_output_fields has been removed. Stripping is now enforced at the
+client.get level, so callers never need to compute (fields_to_request,
+post_strip_set) themselves.
 """
 
 from __future__ import annotations
@@ -19,10 +23,9 @@ from cache import (
     cache_cleanup,
     cache_get,
     cache_set,
-    get_class_fields,
     registry_get_fields,
+    registry_add_entry,
     seed_field_cache,
-    _registry_entry,
 )
 from helpers.utils import (
     CLASSES_WITH_REF,
@@ -30,7 +33,6 @@ from helpers.utils import (
     str_or,
     is_bare_number,
 )
-from helpers.stripping import apply_field_strip
 
 logger = logging.getLogger(__name__)
 
@@ -63,13 +65,13 @@ async def ensure_class_exists(candidates: list[str]) -> str:
     client = get_client()
 
     for cls in candidates:
-        entry = _registry_entry(cls)
+        entry = registry_add_entry(cls)
         if entry["exists"] is True:
-            logger.debug("[registry] ensure_class_exists cls=%r -> cached True", cls)
+            logger.debug("[class_cache] ensure_class_exists cls=%r -> cached True", cls)
             return cls
         if entry["exists"] is False:
             logger.debug(
-                "[registry] ensure_class_exists cls=%r -> cached False, skip", cls
+                "[class_cache] ensure_class_exists cls=%r -> cached False, skip", cls
             )
             continue
         r = await client.get_raw(cls, "SELECT " + cls, fields="id", limit=1)
@@ -78,71 +80,19 @@ async def ensure_class_exists(candidates: list[str]) -> str:
             for obj_data in (r.get("objects") or {}).values():
                 seed_field_cache(cls, obj_data.get("fields") or {})
             logger.debug(
-                "[registry] ensure_class_exists cls=%r -> exists=True (probed)", cls
+                "[class_cache] ensure_class_exists cls=%r -> exists=True (probed)", cls
             )
             return cls
         else:
             entry["exists"] = False
             logger.debug(
-                "[registry] ensure_class_exists cls=%r -> exists=False code=%r msg=%r",
+                "[class_cache] ensure_class_exists cls=%r -> exists=False code=%r msg=%r",
                 cls, r.get("code"), r.get("message"),
             )
     logger.debug(
-        "[registry] ensure_class_exists candidates=%r -> none found", candidates
+        "[class_cache] ensure_class_exists candidates=%r -> none found", candidates
     )
     return ""
-
-
-async def resolve_output_fields(
-    obj_class: str,
-    output_fields: str,
-    strip: frozenset[str],
-) -> tuple[str, frozenset[str]]:
-    """Resolve (output_fields, strip) into (fields_to_request, post_strip_set).
-
-    Uses get_class_fields() which internally calls get_client().
-    """
-    logger.debug(
-        "[resolve_output_fields] cls=%r output_fields=%r strip=%r",
-        obj_class, output_fields, sorted(strip),
-    )
-    is_wildcard = output_fields in ("*", "*+")
-
-    if not is_wildcard or not strip:
-        logger.debug(
-            "[resolve_output_fields] passthrough (explicit or no strip) -> %r strip=%r",
-            output_fields, sorted(strip),
-        )
-        return output_fields, strip
-
-    cached_fields = registry_get_fields(obj_class)
-
-    if cached_fields:
-        explicit = sorted(cached_fields - strip - _SYNTHETIC_FIELDS)
-        if obj_class in CLASSES_WITH_REF:
-            if "ref" in explicit:
-                explicit = ["ref"] + [f for f in explicit if f not in ("ref", "id")]
-        if not explicit:
-            logger.debug(
-                "[resolve_output_fields] cls=%r warm cache but strip removed all fields,"
-                " fallback to wildcard",
-                obj_class,
-            )
-            return output_fields, strip
-        result_fields = ", ".join(explicit)
-        logger.debug(
-            "[resolve_output_fields] cls=%r WARM cache hit, explicit fields=%r"
-            " post_strip=empty",
-            obj_class, result_fields,
-        )
-        return result_fields, frozenset()
-
-    logger.debug(
-        "[resolve_output_fields] cls=%r COLD cache miss, using wildcard=%r with"
-        " post_strip=%r",
-        obj_class, output_fields, sorted(strip),
-    )
-    return output_fields, strip
 
 
 async def resolve_ref_class_by_ref_part(
