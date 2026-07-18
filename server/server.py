@@ -24,6 +24,16 @@ Module layout:
     attachments.py      - image and file attachment tools + static image resource
 
 Framework: fastmcp (PrefectHQ) >= 2.11.0
+
+Startup sequence
+----------------
+  1. Preflight checks (ITOP_URL present)
+  2. db.init()                 -- synchronous; runs before any async work
+  3. ASGI app built            -- FastMCP + middleware stack
+  4. uvicorn starts            -- ASGI lifespan on_startup fires:
+       - housekeeping asyncio task created
+  5. MCP session manager starts
+  6. Server ready and accepting connections
 """
 
 from __future__ import annotations
@@ -106,7 +116,7 @@ _REDACTED_RESPONSE_HEADERS = frozenset({"set-cookie"})
 _REDACTED_PLACEHOLDER = "<redacted>"
 
 
-def _format_headers(headers, redacted: frozenset[str]) -> str:
+def _format_headers(headers, redacted: frozenset) -> str:
     """Return a compact single-line representation of HTTP headers."""
     parts = []
     for name, value in headers.items():
@@ -164,20 +174,23 @@ if MCP_DEBUG:
     logger.debug("Client<->MCP HTTP debug logging middleware attached.")
 
 # ---------------------------------------------------------------------------
+# ASGI lifespan: start housekeeping after uvicorn is up
+# ---------------------------------------------------------------------------
+
+async def _on_startup() -> None:
+    """ASGI lifespan startup hook -- runs inside the uvicorn event loop."""
+    from background_tasks import housekeeping_loop
+    asyncio.create_task(housekeeping_loop())
+    logger.info("[server] housekeeping task started")
+
+
+app.add_event_handler("startup", _on_startup)
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
-async def _serve():
-    import db
-    from background_tasks import housekeeping_loop
-
-    # Connect the database backend and run all registered DDL + migrations.
-    # Tool modules imported above (tools.attachments -> attachment_store ->
-    # session.py / refs.py) have already called db.register_schema() at
-    # import time, so all DDL is registered before this call.
-    db.init()
-    logger.info("[server] db backend ready")
-
+async def _serve() -> None:
     config = uvicorn.Config(
         app,
         host=_MCP_HOST,
@@ -185,19 +198,10 @@ async def _serve():
         log_config=None,
     )
     server = uvicorn.Server(config)
-
-    _original_startup = server.startup
-
-    async def _patched_startup(sockets=None):
-        await _original_startup(sockets=sockets)
-        asyncio.create_task(housekeeping_loop())
-        logger.info("[server] housekeeping task started")
-
-    server.startup = _patched_startup
     await server.serve()
 
 
-def main():
+def main() -> None:
     """Run the iTop MCP server."""
     from config import ITOP_URL
 
@@ -206,6 +210,21 @@ def main():
         print("Create .env file with ITOP_URL (see .env.example)", file=sys.stderr)
         sys.exit(1)
 
+    # ------------------------------------------------------------------
+    # 1. Database -- synchronous init before any async work starts.
+    #    Tool modules imported above (tools.attachments -> attachment_store
+    #    -> session.py / refs.py) have already called db.register_schema()
+    #    at import time, so all DDL is queued before this call runs it.
+    # ------------------------------------------------------------------
+    import db
+    db.init()
+    logger.info("[server] db backend ready")
+
+    # ------------------------------------------------------------------
+    # 2. Start uvicorn. The ASGI lifespan on_startup hook (_on_startup)
+    #    will fire after uvicorn binds and before the first request is
+    #    accepted, starting the housekeeping task in the event loop.
+    # ------------------------------------------------------------------
     logger.info(
         "Starting iTop MCP server on %s:%d (debug=%s)",
         _MCP_HOST, _MCP_PORT, MCP_DEBUG,
