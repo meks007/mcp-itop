@@ -113,47 +113,45 @@ def register(mcp, client: ItopClient):
             full=full,
         )
 
-        # format_and_cache must run before fetch_image_counts so that
-        # parse_objects() seeds the inline ref cache for this ticket.
-        # fetch_image_counts reads that cache; without this ordering it
-        # always returns ii_count=None (miss) on the first Load_object
-        # call, producing a spurious "possible inline image(s)" hint.
-        text = format_and_cache(result)
-
+        # Build per-object image annotations before formatting so they can be
+        # interleaved with each object's field block by format_and_cache.
+        # fetch_image_counts reads the inline ref cache populated by
+        # parse_objects inside format_and_cache -- but we need the cache warm
+        # before the count call. parse_objects is pure and cheap so we run it
+        # once here to seed the cache, then format_and_cache runs it again
+        # (idempotent). Callers outside CLASSES_WITH_REF skip this entirely.
+        annotations: dict[str, str] = {}
         if obj_class in CLASSES_WITH_REF:
-            objects = result.get("objects") or {}
-            annotations = []
-            for obj_data in objects.values():
-                oid = obj_data.get("key")
-                if not oid:
-                    continue
-                if not isinstance(obj_data.get("fields"), dict):
-                    continue
+            from attachment_store import write_inline_image_refs
+            from helpers.html import parse_objects as _parse_objects
+            for ticket_key, img_refs in _parse_objects(result).items():
+                try:
+                    _cls, _oid = ticket_key.split("::", 1)
+                    write_inline_image_refs(_cls, _oid, img_refs)
+                except Exception:
+                    pass
 
+            for obj_data in (result.get("objects") or {}).values():
+                oid = str(obj_data.get("key") or "")
+                if not oid or not isinstance(obj_data.get("fields"), dict):
+                    continue
                 att_count, ii_count = await fetch_image_counts(obj_class, oid)
-
                 parts = []
                 if att_count:
                     parts.append(str(att_count) + " attachment(s)")
                 if ii_count:
                     parts.append(str(ii_count) + " inline image(s)")
                 # ii_count == 0: confirmed no inline images, nothing to show.
-                # ii_count is None: cannot happen -- format_and_cache above
-                # always writes a cache entry ([] or real refs) for every
-                # ticket that appears in the response.
-
+                # ii_count is None: cannot happen -- cache was seeded above.
                 if parts:
-                    annotations.append(
+                    annotations[oid] = (
                         "[images] "
                         + ", ".join(parts)
                         + ". Call List_ticket_images to fetch them."
                         + " These images are an inherent part of the ticket."
                     )
 
-            if annotations:
-                text = text + "\n" + "\n".join(annotations)
-
-        return text
+        return format_and_cache(result, annotations=annotations or None)
 
     @mcp.tool(
         name="Create_object"
