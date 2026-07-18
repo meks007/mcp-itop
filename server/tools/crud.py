@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Union
 
+from auth import get_bearer_token
 from client import ItopClient
 from helpers import (
     coerce_ref,
@@ -29,11 +30,13 @@ async def _fetch_and_cache_ticket(
     client: ItopClient,
     *,
     full: bool = False,
+    token: str = "",
 ) -> str:
     """Fetch an object via core/get, apply stripping, and run format_and_cache.
 
     Used by itop_get and the attachments cache-miss path. The format_and_cache
-    call writes inline image refs to the SQLite cache as a side effect.
+    call writes inline image refs to the SQLite cache as a side effect, keyed
+    to the supplied token hash so refs are never shared across token boundaries.
 
     Stripping follows the same rules as client.get: _LEAN_STRIP is applied
     unless full=True. Content stripped for privacy must not reach the image
@@ -44,14 +47,20 @@ async def _fetch_and_cache_ticket(
         obj_id:    Numeric object ID (int or string).
         client:    ItopClient instance.
         full:      When True, skip field stripping.
+        token:     Raw bearer token of the caller. Forwarded to format_and_cache
+                   so that inline image refs are cached under this token's hash.
+                   Falls back to get_bearer_token() when empty.
     """
+    if not token:
+        token = get_bearer_token()
+
     result = await client.get(
         obj_class,
         int(obj_id) if str(obj_id).isdigit() else obj_id,
         fields="*",
         full=full,
     )
-    return format_and_cache(result)
+    return format_and_cache(result, token=token)
 
 
 def register(mcp, client: ItopClient):
@@ -101,6 +110,7 @@ def register(mcp, client: ItopClient):
                 "Available fields are * or: " + ", ".join(visible)
             )
 
+        token = get_bearer_token()
         obj_class, resolved_key = await resolve_key(obj_class, key_or_ref)
 
         result = await client.get(
@@ -141,7 +151,7 @@ def register(mcp, client: ItopClient):
                         " These images are an inherent part of the ticket."
                     )
 
-        return format_and_cache(result)
+        return format_and_cache(result, token=token)
 
     @mcp.tool(
         name="Create_object"
@@ -157,13 +167,14 @@ def register(mcp, client: ItopClient):
         if isinstance(parsed, str):
             return parsed
 
+        token = get_bearer_token()
         result = await client.create(
             obj_class,
             parsed,
             output_fields=ensure_ref_field(obj_class, output_fields),
             comment=comment or DEFAULT_COMMENT,
         )
-        return format_and_cache(result)
+        return format_and_cache(result, token=token)
 
     @mcp.tool(
         name="Update_object"
@@ -195,6 +206,7 @@ def register(mcp, client: ItopClient):
                 "  ev_pending  - put ticket on hold"
             )
 
+        token = get_bearer_token()
         obj_class, resolved = await resolve_key(obj_class, coerce_ref(ticket_ref, key))
 
         result = await client.update(
@@ -204,7 +216,7 @@ def register(mcp, client: ItopClient):
             output_fields=ensure_ref_field(obj_class, output_fields),
             comment=comment or DEFAULT_COMMENT,
         )
-        return format_and_cache(result)
+        return format_and_cache(result, token=token)
 
     @mcp.tool(
         name="Delete_object"
@@ -220,6 +232,7 @@ def register(mcp, client: ItopClient):
 
         It runs in simulation mode by default and is retained only for controlled
         dry-run checks."""
+        token = get_bearer_token()
         obj_class, resolved = await resolve_key(obj_class, coerce_ref(ticket_ref, key))
 
         result = await client.delete(
@@ -228,7 +241,7 @@ def register(mcp, client: ItopClient):
             comment=comment or DEFAULT_COMMENT,
             simulate=simulate,
         )
-        return format_and_cache(result)
+        return format_and_cache(result, token=token)
 
     @mcp.tool(
         name="Apply_stimulus_to_object"
@@ -257,6 +270,7 @@ def register(mcp, client: ItopClient):
                 'e.g. fields={"solution": "..."}. Resolving is the final step.'
             )
 
+        token = get_bearer_token()
         obj_class, resolved = await resolve_key(obj_class, coerce_ref(ticket_ref, key))
 
         result = await client.apply_stimulus(
@@ -267,7 +281,7 @@ def register(mcp, client: ItopClient):
             output_fields=ensure_ref_field(obj_class, output_fields),
             comment=comment or DEFAULT_COMMENT,
         )
-        return format_and_cache(result)
+        return format_and_cache(result, token=token)
 
     @mcp.tool(
         name="Get_object_relations"
@@ -281,6 +295,7 @@ def register(mcp, client: ItopClient):
         redundancy: bool = True,
     ) -> str:
         """Find CIs related to a given object via impact or dependency relations."""
+        token = get_bearer_token()
         result = await client.get_related(
             obj_class,
             parse_key(key),
@@ -289,7 +304,7 @@ def register(mcp, client: ItopClient):
             direction=direction,
             redundancy=redundancy,
         )
-        output = format_and_cache(result)
+        output = format_and_cache(result, token=token)
         relations = result.get("relations")
         if relations:
             output += "\n\n--- Relations ---"
