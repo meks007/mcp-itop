@@ -116,7 +116,7 @@ def seed_field_cache(cls: str, fields: dict) -> None:
 # Field helper
 # ---------------------------------------------------------------------------
 
-async def get_class_fields(obj_class: str, itop_request) -> frozenset[str]:
+async def get_class_fields(obj_class: str, itop_request_fn) -> frozenset[str]:
     """Return the field inventory for obj_class.
 
     If the registry cache is warm for obj_class, returns the cached frozenset
@@ -130,6 +130,8 @@ async def get_class_fields(obj_class: str, itop_request) -> frozenset[str]:
     On probe failure or empty result, marks the class as non-existent (exists=False)
     so subsequent calls do not retry.
     """
+    from client import itop_core_get
+
     entry = _registry_entry(obj_class)
 
     if entry["fields"]:
@@ -147,13 +149,13 @@ async def get_class_fields(obj_class: str, itop_request) -> frozenset[str]:
         return frozenset()
 
     logger.debug("[get_class_fields] cls=%r cache cold, probing iTop", obj_class)
-    result = await itop_request({
-        "operation": "core/get",
-        "class": obj_class,
-        "key": "SELECT " + obj_class,
-        "output_fields": "*",
-        "limit": "1",
-    })
+    result = await itop_core_get(
+        itop_request_fn,
+        obj_class,
+        "SELECT " + obj_class,
+        fields="*",
+        limit=1,
+    )
     if result.get("code", -1) != 0:
         logger.debug(
             "[get_class_fields] cls=%r probe failed code=%r msg=%r",
@@ -238,7 +240,7 @@ def cache_set(obj_class: str, ref: str, resolved_class: str, resolved_id: int) -
 # Pre-heat
 # ---------------------------------------------------------------------------
 
-async def preheat(itop_request) -> None:
+async def preheat(itop_request_fn) -> None:
     """Probe all CLASSES_WITH_REF to warm the field cache.
 
     Each class gets a single core/get (output_fields=*, limit=1). Classes that
@@ -250,7 +252,7 @@ async def preheat(itop_request) -> None:
 
     logger.info("[cache] pre-heating field cache for %d classes", len(CLASSES_WITH_REF))
     for cls in sorted(CLASSES_WITH_REF):
-        fields = await get_class_fields(cls, itop_request)
+        fields = await get_class_fields(cls, itop_request_fn)
         logger.info(
             "[cache] preheat cls=%r -> %d fields cached",
             cls, len(fields),
@@ -258,7 +260,7 @@ async def preheat(itop_request) -> None:
     logger.info("[cache] pre-heat complete")
 
 
-async def preheat_once(itop_request) -> None:
+async def preheat_once(itop_request_fn) -> None:
     """Run preheat only if any CLASSES_WITH_REF field cache is still cold.
 
     Called at the start of the first real iTop request so that a bearer token
@@ -272,4 +274,4 @@ async def preheat_once(itop_request) -> None:
         for cls in CLASSES_WITH_REF
     ):
         return
-    await preheat(itop_request)
+    await preheat(itop_request_fn)
