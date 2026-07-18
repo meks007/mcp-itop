@@ -20,7 +20,6 @@ from typing import Any
 
 from config import RESOLVE_KEY_CACHE_TTL
 from cache import (
-    cache_cleanup,
     cache_get,
     cache_set,
     registry_get_fields,
@@ -66,17 +65,17 @@ async def ensure_class_exists(candidates: list[str]) -> str:
 
     for cls in candidates:
         entry = registry_add_entry(cls)
-        if entry["exists"] is True:
+        if entry.exists is True:
             logger.debug("[class_cache] ensure_class_exists cls=%r -> cached True", cls)
             return cls
-        if entry["exists"] is False:
+        if entry.exists is False:
             logger.debug(
                 "[class_cache] ensure_class_exists cls=%r -> cached False, skip", cls
             )
             continue
         r = await client.get_raw(cls, "SELECT " + cls, fields="id", limit=1)
         if r.get("code") == 0:
-            entry["exists"] = True
+            entry.exists = True
             for obj_data in (r.get("objects") or {}).values():
                 seed_field_cache(cls, obj_data.get("fields") or {})
             logger.debug(
@@ -84,7 +83,7 @@ async def ensure_class_exists(candidates: list[str]) -> str:
             )
             return cls
         else:
-            entry["exists"] = False
+            entry.exists = False
             logger.debug(
                 "[class_cache] ensure_class_exists cls=%r -> exists=False code=%r msg=%r",
                 cls, r.get("code"), r.get("message"),
@@ -146,11 +145,12 @@ async def resolve_key(
     For CLASSES_WITH_REF: ref matched via suffix OQL on the ref field.
     For all other classes: ref passed directly as key in a core/get call.
     Fallback: int(ref) or raw ref string.
+
+    cache_cleanup() is NOT called here; it runs exclusively in the
+    housekeeping_loop() background task (background_tasks.py).
     """
     from client import get_client
     client = get_client()
-
-    cache_cleanup()
 
     ref_str = str(ref).strip() if ref is not None else ""
     if not ref_str:
@@ -158,6 +158,10 @@ async def resolve_key(
 
     cached = cache_get(obj_class, ref_str)
     if cached is not None:
+        logger.debug(
+            "[resolve_key] cache hit: ref=%r -> class=%r key=%r",
+            ref_str, cached[0], cached[1],
+        )
         return cached[0], cached[1]
 
     if obj_class in CLASSES_WITH_REF:
