@@ -287,16 +287,33 @@ async def resolve_key(
 async def fetch_image_counts(
     obj_class: str,
     obj_id: str | int,
-) -> tuple[int, int]:
+) -> tuple[int, int | None]:
     """Return (attachment_count, inline_image_count) for a ticket object.
+
+    attachment_count  -- queried live from iTop (Attachment records are reliable).
+    inline_image_count -- read from the inline_image_refs SQLite cache populated
+                          by format_and_cache() / parse_objects() which scans the
+                          actual <img data-img-id> tags in ticket HTML fields.
+
+                          Returns None when the cache has never been populated for
+                          this ticket (format_and_cache not yet called), so the
+                          caller knows to show a generic hint rather than a count.
+
+    The InlineImage REST endpoint is intentionally NOT queried here because iTop
+    does not purge InlineImage records when the corresponding <img> tag is removed
+    from a ticket field, leading to ghost/stale results.
 
     Uses get_client() from the current async context.
     """
     from client import get_client
-    client = get_client()
+    # Deferred import to avoid circular: attachment_store -> config (safe),
+    # but attachment_store must not be imported at module level in helpers.
+    from attachment_store import read_inline_image_refs
 
+    client = get_client()
     oid = str(obj_id)
 
+    # -- Attachment count (live iTop query -- reliable) --
     att_result = await client.request({
         "operation": "core/get",
         "class": "Attachment",
@@ -313,20 +330,16 @@ async def fetch_image_counts(
         obj_class, oid, att_count,
     )
 
-    ii_result = await client.request({
-        "operation": "core/get",
-        "class": "InlineImage",
-        "key": (
-            "SELECT InlineImage"
-            " WHERE item_class = '" + obj_class + "'"
-            " AND item_id = " + oid
-        ),
-        "output_fields": "id",
-    })
-    ii_count = len(ii_result.get("objects") or {})
+    # -- Inline image count (SQLite ref cache -- no iTop call) --
+    # None  -> cache miss (format_and_cache not yet called for this ticket)
+    # []    -> cache hit, no inline images
+    # [...] -> cache hit, len() is the count
+    inline_refs = read_inline_image_refs(obj_class, oid)
+    ii_count: int | None = len(inline_refs) if inline_refs is not None else None
     logger.debug(
-        "[fetch_image_counts] cls=%r id=%r InlineImage count=%d",
-        obj_class, oid, ii_count,
+        "[fetch_image_counts] cls=%r id=%r InlineImage cache=%s",
+        obj_class, oid,
+        ("miss" if ii_count is None else str(ii_count) + " ref(s)"),
     )
 
     return att_count, ii_count
