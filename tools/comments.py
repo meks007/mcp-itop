@@ -38,7 +38,7 @@ def register(mcp, client: ItopClient):
         log_field = "public_log" if is_public else "private_log"
 
         ticket_class, key = await resolve_key(
-            ticket_class, coerce_ref(ticket_ref or "", ticket_id or ""), client.request
+            ticket_class, coerce_ref(ticket_ref or "", ticket_id or "")
         )
 
         result = await client.request({
