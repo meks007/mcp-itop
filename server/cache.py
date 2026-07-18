@@ -21,13 +21,14 @@ registry_set_meta(cls, key, value)
 registry_get_fields(cls)
 seed_field_cache(cls, fields)
 
-# Field helper  (uses get_client() internally -- no itop_request_fn param)
-get_class_fields(cls)
-
 # resolve_key cache
 cache_get(obj_class, ref)
 cache_set(obj_class, ref, cls, id)
 cache_cleanup()
+
+Note: get_class_fields() has moved to ItopClient.get_class_fields() in
+client.py. Use client.get_class_fields(cls) for policy-aware field
+discovery that respects _LEAN_STRIP.
 """
 
 from __future__ import annotations
@@ -98,58 +99,6 @@ def seed_field_cache(cls: str, fields: dict) -> None:
             "[registry] seed_field_cache cls=%r +%d new fields (total=%d)",
             cls, len(new_fields), len(entry["fields"]),
         )
-
-
-# ---------------------------------------------------------------------------
-# Field helper
-# ---------------------------------------------------------------------------
-
-async def get_class_fields(obj_class: str) -> frozenset[str]:
-    """Return the field inventory for obj_class.
-
-    Uses the ItopClient from the current async context (get_client()).
-    Returns the cached frozenset immediately when warm.
-    Marks the class as non-existent (exists=False) on probe failure so
-    subsequent calls skip the round-trip.
-    """
-    from client import get_client
-
-    entry = _registry_entry(obj_class)
-
-    if entry["fields"]:
-        return entry["fields"]
-
-    if entry["exists"] is False:
-        return frozenset()
-
-    logger.debug("[get_class_fields] cls=%r cache cold, probing iTop", obj_class)
-    client = get_client()
-    result = await client.get(
-        obj_class,
-        "SELECT " + obj_class,
-        fields="*",
-        limit=1,
-    )
-    if result.get("code", -1) != 0:
-        logger.debug(
-            "[get_class_fields] cls=%r probe failed code=%r msg=%r",
-            obj_class, result.get("code"), result.get("message"),
-        )
-        entry["exists"] = False
-        return frozenset()
-
-    objects = result.get("objects") or {}
-    if not objects:
-        logger.debug("[get_class_fields] cls=%r probe returned no objects", obj_class)
-        entry["exists"] = False
-        return frozenset()
-
-    for obj_data in objects.values():
-        fields = obj_data.get("fields") or {}
-        seed_field_cache(obj_class, fields)
-        break
-
-    return entry["fields"]
 
 
 # ---------------------------------------------------------------------------
