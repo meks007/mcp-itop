@@ -35,6 +35,7 @@ preheat_once()
 
 from __future__ import annotations
 
+import asyncio
 import time
 import logging
 from typing import Any
@@ -58,29 +59,26 @@ _ITOP_CLASS_REGISTRY: dict[str, dict] = {}
 
 def _registry_entry(cls: str) -> dict:
     if cls not in _ITOP_CLASS_REGISTRY:
-        logger.debug("[registry] init slot for class=%r", cls)
+        # NOTE: no logger.debug() here -- this function is called from within
+        # logging formatter paths (via beartype hooks) and any log call here
+        # would cause infinite recursion.
         _ITOP_CLASS_REGISTRY[cls] = {"exists": None, "fields": frozenset(), "meta": {}}
     return _ITOP_CLASS_REGISTRY[cls]
 
 
 def registry_get_meta(cls: str, key: str, default: Any = None) -> Any:
     """Read arbitrary per-class metadata from the registry."""
-    value = _registry_entry(cls)["meta"].get(key, default)
-    logger.debug("[registry] get_meta cls=%r key=%r -> %r", cls, key, value)
-    return value
+    return _registry_entry(cls)["meta"].get(key, default)
 
 
 def registry_set_meta(cls: str, key: str, value: Any) -> None:
     """Write arbitrary per-class metadata into the registry."""
-    logger.debug("[registry] set_meta cls=%r key=%r value=%r", cls, key, value)
     _registry_entry(cls)["meta"][key] = value
 
 
 def registry_get_fields(cls: str) -> frozenset:
     """Return the known field inventory for a class (may be empty)."""
-    fields = _registry_entry(cls)["fields"]
-    logger.debug("[registry] get_fields cls=%r -> %d fields known", cls, len(fields))
-    return fields
+    return _registry_entry(cls)["fields"]
 
 
 def seed_field_cache(cls: str, fields: dict) -> None:
@@ -94,16 +92,17 @@ def seed_field_cache(cls: str, fields: dict) -> None:
         return
     incoming = frozenset(fields.keys())
     before_set = entry["fields"]
-    new = incoming - before_set
+    new_fields = incoming - before_set
     entry["fields"] = before_set | incoming
     entry["exists"] = True
-    logger.debug(
-        "[registry] seed_field_cache cls=%r fields_before=%d fields_after=%d new=%r",
-        cls,
-        len(before_set),
-        len(entry["fields"]),
-        sorted(new),
-    )
+    if new_fields and logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "[registry] seed_field_cache cls=%r fields_before=%d fields_after=%d new=%r",
+            cls,
+            len(before_set),
+            len(entry["fields"]),
+            sorted(new_fields),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -123,17 +122,9 @@ async def get_class_fields(obj_class: str) -> frozenset[str]:
     entry = _registry_entry(obj_class)
 
     if entry["fields"]:
-        logger.debug(
-            "[get_class_fields] cls=%r cache warm, %d fields",
-            obj_class, len(entry["fields"]),
-        )
         return entry["fields"]
 
     if entry["exists"] is False:
-        logger.debug(
-            "[get_class_fields] cls=%r known non-existent, skipping probe",
-            obj_class,
-        )
         return frozenset()
 
     logger.debug("[get_class_fields] cls=%r cache cold, probing iTop", obj_class)
@@ -202,10 +193,6 @@ def cache_get(obj_class: str, ref: str) -> tuple[str, int] | None:
             "[resolve_key_cache] expired entry for class=%r ref=%r", obj_class, ref
         )
         return None
-    logger.debug(
-        "[resolve_key_cache] hit class=%r ref=%r -> resolved_class=%r id=%r",
-        obj_class, ref, entry["class"], entry["id"],
-    )
     return entry["class"], entry["id"]
 
 
@@ -218,15 +205,18 @@ def cache_set(obj_class: str, ref: str, resolved_class: str, resolved_id: int) -
         "id": resolved_id,
         "ts": time.monotonic(),
     }
-    logger.debug(
-        "[resolve_key_cache] stored class=%r ref=%r -> resolved_class=%r id=%r",
-        obj_class, ref, resolved_class, resolved_id,
-    )
 
 
 # ---------------------------------------------------------------------------
 # Pre-heat
 # ---------------------------------------------------------------------------
+
+# asyncio.Lock protecting preheat_once() against concurrent first-request races.
+# Created lazily inside preheat_once() to avoid issues with event-loop
+# initialization order at import time.
+_PREHEAT_LOCK: asyncio.Lock | None = None
+_PREHEAT_DONE: bool = False
+
 
 async def preheat() -> None:
     """Probe all CLASSES_WITH_REF to warm the field cache.
@@ -245,16 +235,26 @@ async def preheat() -> None:
 
 
 async def preheat_once() -> None:
-    """Run preheat only if any CLASSES_WITH_REF field cache is still cold.
+    """Run preheat only once per server lifetime, guarded against concurrent callers.
 
-    No-op once all classes are warm or marked non-existent.
-    Uses the ItopClient from the current async context (get_client()).
+    Uses an asyncio.Lock so that if two requests arrive simultaneously on a
+    cold cache, only one fires the iTop probes -- the second waits and then
+    finds the cache already warm.
     """
-    from helpers import CLASSES_WITH_REF
+    global _PREHEAT_LOCK, _PREHEAT_DONE
 
-    if all(
-        _registry_entry(cls)["fields"] or _registry_entry(cls)["exists"] is False
-        for cls in CLASSES_WITH_REF
-    ):
+    # Fast path: already done (no lock needed, bool read is atomic in CPython).
+    if _PREHEAT_DONE:
         return
-    await preheat()
+
+    # Lazy lock creation -- safe because this always runs inside the event loop.
+    if _PREHEAT_LOCK is None:
+        _PREHEAT_LOCK = asyncio.Lock()
+
+    async with _PREHEAT_LOCK:
+        # Re-check inside the lock: another coroutine may have finished
+        # preheat while we were waiting to acquire it.
+        if _PREHEAT_DONE:
+            return
+        await preheat()
+        _PREHEAT_DONE = True
