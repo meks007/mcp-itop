@@ -10,6 +10,7 @@ from typing import Union
 from cache import get_class_fields
 from helpers import (
     apply_field_strip,
+    coerce_ref,
     ensure_ref_field,
     fetch_image_counts,
     format_and_cache,
@@ -23,6 +24,7 @@ from helpers import (
     _SYNTHETIC_FIELDS,
 )
 from config import DEFAULT_COMMENT
+from client import itop_core_get
 
 # Fields stripped by itop_get when full=False.
 _LEAN_STRIP: frozenset[str] = frozenset({"private_log"})
@@ -31,7 +33,7 @@ _LEAN_STRIP: frozenset[str] = frozenset({"private_log"})
 async def _fetch_and_cache_ticket(
     obj_class: str,
     obj_id: str | int,
-    itop_request,
+    itop_request_fn,
 ) -> str:
     """Fetch a ticket via core/get with output_fields='*' and run format_and_cache.
 
@@ -45,23 +47,23 @@ async def _fetch_and_cache_ticket(
     available for subsequent read_inline_image_refs() calls.
 
     Args:
-        obj_class:    iTop class name (concrete class preferred).
-        obj_id:       Numeric ticket ID (int or string).
-        itop_request: Async iTop REST callable.
+        obj_class:       iTop class name (concrete class preferred).
+        obj_id:          Numeric ticket ID (int or string).
+        itop_request_fn: Async iTop REST callable.
 
     Returns:
         Formatted ticket string (HTML stripped).
     """
-    result = await itop_request({
-        "operation": "core/get",
-        "class": obj_class,
-        "key": int(obj_id) if str(obj_id).isdigit() else obj_id,
-        "output_fields": "*",
-    })
+    result = await itop_core_get(
+        itop_request_fn,
+        obj_class,
+        int(obj_id) if str(obj_id).isdigit() else obj_id,
+        fields="*",
+    )
     return format_and_cache(result)
 
 
-def register(mcp, itop_request):
+def register(mcp, itop_request_fn):
     """Register all CRUD tools on the given mcp instance."""
 
     @mcp.tool(
@@ -96,7 +98,7 @@ def register(mcp, itop_request):
 
         # Empty output_fields: return available field names only, no content.
         if not output_fields or not output_fields.strip():
-            fields = await get_class_fields(obj_class, itop_request)
+            fields = await get_class_fields(obj_class, itop_request_fn)
             visible = sorted(fields - _LEAN_STRIP - _SYNTHETIC_FIELDS)
             if not visible:
                 return (
@@ -108,25 +110,21 @@ def register(mcp, itop_request):
                 "Available fields are * or: " + ", ".join(visible)
             )
 
-        obj_class, resolved_key = await resolve_key(obj_class, key_or_ref, itop_request)
+        obj_class, resolved_key = await resolve_key(obj_class, key_or_ref, itop_request_fn)
 
         strip = frozenset() if full else _LEAN_STRIP
         fields_to_request, post_strip = await resolve_output_fields(
-            obj_class, ensure_ref_field(obj_class, output_fields), strip, itop_request
+            obj_class, ensure_ref_field(obj_class, output_fields), strip, itop_request_fn
         )
 
-        op: dict = {
-            "operation": "core/get",
-            "class": obj_class,
-            "key": resolved_key,
-            "output_fields": fields_to_request,
-        }
-        if limit > 0:
-            op["limit"] = str(limit)
-            if page > 0:
-                op["page"] = str(page)
-
-        result = await itop_request(op)
+        result = await itop_core_get(
+            itop_request_fn,
+            obj_class,
+            resolved_key,
+            fields=fields_to_request,
+            limit=limit if limit > 0 else None,
+            page=page if page > 0 else None,
+        )
 
         if post_strip:
             apply_field_strip(result, post_strip)
@@ -142,7 +140,7 @@ def register(mcp, itop_request):
                 if not isinstance(fields, dict):
                     continue
                 att_count, ii_count = await fetch_image_counts(
-                    obj_class, oid, itop_request
+                    obj_class, oid, itop_request_fn
                 )
                 total = att_count + ii_count
                 if total == 0:
@@ -173,7 +171,7 @@ def register(mcp, itop_request):
         if isinstance(parsed, str):
             return parsed
 
-        result = await itop_request({
+        result = await itop_request_fn({
             "operation": "core/create",
             "class": obj_class,
             "fields": parsed,
@@ -213,10 +211,9 @@ def register(mcp, itop_request):
                 "  ev_pending  - put ticket on hold"
             )
 
-        ref = str(ticket_ref or key or "").strip() or None
-        obj_class, resolved = await resolve_key(obj_class, ref, itop_request)
+        obj_class, resolved = await resolve_key(obj_class, coerce_ref(ticket_ref, key), itop_request_fn)
 
-        result = await itop_request({
+        result = await itop_request_fn({
             "operation": "core/update",
             "class": obj_class,
             "key": resolved,
@@ -240,10 +237,9 @@ def register(mcp, itop_request):
 
         It runs in simulation mode by default and is retained only for controlled
         dry-run checks."""
-        ref = str(ticket_ref or key or "").strip() or None
-        obj_class, resolved = await resolve_key(obj_class, ref, itop_request)
+        obj_class, resolved = await resolve_key(obj_class, coerce_ref(ticket_ref, key), itop_request_fn)
 
-        result = await itop_request({
+        result = await itop_request_fn({
             "operation": "core/delete",
             "class": obj_class,
             "key": resolved,
@@ -279,10 +275,9 @@ def register(mcp, itop_request):
                 'e.g. fields={"solution": "..."}. Resolving is the final step.'
             )
 
-        ref = str(ticket_ref or key or "").strip() or None
-        obj_class, resolved = await resolve_key(obj_class, ref, itop_request)
+        obj_class, resolved = await resolve_key(obj_class, coerce_ref(ticket_ref, key), itop_request_fn)
 
-        result = await itop_request({
+        result = await itop_request_fn({
             "operation": "core/apply_stimulus",
             "class": obj_class,
             "key": resolved,
@@ -305,7 +300,7 @@ def register(mcp, itop_request):
         redundancy: bool = True,
     ) -> str:
         """Find CIs related to a given object via impact or dependency relations."""
-        result = await itop_request({
+        result = await itop_request_fn({
             "operation": "core/get_related",
             "class": obj_class,
             "key": parse_key(key),
@@ -328,7 +323,7 @@ def register(mcp, itop_request):
     )
     async def itop_list_operations() -> str:
         """List all available REST/JSON operations on the iTop server."""
-        result = await itop_request({"operation": "list_operations"})
+        result = await itop_request_fn({"operation": "list_operations"})
         if result.get("code", -1) != 0:
             return "Error: " + str_or(result, "message", "Unknown error")
         ops = result.get("operations", [])
@@ -346,7 +341,7 @@ def register(mcp, itop_request):
     )
     async def itop_describe_class(obj_class: str) -> str:
         """Discover available fields for an iTop class by sampling an existing object."""
-        fields = await get_class_fields(obj_class, itop_request)
+        fields = await get_class_fields(obj_class, itop_request_fn)
 
         if not fields:
             return (
