@@ -3,7 +3,7 @@ Attachment tools: fetch image metadata and download attachments as files.
 
 Public API
 ----------
-register(mcp, itop_request, get_token_fn)
+register(mcp, itop_request_fn, get_token_fn)
     Registers the following MCP tools and resources:
 
     Tools:
@@ -72,7 +72,8 @@ from attachment_store import (
     write_inline_image_refs,
 )
 from config import ITOP_TIMEOUT, ITOP_URL, ITOP_VERIFY_SSL, MCP_DEBUG, logger
-from helpers import resolve_key
+from helpers import coerce_ref, resolve_key
+from client import itop_core_get
 from tools.crud import _fetch_and_cache_ticket
 
 _IMAGE_PREFIXES = ("image/",)
@@ -140,14 +141,14 @@ async def _download_binary(url: str) -> tuple[bytes, str]:
         return response.content, mimetype
 
 
-def register(mcp, itop_request, get_token_fn):
+def register(mcp, itop_request_fn, get_token_fn):
     """Register attachment tools and the static image resource.
 
     Args:
-        mcp:           FastMCP server instance.
-        itop_request:  Async callable that sends iTop REST requests.
-        get_token_fn:  Zero-argument callable returning the current bearer
-                       token string for the active MCP client session.
+        mcp:             FastMCP server instance.
+        itop_request_fn: Async callable that sends iTop REST requests.
+        get_token_fn:    Zero-argument callable returning the current bearer
+                         token string for the active MCP client session.
     """
 
     # ------------------------------------------------------------------
@@ -172,8 +173,8 @@ def register(mcp, itop_request, get_token_fn):
             obj_class, ticket_ref, key,
         )
 
-        ref = str(ticket_ref or key or "").strip() or None
-        obj_class, resolved = await resolve_key(obj_class, ref, itop_request)
+        ref = coerce_ref(ticket_ref, key)
+        obj_class, resolved = await resolve_key(obj_class, ref, itop_request_fn)
         logger.debug(
             "[attachments] itop_get_ticket_images: resolved class=%r key=%r",
             obj_class, resolved,
@@ -186,16 +187,12 @@ def register(mcp, itop_request, get_token_fn):
         images = []
 
         # -- Attachment (image types only) --
-        att_result = await itop_request({
-            "operation": "core/get",
-            "class": "Attachment",
-            "key": (
-                "SELECT Attachment"
-                " WHERE item_class = '" + obj_class + "'"
-                " AND item_id = " + obj_id
-            ),
-            "output_fields": "contents",
-        })
+        att_oql = (
+            "SELECT Attachment"
+            " WHERE item_class = '" + obj_class + "'"
+            " AND item_id = " + obj_id
+        )
+        att_result = await itop_core_get(itop_request_fn, "Attachment", att_oql, fields="contents")
         att_objects = att_result.get("objects") or {}
         logger.debug(
             "[attachments] itop_get_ticket_images: Attachment query returned %d object(s)",
@@ -242,9 +239,6 @@ def register(mcp, itop_request, get_token_fn):
             )
 
         # -- InlineImage via HTML-parsed refs cache --
-        # Read refs that were written by format_and_cache() when the ticket
-        # was last fetched via itop_get or another tool using format_and_cache.
-        # On a cache miss, fetch the ticket now to populate the cache first.
         inline_refs = read_inline_image_refs(obj_class, obj_id)
         logger.debug(
             "[attachments] itop_get_ticket_images: inline_image_refs cache %s for cls=%r id=%r",
@@ -253,16 +247,14 @@ def register(mcp, itop_request, get_token_fn):
         )
 
         if inline_refs is None:
-            # Cache miss: fetch the ticket so format_and_cache writes the refs.
             logger.debug(
                 "[attachments] itop_get_ticket_images: fetching ticket cls=%r id=%r"
                 " to populate inline image ref cache",
                 obj_class, obj_id,
             )
-            await _fetch_and_cache_ticket(obj_class, obj_id, itop_request)
+            await _fetch_and_cache_ticket(obj_class, obj_id, itop_request_fn)
             inline_refs = read_inline_image_refs(obj_class, obj_id)
             if inline_refs is None:
-                # Ticket has no parseable HTML fields; treat as no inline images.
                 inline_refs = []
                 write_inline_image_refs(obj_class, obj_id, [])
 
@@ -313,8 +305,7 @@ def register(mcp, itop_request, get_token_fn):
             "[attachments] itop_get_ticket_images: total images collected=%d", len(images)
         )
 
-        # Deduplicate: by img_id for InlineImages (already unique from cache),
-        # and by SHA-256 of the raw base64 payload for Attachments.
+        # Deduplicate by img_id for InlineImages and by SHA-256 of base64 for Attachments.
         seen_hashes: set[str] = set()
         seen_inline_ids: set[str] = set()
         unique_images = []
@@ -341,7 +332,6 @@ def register(mcp, itop_request, get_token_fn):
                         continue
                     seen_hashes.add(digest)
 
-            # Content blob dedup: skip if binary matches an already-accepted image.
             content_bytes = img.get("content")
             if content_bytes:
                 content_digest = hashlib.sha256(content_bytes).hexdigest()
@@ -371,7 +361,6 @@ def register(mcp, itop_request, get_token_fn):
                 + obj_class + " " + (ticket_ref or key) + "."
             )
 
-        # Persist entries in the SQLite store. Strip internal keys.
         store_entries = [
             {k: v for k, v in img.items() if k not in ("source", "_b64")}
             for img in images
@@ -423,21 +412,17 @@ def register(mcp, itop_request, get_token_fn):
         """List non-image file attachments for an iTop ticket, including MIME type and browser
         download link. Use itop_get_ticket_images for images. Returns metadata and links only,
         no file binaries. Prefer ticket_ref; use key for a numeric ID or OQL query."""
-        ref = str(ticket_ref or key or "").strip() or None
-        obj_class, resolved = await resolve_key(obj_class, ref, itop_request)
+        ref = coerce_ref(ticket_ref, key)
+        obj_class, resolved = await resolve_key(obj_class, ref, itop_request_fn)
         if resolved is None:
             return "Error: provide either ticket_ref or key to identify the ticket."
 
-        att_result = await itop_request({
-            "operation": "core/get",
-            "class": "Attachment",
-            "key": (
-                "SELECT Attachment"
-                " WHERE item_class = '" + obj_class + "'"
-                " AND item_id = " + str(resolved)
-            ),
-            "output_fields": "contents",
-        })
+        att_oql = (
+            "SELECT Attachment"
+            " WHERE item_class = '" + obj_class + "'"
+            " AND item_id = " + str(resolved)
+        )
+        att_result = await itop_core_get(itop_request_fn, "Attachment", att_oql, fields="contents")
 
         files = []
 
