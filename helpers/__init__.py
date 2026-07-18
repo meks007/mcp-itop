@@ -59,7 +59,7 @@ from helpers.formatters import (
     format_duration,
 )
 
-# Re-export cache helpers that callers import from helpers directly.
+# Cache helpers imported by some tool modules via "from helpers import ..."
 from cache import (
     registry_get_fields,
     registry_get_meta,
@@ -68,6 +68,9 @@ from cache import (
     get_class_fields,
     _registry_entry,
 )
+
+# Client context helpers -- allow "from helpers import get_client, set_client"
+from client import get_client, set_client
 
 __all__ = [
     # html
@@ -88,4 +91,6 @@ __all__ = [
     # cache pass-throughs
     "registry_get_fields", "registry_get_meta", "registry_set_meta",
     "seed_field_cache", "get_class_fields", "_registry_entry",
+    # client context
+    "get_client", "set_client",
 ]
