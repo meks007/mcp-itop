@@ -3,6 +3,13 @@ helpers package -- re-exports all public names so existing imports continue
 to work without change after the flat helpers.py was split into submodules.
 
     from helpers import format_and_cache, resolve_key, ...   # unchanged
+
+Note: get_client and set_client are NOT re-exported here to avoid a circular
+import. client.py imports helpers.stripping at module level; re-exporting
+from client in helpers/__init__.py would cause Python to import client while
+it is still being initialized. Import get_client and set_client directly:
+
+    from client import get_client, set_client
 """
 
 from helpers.html import (
@@ -71,9 +78,6 @@ from cache import (
     registry_add_entry,
 )
 
-# Client context helpers -- allow "from helpers import get_client, set_client"
-from client import get_client, set_client
-
 __all__ = [
     # html
     "_strip_html", "strip_html_recursive", "parse_objects",
@@ -94,6 +98,4 @@ __all__ = [
     # class metadata cache pass-throughs
     "registry_get_fields", "registry_get_meta", "registry_set_meta",
     "seed_field_cache", "registry_add_entry",
-    # client context
-    "get_client", "set_client",
 ]
