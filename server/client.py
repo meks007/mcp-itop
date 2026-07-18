@@ -316,9 +316,14 @@ class ItopClient:
             page:   Page number for paginated results.
             full:   When True, skip stripping and return the raw dict.
         """
+        if full and fields not in ("*", "*+"):
+            fields = "*"
+            
         result = await self.get_raw(cls, key, fields=fields, limit=limit, page=page)
+        
         if not full:
             apply_field_strip(result, _LEAN_STRIP)
+            
         return result
 
     # ------------------------------------------------------------------
