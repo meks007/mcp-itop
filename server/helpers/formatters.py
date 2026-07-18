@@ -106,23 +106,16 @@ def _format_objects(result: dict) -> tuple[str, dict[str, list[dict]]]:
 format_objects = _format_objects
 
 
-def format_and_cache(result: dict, *, token: str) -> str:
+def format_and_cache(result: dict) -> str:
     """Format iTop response and persist inline image refs to SQLite.
 
     Calls _format_objects() to get the formatted text and the inline image
     refs map, then writes each ticket's refs to the attachment_store cache
-    via write_inline_image_refs(). Refs are stored under a SHA-256 digest
-    of the supplied token so that only callers with the same token can
-    retrieve them within the TTL window.
+    via write_inline_image_refs().
 
     The deferred import of attachment_store avoids a circular import:
       helpers -> attachment_store -> config  (safe)
       attachment_store must NOT import helpers at module level.
-
-    Args:
-        result: Raw iTop REST response dict.
-        token:  Raw bearer token of the caller. Never stored; only its
-                SHA-256 digest is written to the database.
     """
     from attachment_store import write_inline_image_refs
 
@@ -131,7 +124,7 @@ def format_and_cache(result: dict, *, token: str) -> str:
     for ticket_key, img_refs in refs.items():
         try:
             cls, oid = ticket_key.split("::", 1)
-            write_inline_image_refs(cls, oid, img_refs, token=token)
+            write_inline_image_refs(cls, oid, img_refs)
         except Exception as exc:
             logger.warning(
                 "[format_and_cache] failed to write inline image refs for %r: %s",
