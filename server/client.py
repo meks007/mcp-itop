@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar, Token
 from typing import TYPE_CHECKING
@@ -93,6 +94,29 @@ def _redact_headers(headers: httpx.Headers) -> dict:
         else:
             redacted[name] = value
     return redacted
+
+
+# Base64 pattern: sequences of 60+ base64 characters (A-Za-z0-9+/=).
+# Shorter runs are left intact (they are likely short encoded values, not blobs).
+_B64_RE = re.compile(r"[A-Za-z0-9+/]{60,}={0,2}")
+_B64_SNIP = 8  # visible chars at each end of a redacted b64 blob
+
+
+def _redact_b64_blobs(text: str) -> str:
+    """Replace long base64 blobs in text with a short prefix...suffix placeholder.
+
+    Only sequences of 60+ base64 characters are considered blobs.  Shorter
+    encoded values (e.g. short IDs) are left unchanged.  The first and last
+    _B64_SNIP characters of each blob are preserved so the log remains useful
+    for identifying which attachment or inline image is being transferred.
+    """
+    def _replace(m: re.Match) -> str:
+        blob = m.group(0)
+        if len(blob) <= _B64_SNIP * 2 + 3:
+            return blob
+        return blob[:_B64_SNIP] + "...[b64 " + str(len(blob)) + " chars]..." + blob[-_B64_SNIP:]
+
+    return _B64_RE.sub(_replace, text)
 
 
 # ---------------------------------------------------------------------------
@@ -178,10 +202,14 @@ async def itop_request(operation: dict) -> dict:
         asyncio.ensure_future(evict_token(token))
 
     if MCP_DEBUG:
+        # Serialise the full response but redact long base64 blobs so that
+        # attachment payloads do not flood the log.  Non-blob fields are
+        # logged without any length cutoff so the full context is visible.
+        raw = json.dumps(result, ensure_ascii=False)
         logger.debug(
             "MCP <- iTop  status=%s  response=%s",
             resp.status_code,
-            json.dumps(result, ensure_ascii=False)[:4000],
+            _redact_b64_blobs(raw),
         )
 
     return result
