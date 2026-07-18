@@ -1,10 +1,21 @@
 """
 iTop REST/JSON API HTTP client.
+
+Public context API
+------------------
+get_client()      Return the ItopClient bound to the current async context.
+set_client(c)     Bind an ItopClient to the current async context.
+
+Both are called by ItopMiddleware (auth.py) so that every request handler
+and helper function can reach the client without an explicit parameter.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
+from contextvars import ContextVar, Token
+from typing import TYPE_CHECKING
 
 import httpx
 
@@ -18,15 +29,11 @@ from config import (
     logger,
 )
 
+# ---------------------------------------------------------------------------
+# Module-level HTTP client (shared, lazy-init)
+# ---------------------------------------------------------------------------
+
 _http_client: httpx.AsyncClient | None = None
-
-
-def _redact_secret(value: object, visible_chars: int = 7) -> str:
-    """Mask a secret while retaining its first characters for identification."""
-    secret = str(value)
-    if len(secret) <= visible_chars:
-        return "***REDACTED***"
-    return f"{secret[:visible_chars]}***REDACTED***"
 
 
 def _get_http_client() -> httpx.AsyncClient:
@@ -36,8 +43,20 @@ def _get_http_client() -> httpx.AsyncClient:
     return _http_client
 
 
+# ---------------------------------------------------------------------------
+# Redaction helpers
+# ---------------------------------------------------------------------------
+
+def _redact_secret(value: object, visible_chars: int = 7) -> str:
+    """Mask a secret while retaining its first characters for identification."""
+    secret = str(value)
+    if len(secret) <= visible_chars:
+        return "***REDACTED***"
+    return f"{secret[:visible_chars]}***REDACTED***"
+
+
 def _redact_form_data(data: dict) -> dict:
-    """Return a copy of the iTop form-data dict with auth secrets masked, for safe logging."""
+    """Return a copy of the iTop form-data dict with auth secrets masked."""
     redacted = dict(data)
     for key in ("auth_token", "auth_pwd"):
         if key in redacted and redacted[key]:
@@ -60,12 +79,16 @@ def _redact_headers(headers: httpx.Headers) -> dict:
     return redacted
 
 
-async def itop_request(operation: dict, get_bearer_token) -> dict:
-    """Send request to iTop REST/JSON API.
+# ---------------------------------------------------------------------------
+# Low-level request function
+# ---------------------------------------------------------------------------
+
+async def itop_request(operation: dict, get_bearer_token: Callable[[], str]) -> dict:
+    """Send a raw operation dict to the iTop REST/JSON API.
 
     Args:
-        operation: The iTop operation dict.
-        get_bearer_token: Callable that returns the current bearer token string.
+        operation:        iTop operation dict.
+        get_bearer_token: Zero-argument callable returning the bearer token.
     """
     if not ITOP_URL:
         raise ValueError("ITOP_URL is not configured. Set it in .env or environment.")
@@ -135,83 +158,75 @@ async def itop_request(operation: dict, get_bearer_token) -> dict:
     return result
 
 
-async def itop_core_get(
-    itop_request_fn,
-    cls: str,
-    key: str | int,
-    fields: str = "*",
-    limit: int | None = None,
-    page: int | None = None,
-) -> dict:
-    """Convenience wrapper for iTop core/get operations.
+# ---------------------------------------------------------------------------
+# ContextVar: current ItopClient for the active async context
+# ---------------------------------------------------------------------------
 
-    Eliminates repetitive dict construction across helpers, cache, and tools.
-    Always converts limit and page to strings as required by the iTop REST API.
+# Forward-declared as None; ItopClient is defined below.
+_current_client: ContextVar["ItopClient | None"] = ContextVar(
+    "_current_client", default=None
+)
 
-    Args:
-        itop_request_fn: The bound async itop_request callable (server.itop_request).
-        cls:             iTop class name, e.g. 'UserRequest', 'Attachment'.
-        key:             Numeric ID, OQL string, or ticket ref.
-        fields:          Comma-separated field names or '*' / '*+'.
-        limit:           Max objects to return. None means no limit param sent.
-        page:            Page number for paginated results. None means not sent.
 
-    Returns:
-        Raw iTop REST response dict (code, message, objects).
+def get_client() -> "ItopClient":
+    """Return the ItopClient bound to the current async context.
+
+    Raises RuntimeError when no client has been set (i.e. the request did not
+    pass through ItopMiddleware).
     """
-    op: dict = {
-        "operation": "core/get",
-        "class": cls,
-        "key": key,
-        "output_fields": fields,
-    }
-    if limit is not None:
-        op["limit"] = str(limit)
-    if page is not None:
-        op["page"] = str(page)
-    return await itop_request_fn(op)
+    client = _current_client.get()
+    if client is None:
+        raise RuntimeError(
+            "No ItopClient is bound to the current context. "
+            "Ensure ItopMiddleware is installed and the request carries a bearer token."
+        )
+    return client
 
+
+def set_client(client: "ItopClient") -> Token:
+    """Bind an ItopClient to the current async context.
+
+    Returns the reset Token so the caller can restore the previous value.
+    """
+    return _current_client.set(client)
+
+
+# ---------------------------------------------------------------------------
+# ItopClient
+# ---------------------------------------------------------------------------
 
 class ItopClient:
     """High-level async client for the iTop REST/JSON API.
 
-    Wraps the low-level itop_request() function and provides typed methods
-    for the most common iTop operations. All tool modules should accept an
-    ItopClient instance instead of a raw itop_request_fn callable so that
-    Retry logic, logging, and mocking can be centralised here.
-
-    Usage::
-
-        client = ItopClient(get_bearer_token)
-        result = await client.get("UserRequest", "R-001234")
+    Args:
+        get_bearer_token: Zero-argument callable returning the current bearer
+                          token string for every outgoing request.
+        on_request:       Optional async hook called at the start of every
+                          request() invocation. Receives the ItopClient
+                          instance. Used by server.py to trigger preheat_once()
+                          without monkey-patching.
     """
 
-    def __init__(self, get_bearer_token: callable) -> None:
-        """Initialise the client.
-
-        Args:
-            get_bearer_token: Zero-argument callable that returns the
-                              current per-request bearer token string.
-        """
+    def __init__(
+        self,
+        get_bearer_token: Callable[[], str],
+        *,
+        on_request: Callable[["ItopClient"], Awaitable[None]] | None = None,
+    ) -> None:
         self._get_bearer_token = get_bearer_token
+        self._on_request = on_request
 
     # ------------------------------------------------------------------
-    # Low-level request
+    # Low-level
     # ------------------------------------------------------------------
 
     async def request(self, op: dict) -> dict:
         """Send a raw iTop REST/JSON operation dict.
 
-        Identical to the module-level itop_request() function.  Provided
-        here so callers that already hold an ItopClient instance never need
-        to import the bare function.
-
-        Args:
-            op: iTop operation dict, e.g. {"operation": "list_operations"}.
-
-        Returns:
-            Raw iTop REST response dict (code, message, objects, ...).
+        Runs the on_request hook (if set) before every call.
         """
+        if self._on_request is not None:
+            await self._on_request(self)
         return await itop_request(op, self._get_bearer_token)
 
     # ------------------------------------------------------------------
@@ -228,19 +243,12 @@ class ItopClient:
     ) -> dict:
         """Wrapper for iTop core/get operations.
 
-        Identical to the module-level itop_core_get() function but uses
-        the client's own request() method so the bearer token is always
-        injected correctly.
-
         Args:
-            cls:    iTop class name, e.g. 'UserRequest', 'Attachment'.
+            cls:    iTop class name, e.g. 'UserRequest'.
             key:    Numeric ID, OQL string, or ticket ref.
             fields: Comma-separated field names or '*' / '*+'.
-            limit:  Max objects to return. None means no limit param sent.
-            page:   Page number for paginated results. None means not sent.
-
-        Returns:
-            Raw iTop REST response dict (code, message, objects).
+            limit:  Max objects to return.
+            page:   Page number for paginated results.
         """
         op: dict = {
             "operation": "core/get",
@@ -265,17 +273,7 @@ class ItopClient:
         output_fields: str = "id, friendlyname",
         comment: str = "",
     ) -> dict:
-        """Create an iTop object via core/create.
-
-        Args:
-            cls:           iTop class name.
-            fields:        Dict of field name -> value pairs for the new object.
-            output_fields: Comma-separated field names to include in the response.
-            comment:       Optional audit-log comment.
-
-        Returns:
-            Raw iTop REST response dict.
-        """
+        """Create an iTop object via core/create."""
         return await self.request({
             "operation": "core/create",
             "class": cls,
@@ -292,18 +290,7 @@ class ItopClient:
         output_fields: str = "id, friendlyname",
         comment: str = "",
     ) -> dict:
-        """Update fields on an existing iTop object via core/update.
-
-        Args:
-            cls:           iTop class name.
-            key:           Numeric ID or OQL string identifying the object.
-            fields:        Dict of field name -> new value pairs.
-            output_fields: Comma-separated field names to include in the response.
-            comment:       Optional audit-log comment.
-
-        Returns:
-            Raw iTop REST response dict.
-        """
+        """Update fields on an existing iTop object via core/update."""
         return await self.request({
             "operation": "core/update",
             "class": cls,
@@ -322,19 +309,7 @@ class ItopClient:
         output_fields: str = "ref, friendlyname, status",
         comment: str = "",
     ) -> dict:
-        """Apply a lifecycle stimulus to an iTop object via core/apply_stimulus.
-
-        Args:
-            cls:           iTop class name.
-            key:           Numeric ID or OQL string identifying the object.
-            stimulus:      Stimulus name, e.g. 'ev_assign', 'ev_resolve'.
-            fields:        Optional dict of additional field values to set.
-            output_fields: Comma-separated field names to include in the response.
-            comment:       Optional audit-log comment.
-
-        Returns:
-            Raw iTop REST response dict.
-        """
+        """Apply a lifecycle stimulus to an iTop object via core/apply_stimulus."""
         return await self.request({
             "operation": "core/apply_stimulus",
             "class": cls,
