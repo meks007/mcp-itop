@@ -13,7 +13,7 @@ Module layout:
   config.py             - env vars, logging, constants
   cache.py              - class field registry, resolve_key cache, preheat
   auth.py               - BearerTokenMiddleware ContextVar + get_bearer_token()
-  client.py             - iTop REST/JSON HTTP client + itop_core_get()
+  client.py             - iTop REST/JSON HTTP client + ItopClient class
   helpers.py            - shared formatting and parsing utilities
   attachment_store.py   - SQLite store for image URIs and inline image refs
   background_tasks.py   - central housekeeping asyncio loop
@@ -44,7 +44,7 @@ from fastmcp.server.auth.providers.debug import DebugTokenVerifier
 
 from auth import BearerTokenMiddleware, get_bearer_token
 from cache import preheat_once
-from client import itop_request as _raw_itop_request
+from client import ItopClient, itop_request as _raw_itop_request
 from config import MCP_DEBUG, MCP_DEBUG_HEADERS, logger
 
 import tools.analytics as _analytics
@@ -78,23 +78,44 @@ mcp = FastMCP(
 
 
 # ---------------------------------------------------------------------------
-# Bind bearer token to itop_request_fn
+# ItopClient instance (per-request bearer token injected via ContextVar)
 # ---------------------------------------------------------------------------
 
-async def itop_request_fn(operation: dict) -> dict:
-    """Wrapper that injects the per-request bearer token into the HTTP client.
+# Preheat wrapper used exclusively by preheat_once() so the field caches
+# are warm before the first real tool call arrives.
+async def _raw_itop_request_with_token(operation: dict) -> dict:
+    """Thin wrapper used exclusively by preheat_once to carry the bearer token."""
+    return await _raw_itop_request(operation, get_bearer_token)
 
-    preheat_once() is called here on every request but is a no-op once all
-    CLASSES_WITH_REF field caches are warm. This guarantees a valid bearer
-    token is available when the first probe requests hit iTop.
+
+async def _preheat_and_request(operation: dict) -> dict:
+    """Request wrapper that triggers preheat_once on every call.
+
+    preheat_once() is a no-op once all CLASSES_WITH_REF field caches are
+    warm.  Using this as the ItopClient's bearer-token source guarantees
+    the preheat happens while a valid token is available.
     """
     await preheat_once(_raw_itop_request_with_token)
     return await _raw_itop_request(operation, get_bearer_token)
 
 
-async def _raw_itop_request_with_token(operation: dict) -> dict:
-    """Thin wrapper used exclusively by preheat_once to carry the bearer token."""
-    return await _raw_itop_request(operation, get_bearer_token)
+# Public ItopClient instance shared by all tool modules.  The bearer token
+# is resolved lazily from the ContextVar on every request so the single
+# instance is safe to share across concurrent requests.
+client = ItopClient(get_bearer_token)
+
+# Monkey-patch the client's internal request method to also trigger preheat.
+# This avoids adding a preheat parameter to ItopClient.__init__ while
+# keeping the preheat behaviour identical to the previous itop_request_fn.
+_original_client_request = client.request
+
+
+async def _client_request_with_preheat(op: dict) -> dict:
+    await preheat_once(_raw_itop_request_with_token)
+    return await _raw_itop_request(op, get_bearer_token)
+
+
+client.request = _client_request_with_preheat  # type: ignore[method-assign]
 
 
 def _get_token() -> str:
@@ -106,13 +127,13 @@ def _get_token() -> str:
 # Register all tools and resources
 # ---------------------------------------------------------------------------
 
-_analytics.register(mcp, itop_request_fn)
+_analytics.register(mcp, client)
 # Pass get_token_fn so attachments.py can write to the SQLite store and
 # read it back inside the static itop://attachment/images resource handler.
-_attachments.register(mcp, itop_request_fn, _get_token)
-_kb.register(mcp, itop_request_fn)
-_crud.register(mcp, itop_request_fn)
-_comments.register(mcp, itop_request_fn)
+_attachments.register(mcp, client, _get_token)
+_kb.register(mcp, client)
+_crud.register(mcp, client)
+_comments.register(mcp, client)
 
 
 # ---------------------------------------------------------------------------
