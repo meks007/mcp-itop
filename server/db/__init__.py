@@ -1,88 +1,66 @@
 """
-db/__init__.py - Database backend selection and global accessor.
+db/__init__.py - Database backend accessor.
 
 Usage
 -----
-At server startup (server.py):
-    from db import init_db
-    init_db()
+In server.py (once at startup, before domain modules run):
+    from db import set_db
+    from db.sqlite import SqliteDbBackend
+    set_db(SqliteDbBackend(db_path))
 
-In domain modules (e.g. attachment_store/db.py):
+In domain modules (attachment_store/db.py, session.py, refs.py):
     from db import get_db
     rows = get_db().execute("SELECT ...", params)
 
 To add a new backend:
     1. Implement DbBackend in a new file under server/db/.
-    2. Add its name to the _BACKENDS dict below.
-    3. Set DB_BACKEND=<name> in the environment.
+    2. Instantiate it in server.py and pass it to set_db().
     No changes to any domain module are required.
 """
 
 from __future__ import annotations
 
-import os
 import logging
-from pathlib import Path
 
 from db.base import DbBackend
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Backend registry
-# ---------------------------------------------------------------------------
-
-def _build_backends() -> dict:
-    from db.sqlite import SqliteDbBackend  # local import avoids circular load order
-    return {"sqlite": SqliteDbBackend}
-
-
-# ---------------------------------------------------------------------------
-# Module-level singleton
+# Process-global backend singleton -- set once by server.py at startup
 # ---------------------------------------------------------------------------
 
 _db: DbBackend | None = None
 
 
-def init_db() -> None:
-    """Open the configured database backend. Called once at server startup.
+def set_db(backend: DbBackend) -> None:
+    """Bind the process-global database backend.
 
-    Reads DB_BACKEND (default: sqlite) and IMAGE_STORE_DB (default: next to
-    the server package) from the environment.  Safe to call multiple times;
-    subsequent calls after the first are no-ops.
+    Must be called once at server startup, before any domain module that
+    uses get_db() runs. Safe to call again with the same instance (no-op);
+    raises RuntimeError when called with a different instance after the
+    first call to prevent accidental replacement at runtime.
     """
     global _db
     if _db is not None:
-        logger.debug("[db] init_db: already initialised, skipping")
-        return
-
-    backend_name = os.getenv("DB_BACKEND", "sqlite").lower()
-    backends = _build_backends()
-    backend_cls = backends.get(backend_name)
-    if backend_cls is None:
-        raise ValueError(
-            "Unknown DB_BACKEND %r. Available: %s"
-            % (backend_name, ", ".join(sorted(backends)))
+        if _db is backend:
+            logger.debug("[db] set_db: same backend instance, skipping")
+            return
+        raise RuntimeError(
+            "[db] set_db: backend already set -- cannot replace at runtime"
         )
-
-    if backend_name == "sqlite":
-        default_path = Path(__file__).parent.parent / "attachment_store.db"
-        db_path = os.getenv("IMAGE_STORE_DB", str(default_path))
-        _db = backend_cls(db_path)
-    else:
-        _db = backend_cls()
-
-    _db.connect()
-    logger.info("[db] init_db: backend=%s ready", backend_name)
+    _db = backend
+    logger.info("[db] set_db: backend=%s registered", type(backend).__name__)
 
 
 def get_db() -> DbBackend:
     """Return the active database backend.
 
-    Raises RuntimeError when init_db() has not been called yet.
+    Raises RuntimeError when set_db() has not been called yet.
     """
     if _db is None:
         raise RuntimeError(
-            "Database not initialised. Call db.init_db() at server startup."
+            "Database backend not set. "
+            "Call db.set_db(backend) in server.py at startup."
         )
     return _db
