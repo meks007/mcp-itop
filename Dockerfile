@@ -52,9 +52,9 @@ EXPOSE 8096
 # by sending its own iTop API token as an "Authorization: Bearer <itop_token>"
 # HTTP header. The token is forwarded to iTop on every REST call.
 #
-# IMAGE_STORE_DB controls the SQLite path for the attachment image store.
-# Default: /app/data/attachment_store.db (writable by the mcp user).
+# SQLITE_DB_PATH controls the SQLite database path (used by db/sqlite.py).
+# Default: /app/data/mcp_itop.db (writable by the mcp user).
 # Override via environment variable or mount a volume onto /app/data.
-ENV IMAGE_STORE_DB=/app/data/attachment_store.db
+ENV SQLITE_DB_PATH=/app/data/mcp_itop.db
 
 ENTRYPOINT ["python", "server.py"]
