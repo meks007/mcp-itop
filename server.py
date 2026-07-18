@@ -7,15 +7,13 @@ Provides AI assistants (Claude Desktop, opencode, etc.) with tools to:
   - Query and update tickets, CI, KB articles via iTop REST API
   - Apply lifecycle transitions (assign, resolve, close)
 
-Based on josephstreeter/mcp_itop (CRUD + stimulus) with extended analytics.
-
 Module layout:
   config.py             - env vars, logging, constants
   cache.py              - class field registry, resolve_key cache, preheat
-  auth.py               - BearerTokenMiddleware ContextVar + get_bearer_token()
-  client.py             - iTop REST/JSON HTTP client + ItopClient class
-  helpers.py            - shared formatting and parsing utilities
-  attachment_store.py   - SQLite store for image URIs and inline image refs
+  auth.py               - ItopMiddleware, get_bearer_token()
+  client.py             - iTop REST/JSON HTTP client, ItopClient, get_client()
+  helpers/              - shared formatting and parsing utilities
+  attachment_store/     - SQLite store for image URIs and inline image refs
   background_tasks.py   - central housekeeping asyncio loop
   tools/
     analytics.py        - SLA, workload, idle agents, service/caller quality
@@ -25,11 +23,6 @@ Module layout:
     attachments.py      - image and file attachment tools + static image resource
 
 Framework: fastmcp (PrefectHQ) >= 2.11.0
-  - ResourceResult / ResourceContent for multi-image resource responses
-  - DebugTokenVerifier: accepts any non-empty bearer token (iTop validates
-    the actual token on every REST call)
-  - BearerTokenMiddleware (auth.py): stores the raw token in a ContextVar
-    so get_bearer_token() works in both tool and resource handlers
 """
 
 from __future__ import annotations
@@ -42,9 +35,9 @@ import uvicorn
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.debug import DebugTokenVerifier
 
-from auth import BearerTokenMiddleware, get_bearer_token
+from auth import ItopMiddleware, get_bearer_token
 from cache import preheat_once
-from client import ItopClient, itop_request as _raw_itop_request
+from client import ItopClient
 from config import MCP_DEBUG, MCP_DEBUG_HEADERS, logger
 
 import tools.analytics as _analytics
@@ -62,8 +55,6 @@ _MCP_PORT = int(os.getenv("MCP_PORT", "8096"))
 
 # ---------------------------------------------------------------------------
 # FastMCP instance
-# DebugTokenVerifier accepts any non-empty bearer token.
-# iTop itself validates whether the token is a real/valid iTop API key.
 # ---------------------------------------------------------------------------
 
 mcp = FastMCP(
@@ -76,65 +67,29 @@ mcp = FastMCP(
     auth=DebugTokenVerifier(),
 )
 
-
 # ---------------------------------------------------------------------------
-# ItopClient instance (per-request bearer token injected via ContextVar)
+# ItopClient
 # ---------------------------------------------------------------------------
 
-# Preheat wrapper used exclusively by preheat_once() so the field caches
-# are warm before the first real tool call arrives.
-async def _raw_itop_request_with_token(operation: dict) -> dict:
-    """Thin wrapper used exclusively by preheat_once to carry the bearer token."""
-    return await _raw_itop_request(operation, get_bearer_token)
+async def _preheat_hook(c: ItopClient) -> None:
+    """on_request hook: warm field caches on first request, no-op afterwards."""
+    await preheat_once()
 
 
-async def _preheat_and_request(operation: dict) -> dict:
-    """Request wrapper that triggers preheat_once on every call.
-
-    preheat_once() is a no-op once all CLASSES_WITH_REF field caches are
-    warm.  Using this as the ItopClient's bearer-token source guarantees
-    the preheat happens while a valid token is available.
-    """
-    await preheat_once(_raw_itop_request_with_token)
-    return await _raw_itop_request(operation, get_bearer_token)
-
-
-# Public ItopClient instance shared by all tool modules.  The bearer token
-# is resolved lazily from the ContextVar on every request so the single
-# instance is safe to share across concurrent requests.
-client = ItopClient(get_bearer_token)
-
-# Monkey-patch the client's internal request method to also trigger preheat.
-# This avoids adding a preheat parameter to ItopClient.__init__ while
-# keeping the preheat behaviour identical to the previous itop_request_fn.
-_original_client_request = client.request
-
-
-async def _client_request_with_preheat(op: dict) -> dict:
-    await preheat_once(_raw_itop_request_with_token)
-    return await _raw_itop_request(op, get_bearer_token)
-
-
-client.request = _client_request_with_preheat  # type: ignore[method-assign]
-
-
-def _get_token() -> str:
-    """Return the current per-request bearer token (for non-REST callers)."""
-    return get_bearer_token()
-
+# Single shared ItopClient. Bearer token is resolved lazily via ContextVar on
+# every request, so this instance is safe to share across concurrent requests.
+# The on_request hook triggers preheat_once() while a valid token is available.
+client = ItopClient(get_bearer_token, on_request=_preheat_hook)
 
 # ---------------------------------------------------------------------------
 # Register all tools and resources
 # ---------------------------------------------------------------------------
 
 _analytics.register(mcp, client)
-# Pass get_token_fn so attachments.py can write to the SQLite store and
-# read it back inside the static itop://attachment/images resource handler.
-_attachments.register(mcp, client, _get_token)
+_attachments.register(mcp, client)
 _kb.register(mcp, client)
 _crud.register(mcp, client)
 _comments.register(mcp, client)
-
 
 # ---------------------------------------------------------------------------
 # ASGI app
@@ -142,26 +97,22 @@ _comments.register(mcp, client)
 
 app = mcp.http_app(transport="streamable-http")
 
-# Inject BearerTokenMiddleware so get_bearer_token() works in resource
-# handlers (which run outside the fastmcp tool-call context).
-app.add_middleware(BearerTokenMiddleware)
+# ItopMiddleware sets both the bearer token and the ItopClient instance into
+# ContextVars so that get_bearer_token() and get_client() work in every
+# tool and resource handler.
+app.add_middleware(ItopMiddleware, itop_client=client)
 
 # ---------------------------------------------------------------------------
 # Optional debug logging middleware
 # ---------------------------------------------------------------------------
 
-# Headers that contain secrets and must never appear in logs in cleartext.
 _REDACTED_REQUEST_HEADERS = frozenset({"authorization", "cookie"})
 _REDACTED_RESPONSE_HEADERS = frozenset({"set-cookie"})
 _REDACTED_PLACEHOLDER = "<redacted>"
 
 
 def _format_headers(headers, redacted: frozenset[str]) -> str:
-    """Return a compact single-line representation of HTTP headers.
-
-    Headers whose lowercase name appears in the redacted set have their
-    value replaced with <redacted> so secrets never appear in log output.
-    """
+    """Return a compact single-line representation of HTTP headers."""
     parts = []
     for name, value in headers.items():
         if name.lower() in redacted:
@@ -176,14 +127,7 @@ if MCP_DEBUG:
     from starlette.requests import Request as StarletteRequest
 
     class DebugLoggingMiddleware(BaseHTTPMiddleware):
-        """Log every HTTP request/response between MCP client and this server.
-
-        Request/response bodies are always logged when MCP_DEBUG=true.
-        Request/response headers are only logged when MCP_DEBUG_HEADERS=true.
-        Response body is not logged because the streamable-http transport
-        uses chunked/SSE streaming that cannot be buffered here without
-        breaking the connection.
-        """
+        """Log every HTTP request/response between MCP client and this server."""
 
         async def dispatch(self, request: StarletteRequest, call_next):
             body = await request.body()
@@ -224,20 +168,11 @@ if MCP_DEBUG:
     app.add_middleware(DebugLoggingMiddleware)
     logger.debug("Client<->MCP HTTP debug logging middleware attached.")
 
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 async def _serve():
-    """Async entry point that lets us register the housekeeping task after
-    uvicorn has started the event loop and FastMCP has initialised its
-    internal task group (via its own lifespan handler).
-
-    uvicorn.run() is synchronous and blocks; to attach an on_startup hook
-    we use uvicorn.Server directly with a Config that sets the lifespan to
-    'on' and register the hook via the server startup sequence.
-    """
     from background_tasks import housekeeping_loop
     import attachment_store
 
@@ -251,7 +186,6 @@ async def _serve():
     )
     server = uvicorn.Server(config)
 
-    # Patch the startup so our task launches after uvicorn/FastMCP are ready.
     _original_startup = server.startup
 
     async def _patched_startup(sockets=None):
