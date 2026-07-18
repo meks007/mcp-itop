@@ -71,11 +71,10 @@ mcp = FastMCP(
 # ItopClient -- process-global, token resolved per-request via ContextVar
 # ---------------------------------------------------------------------------
 
-# Single shared ItopClient. Bearer token is resolved lazily via ContextVar on
-# every request, so this instance is safe to share across concurrent requests.
-# No on_request hook -- the field cache fills passively via seed_field_cache()
-# on every iTop response (see cache.py).
-client = ItopClient(get_bearer_token)
+# Single shared ItopClient. The bearer token is resolved lazily on every
+# request via auth.get_bearer_token() inside client.py -- server.py does
+# not need to import or pass it down.
+client = ItopClient()
 
 # ---------------------------------------------------------------------------
 # Register all tools and resources
