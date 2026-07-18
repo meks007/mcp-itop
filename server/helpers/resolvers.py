@@ -180,13 +180,7 @@ async def resolve_ref_class_by_ref_part(
     logger.debug(
         "[resolve_ref_class_by_ref_part] key=%r suffix=%r oql=%r", key, suffix, oql
     )
-    result = await client.request({
-        "operation": "core/get",
-        "class": obj_class,
-        "key": oql,
-        "output_fields": "id,ref",
-        "limit": "1",
-    })
+    result = await client.get(obj_class, oql, fields="id,ref", limit=1)
     if result.get("code", -1) != 0:
         logger.debug(
             "[resolve_ref_class_by_ref_part] key=%r -> iTop error code=%r msg=%r",
@@ -246,12 +240,7 @@ async def resolve_key(
             cache_set(obj_class, ref_str, found_class, found_id)
             return found_class, found_id
     else:
-        result = await client.request({
-            "operation": "core/get",
-            "class": obj_class,
-            "key": ref_str,
-            "output_fields": "id",
-        })
+        result = await client.get(obj_class, ref_str, fields="id")
         objects = result.get("objects") or {}
         for obj_data in objects.values():
             resolved_class = obj_data.get("class") or obj_class
@@ -290,7 +279,7 @@ async def fetch_image_counts(
 ) -> tuple[int, int | None]:
     """Return (attachment_count, inline_image_count) for a ticket object.
 
-    attachment_count  -- queried live from iTop (Attachment records are reliable).
+    attachment_count   -- queried live from iTop (Attachment records are reliable).
     inline_image_count -- read from the inline_image_refs SQLite cache populated
                           by format_and_cache() / parse_objects() which scans the
                           actual <img data-img-id> tags in ticket HTML fields.
@@ -313,24 +302,20 @@ async def fetch_image_counts(
     client = get_client()
     oid = str(obj_id)
 
-    # -- Attachment count (live iTop query -- reliable) --
-    att_result = await client.request({
-        "operation": "core/get",
-        "class": "Attachment",
-        "key": (
-            "SELECT Attachment"
-            " WHERE item_class = '" + obj_class + "'"
-            " AND item_id = " + oid
-        ),
-        "output_fields": "id",
-    })
+    # Attachment count (live iTop query -- reliable).
+    att_oql = (
+        "SELECT Attachment"
+        " WHERE item_class = '" + obj_class + "'"
+        " AND item_id = " + oid
+    )
+    att_result = await client.get("Attachment", att_oql, fields="id")
     att_count = len(att_result.get("objects") or {})
     logger.debug(
         "[fetch_image_counts] cls=%r id=%r Attachment count=%d",
         obj_class, oid, att_count,
     )
 
-    # -- Inline image count (SQLite ref cache -- no iTop call) --
+    # Inline image count (SQLite ref cache -- no iTop call).
     # None  -> cache miss (format_and_cache not yet called for this ticket)
     # []    -> cache hit, no inline images
     # [...] -> cache hit, len() is the count
