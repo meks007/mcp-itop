@@ -50,7 +50,6 @@ def _redact_headers(headers: httpx.Headers) -> dict:
     redacted = {}
     for name, value in headers.items():
         if name.lower() == "authorization":
-            # Redact the token part after 'Bearer '
             if value.lower().startswith("bearer "):
                 token_part = value[len("bearer "):]
                 redacted[name] = f"Bearer {_redact_secret(token_part)}"
@@ -134,3 +133,40 @@ async def itop_request(operation: dict, get_bearer_token) -> dict:
         )
 
     return result
+
+
+async def itop_core_get(
+    itop_request_fn,
+    cls: str,
+    key: str | int,
+    fields: str = "*",
+    limit: int | None = None,
+    page: int | None = None,
+) -> dict:
+    """Convenience wrapper for iTop core/get operations.
+
+    Eliminates repetitive dict construction across helpers, cache, and tools.
+    Always converts limit and page to strings as required by the iTop REST API.
+
+    Args:
+        itop_request_fn: The bound async itop_request callable (server.itop_request).
+        cls:             iTop class name, e.g. 'UserRequest', 'Attachment'.
+        key:             Numeric ID, OQL string, or ticket ref.
+        fields:          Comma-separated field names or '*' / '*+'.
+        limit:           Max objects to return. None means no limit param sent.
+        page:            Page number for paginated results. None means not sent.
+
+    Returns:
+        Raw iTop REST response dict (code, message, objects).
+    """
+    op: dict = {
+        "operation": "core/get",
+        "class": cls,
+        "key": key,
+        "output_fields": fields,
+    }
+    if limit is not None:
+        op["limit"] = str(limit)
+    if page is not None:
+        op["page"] = str(page)
+    return await itop_request_fn(op)
