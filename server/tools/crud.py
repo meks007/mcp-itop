@@ -10,46 +10,49 @@ from typing import Union
 from cache import get_class_fields
 from client import ItopClient
 from helpers import (
-    apply_field_strip,
     coerce_ref,
     ensure_ref_field,
     fetch_image_counts,
     format_and_cache,
-    is_bare_number,
     parse_json_arg,
     parse_key,
     resolve_key,
     resolve_output_fields,
     str_or,
     CLASSES_WITH_REF,
+    _LEAN_STRIP,
     _SYNTHETIC_FIELDS,
 )
 from config import DEFAULT_COMMENT
-
-# Fields stripped by itop_get when full=False.
-_LEAN_STRIP: frozenset[str] = frozenset({"private_log"})
 
 
 async def _fetch_and_cache_ticket(
     obj_class: str,
     obj_id: str | int,
     client: ItopClient,
+    *,
+    full: bool = False,
 ) -> str:
-    """Fetch a ticket via core/get with output_fields='*' and run format_and_cache.
+    """Fetch an object via core/get, apply stripping, and run format_and_cache.
 
-    Used by both the itop_get tool and itop_get_ticket_images (cache-miss path).
-    The format_and_cache call writes inline image refs to the SQLite cache as a
-    side effect.
+    Used by itop_get and the attachments cache-miss path. The format_and_cache
+    call writes inline image refs to the SQLite cache as a side effect.
+
+    Stripping follows the same rules as client.get: _LEAN_STRIP is applied
+    unless full=True. Content stripped for privacy must not reach the image
+    cache either, so full=False is the correct default.
 
     Args:
         obj_class: iTop class name (concrete class preferred).
-        obj_id:    Numeric ticket ID (int or string).
+        obj_id:    Numeric object ID (int or string).
         client:    ItopClient instance.
+        full:      When True, skip field stripping.
     """
     result = await client.get(
         obj_class,
         int(obj_id) if str(obj_id).isdigit() else obj_id,
         fields="*",
+        full=full,
     )
     return format_and_cache(result)
 
@@ -113,9 +116,14 @@ def register(mcp, client: ItopClient):
             fields=fields_to_request,
             limit=limit if limit > 0 else None,
             page=page if page > 0 else None,
+            full=full,
         )
 
+        # resolve_output_fields may return a post_strip set when the field
+        # cache was cold and a wildcard was used. Apply it now so the caller
+        # never sees fields that should have been excluded.
         if post_strip:
+            from helpers import apply_field_strip
             apply_field_strip(result, post_strip)
 
         if obj_class in CLASSES_WITH_REF:
@@ -130,22 +138,15 @@ def register(mcp, client: ItopClient):
 
                 att_count, ii_count = await fetch_image_counts(obj_class, oid)
 
-                # ii_count is None when the inline image ref cache has never
-                # been populated for this ticket (format_and_cache not yet
-                # called). In that case we show a generic hint -- the ticket
-                # will be cached by format_and_cache() below so subsequent
-                # Load_object calls will have an accurate count.
                 parts = []
                 if att_count:
                     parts.append(str(att_count) + " attachment(s)")
                 if ii_count:
                     parts.append(str(ii_count) + " inline image(s)")
                 elif ii_count is None:
-                    # Cache miss: inline image presence unknown yet.
-                    # format_and_cache below will populate the cache for
-                    # the next call. Show hint if there are attachments or
-                    # always hint so the AI knows to check.
-                    parts.append("possible inline image(s) -- call get_ticket_images to check")
+                    parts.append(
+                        "possible inline image(s) -- call get_ticket_images to check"
+                    )
 
                 if parts:
                     fields["_images"] = (
