@@ -5,7 +5,8 @@ Two independent caches:
 
 1. _ITOP_CLASS_REGISTRY
    Field inventories and arbitrary metadata per iTop class.
-   Seeded passively from every core/get response. Never expires.
+   Seeded passively from every core/get response via seed_field_cache().
+   Never expires. No active pre-heat -- cache warms lazily on first use.
 
 2. _RESOLVE_KEY_CACHE
    (obj_class, ref) -> (resolved_class, numeric_id) mappings.
@@ -27,15 +28,10 @@ get_class_fields(cls)
 cache_get(obj_class, ref)
 cache_set(obj_class, ref, cls, id)
 cache_cleanup()
-
-# Pre-heat  (uses get_client() internally -- no itop_request_fn param)
-preheat()
-preheat_once()
 """
 
 from __future__ import annotations
 
-import asyncio
 import time
 import logging
 from typing import Any
@@ -59,9 +55,9 @@ _ITOP_CLASS_REGISTRY: dict[str, dict] = {}
 
 def _registry_entry(cls: str) -> dict:
     if cls not in _ITOP_CLASS_REGISTRY:
-        # NOTE: no logger.debug() here -- this function is called from within
-        # logging formatter paths (via beartype hooks) and any log call here
-        # would cause infinite recursion.
+        # NOTE: no logger.debug() here -- this is called from within logging
+        # formatter paths (via beartype hooks) and any log call here causes
+        # infinite recursion.
         _ITOP_CLASS_REGISTRY[cls] = {"exists": None, "fields": frozenset(), "meta": {}}
     return _ITOP_CLASS_REGISTRY[cls]
 
@@ -85,6 +81,8 @@ def seed_field_cache(cls: str, fields: dict) -> None:
     """Grow the field inventory for a class from a live response fields dict.
 
     Already-known fields are always kept (union, never removed).
+    Called automatically from apply_field_strip() and ensure_class_exists()
+    so the cache fills passively on every iTop response.
     """
     entry = _registry_entry(cls)
     if not fields:
@@ -97,11 +95,8 @@ def seed_field_cache(cls: str, fields: dict) -> None:
     entry["exists"] = True
     if new_fields and logger.isEnabledFor(logging.DEBUG):
         logger.debug(
-            "[registry] seed_field_cache cls=%r fields_before=%d fields_after=%d new=%r",
-            cls,
-            len(before_set),
-            len(entry["fields"]),
-            sorted(new_fields),
+            "[registry] seed_field_cache cls=%r +%d new fields (total=%d)",
+            cls, len(new_fields), len(entry["fields"]),
         )
 
 
@@ -205,56 +200,3 @@ def cache_set(obj_class: str, ref: str, resolved_class: str, resolved_id: int) -
         "id": resolved_id,
         "ts": time.monotonic(),
     }
-
-
-# ---------------------------------------------------------------------------
-# Pre-heat
-# ---------------------------------------------------------------------------
-
-# asyncio.Lock protecting preheat_once() against concurrent first-request races.
-# Created lazily inside preheat_once() to avoid issues with event-loop
-# initialization order at import time.
-_PREHEAT_LOCK: asyncio.Lock | None = None
-_PREHEAT_DONE: bool = False
-
-
-async def preheat() -> None:
-    """Probe all CLASSES_WITH_REF to warm the field cache.
-
-    Uses the ItopClient from the current async context (get_client()).
-    Classes that do not exist or have no objects are marked exists=False
-    and will not be retried.
-    """
-    from helpers import CLASSES_WITH_REF
-
-    logger.info("[cache] pre-heating field cache for %d classes", len(CLASSES_WITH_REF))
-    for cls in sorted(CLASSES_WITH_REF):
-        fields = await get_class_fields(cls)
-        logger.info("[cache] preheat cls=%r -> %d fields cached", cls, len(fields))
-    logger.info("[cache] pre-heat complete")
-
-
-async def preheat_once() -> None:
-    """Run preheat only once per server lifetime, guarded against concurrent callers.
-
-    Uses an asyncio.Lock so that if two requests arrive simultaneously on a
-    cold cache, only one fires the iTop probes -- the second waits and then
-    finds the cache already warm.
-    """
-    global _PREHEAT_LOCK, _PREHEAT_DONE
-
-    # Fast path: already done (no lock needed, bool read is atomic in CPython).
-    if _PREHEAT_DONE:
-        return
-
-    # Lazy lock creation -- safe because this always runs inside the event loop.
-    if _PREHEAT_LOCK is None:
-        _PREHEAT_LOCK = asyncio.Lock()
-
-    async with _PREHEAT_LOCK:
-        # Re-check inside the lock: another coroutine may have finished
-        # preheat while we were waiting to acquire it.
-        if _PREHEAT_DONE:
-            return
-        await preheat()
-        _PREHEAT_DONE = True
