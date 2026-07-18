@@ -10,7 +10,7 @@ Provides AI assistants (Claude Desktop, opencode, etc.) with tools to:
 Module layout:
   config.py             - env vars, logging, constants
   cache.py              - class field registry, resolve_key cache, preheat
-  auth.py               - ItopMiddleware, get_bearer_token()
+  auth.py               - ItopMiddleware, get_bearer_token(), token validation cache
   client.py             - iTop REST/JSON HTTP client, ItopClient, get_client()
   helpers/              - shared formatting and parsing utilities
   attachment_store/     - SQLite store for image URIs and inline image refs
@@ -35,7 +35,7 @@ import uvicorn
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.debug import DebugTokenVerifier
 
-from auth import ItopMiddleware, get_bearer_token
+from auth import ItopMiddleware, _validate_itop_token, get_bearer_token
 from cache import preheat_once
 from client import ItopClient
 from config import MCP_DEBUG, MCP_DEBUG_HEADERS, logger
@@ -64,7 +64,7 @@ mcp = FastMCP(
         "Provides SLA reports, agent workload analysis, service quality checks, "
         "ticket lifecycle, KB search, and CI impact analysis."
     ),
-    auth=DebugTokenVerifier(),
+    auth=DebugTokenVerifier(validate=_validate_itop_token),
 )
 
 # ---------------------------------------------------------------------------
