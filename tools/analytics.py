@@ -7,6 +7,7 @@ from __future__ import annotations
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
+from client import ItopClient
 from helpers import (
     SLA_ANALYSIS_FIELDS,
     extract_objects,
@@ -19,7 +20,7 @@ from helpers import (
 )
 
 
-def register(mcp, itop_request):
+def register(mcp, client: ItopClient):
     """Register all analytics tools on the given mcp instance."""
 
     @mcp.tool()
@@ -38,13 +39,12 @@ def register(mcp, itop_request):
         if service_name:
             oql += f" AND service_name = '{service_name}'"
 
-        result = await itop_request({
-            "operation": "core/get",
-            "class": "UserRequest",
-            "key": oql,
-            "output_fields": SLA_ANALYSIS_FIELDS,
-            "limit": str(limit),
-        })
+        result = await client.get(
+            "UserRequest",
+            oql,
+            fields=SLA_ANALYSIS_FIELDS,
+            limit=limit,
+        )
 
         tickets = extract_objects(result)
         if not tickets:
@@ -151,13 +151,12 @@ def register(mcp, itop_request):
         if agent_name:
             oql += f" AND agent_name = '{agent_name}'"
 
-        result = await itop_request({
-            "operation": "core/get",
-            "class": "UserRequest",
-            "key": oql,
-            "output_fields": "id,ref,title,status,agent_name,team_name,time_spent,start_date,resolution_date",
-            "limit": str(limit),
-        })
+        result = await client.get(
+            "UserRequest",
+            oql,
+            fields="id,ref,title,status,agent_name,team_name,time_spent,start_date,resolution_date",
+            limit=limit,
+        )
 
         tickets = extract_objects(result)
         if not tickets:
@@ -224,13 +223,12 @@ def register(mcp, itop_request):
         )
 
         oql = f"SELECT UserRequest WHERE status='{status}' AND assignment_date < '{cutoff}'"
-        result = await itop_request({
-            "operation": "core/get",
-            "class": "UserRequest",
-            "key": oql,
-            "output_fields": "id,ref,title,agent_name,team_name,assignment_date,last_update,start_date",
-            "limit": str(limit),
-        })
+        result = await client.get(
+            "UserRequest",
+            oql,
+            fields="id,ref,title,agent_name,team_name,assignment_date,last_update,start_date",
+            limit=limit,
+        )
 
         tickets = extract_objects(result)
         if not tickets:
@@ -300,13 +298,12 @@ def register(mcp, itop_request):
         s = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
         e = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-        result = await itop_request({
-            "operation": "core/get",
-            "class": "UserRequest",
-            "key": f"SELECT UserRequest WHERE start_date >= '{s}' AND start_date < '{e}'",
-            "output_fields": "id,ref,title,service_name,service_id,caller_name,agent_name,status",
-            "limit": str(limit),
-        })
+        result = await client.get(
+            "UserRequest",
+            f"SELECT UserRequest WHERE start_date >= '{s}' AND start_date < '{e}'",
+            fields="id,ref,title,service_name,service_id,caller_name,agent_name,status",
+            limit=limit,
+        )
 
         tickets = extract_objects(result)
         if not tickets:
@@ -384,13 +381,12 @@ def register(mcp, itop_request):
         s = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
         e = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-        result = await itop_request({
-            "operation": "core/get",
-            "class": "UserRequest",
-            "key": f"SELECT UserRequest WHERE start_date >= '{s}' AND start_date < '{e}'",
-            "output_fields": "id,ref,title,service_name,caller_name,agent_name,status,start_date",
-            "limit": str(limit),
-        })
+        result = await client.get(
+            "UserRequest",
+            f"SELECT UserRequest WHERE start_date >= '{s}' AND start_date < '{e}'",
+            fields="id,ref,title,service_name,caller_name,agent_name,status,start_date",
+            limit=limit,
+        )
 
         tickets = extract_objects(result)
         if not tickets:
@@ -455,13 +451,12 @@ def register(mcp, itop_request):
         s = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
         e = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-        result = await itop_request({
-            "operation": "core/get",
-            "class": "UserRequest",
-            "key": f"SELECT UserRequest WHERE start_date >= '{s}' AND start_date < '{e}'",
-            "output_fields": "id,ref,title,service_name,service_id,caller_name,agent_name,status",
-            "limit": str(limit),
-        })
+        result = await client.get(
+            "UserRequest",
+            f"SELECT UserRequest WHERE start_date >= '{s}' AND start_date < '{e}'",
+            fields="id,ref,title,service_name,service_id,caller_name,agent_name,status",
+            limit=limit,
+        )
 
         tickets = extract_objects(result)
         if not tickets:
@@ -525,13 +520,12 @@ def register(mcp, itop_request):
         s = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
         e = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-        result = await itop_request({
-            "operation": "core/get",
-            "class": "UserRequest",
-            "key": f"SELECT UserRequest WHERE start_date >= '{s}' AND start_date <= '{e}'",
-            "output_fields": SLA_ANALYSIS_FIELDS,
-            "limit": str(limit),
-        })
+        result = await client.get(
+            "UserRequest",
+            f"SELECT UserRequest WHERE start_date >= '{s}' AND start_date <= '{e}'",
+            fields=SLA_ANALYSIS_FIELDS,
+            limit=limit,
+        )
 
         tickets = extract_objects(result)
         if not tickets:
