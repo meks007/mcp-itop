@@ -23,8 +23,7 @@ registry_get_fields(cls)                frozenset of known field names
 seed_field_cache(cls, fields)           grow field inventory from response
 
 # Field helper
-get_class_fields(cls, request_fn)       warm-or-probe field inventory
-                                        request_fn is client.request (ItopClient)
+get_class_fields(cls, itop_request)     warm-or-probe field inventory
 
 # resolve_key cache
 cache_get(obj_class, ref)               -> (resolved_class, id) | None
@@ -32,8 +31,8 @@ cache_set(obj_class, ref, cls, id)      store resolved pair
 cache_cleanup()                         evict expired entries
 
 # Pre-heat
-preheat(request_fn)                     probe all CLASSES_WITH_REF
-preheat_once(request_fn)                preheat if any class cache still cold
+preheat(itop_request)                   probe all CLASSES_WITH_REF
+preheat_once(itop_request)              preheat if any class cache still cold
 """
 
 from __future__ import annotations
@@ -117,11 +116,8 @@ def seed_field_cache(cls: str, fields: dict) -> None:
 # Field helper
 # ---------------------------------------------------------------------------
 
-async def get_class_fields(obj_class: str, request_fn) -> frozenset[str]:
+async def get_class_fields(obj_class: str, itop_request_fn) -> frozenset[str]:
     """Return the field inventory for obj_class.
-
-    request_fn must be an async callable that accepts a single iTop operation
-    dict and returns the response dict -- i.e. client.request (ItopClient).
 
     If the registry cache is warm for obj_class, returns the cached frozenset
     immediately without any iTop request.
@@ -134,6 +130,8 @@ async def get_class_fields(obj_class: str, request_fn) -> frozenset[str]:
     On probe failure or empty result, marks the class as non-existent (exists=False)
     so subsequent calls do not retry.
     """
+    from client import itop_core_get
+
     entry = _registry_entry(obj_class)
 
     if entry["fields"]:
@@ -151,14 +149,13 @@ async def get_class_fields(obj_class: str, request_fn) -> frozenset[str]:
         return frozenset()
 
     logger.debug("[get_class_fields] cls=%r cache cold, probing iTop", obj_class)
-    op: dict = {
-        "operation": "core/get",
-        "class": obj_class,
-        "key": "SELECT " + obj_class,
-        "output_fields": "*",
-        "limit": "1",
-    }
-    result = await request_fn(op)
+    result = await itop_core_get(
+        itop_request_fn,
+        obj_class,
+        "SELECT " + obj_class,
+        fields="*",
+        limit=1,
+    )
     if result.get("code", -1) != 0:
         logger.debug(
             "[get_class_fields] cls=%r probe failed code=%r msg=%r",
@@ -243,11 +240,8 @@ def cache_set(obj_class: str, ref: str, resolved_class: str, resolved_id: int) -
 # Pre-heat
 # ---------------------------------------------------------------------------
 
-async def preheat(request_fn) -> None:
+async def preheat(itop_request_fn) -> None:
     """Probe all CLASSES_WITH_REF to warm the field cache.
-
-    request_fn must be an async callable that accepts a single iTop operation
-    dict and returns the response dict -- i.e. client.request (ItopClient).
 
     Each class gets a single core/get (output_fields=*, limit=1). Classes that
     do not exist or have no objects are marked as non-existent (exists=False)
@@ -258,7 +252,7 @@ async def preheat(request_fn) -> None:
 
     logger.info("[cache] pre-heating field cache for %d classes", len(CLASSES_WITH_REF))
     for cls in sorted(CLASSES_WITH_REF):
-        fields = await get_class_fields(cls, request_fn)
+        fields = await get_class_fields(cls, itop_request_fn)
         logger.info(
             "[cache] preheat cls=%r -> %d fields cached",
             cls, len(fields),
@@ -266,11 +260,8 @@ async def preheat(request_fn) -> None:
     logger.info("[cache] pre-heat complete")
 
 
-async def preheat_once(request_fn) -> None:
+async def preheat_once(itop_request_fn) -> None:
     """Run preheat only if any CLASSES_WITH_REF field cache is still cold.
-
-    request_fn must be an async callable that accepts a single iTop operation
-    dict and returns the response dict -- i.e. client.request (ItopClient).
 
     Called at the start of the first real iTop request so that a bearer token
     is guaranteed to be available. Subsequent calls are no-ops once all
@@ -283,4 +274,4 @@ async def preheat_once(request_fn) -> None:
         for cls in CLASSES_WITH_REF
     ):
         return
-    await preheat(request_fn)
+    await preheat(itop_request_fn)
