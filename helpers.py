@@ -1,14 +1,22 @@
 """
 Pure utility / formatting helpers shared across all tool modules.
+
+helpers/
+    html.py        -- strip / parse HTML
+    formatters.py  -- format_objects, format_and_cache, format_table
+    resolvers.py   -- resolve_key, resolve_ref_class_by_ref_part, ensure_class_exists
+    sla.py         -- SLA constants and helpers
+    utils.py       -- str_or, parse_key, parse_json_arg, parse_date_range, coerce_ref
+
+This flat file is the compatibility shim; all names are re-exported so existing
+imports across tools, cache, and server continue to work without change.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
-import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Tuple
 
@@ -118,7 +126,7 @@ def parse_objects(result: dict) -> dict[str, list[dict]]:
     Returns a mapping of
     '{obj_class}::{obj_id}' -> [{'id': str, 'secret': str}, ...].
 
-    The field values are NOT modified; stripping happens in format_objects.
+    The field values are NOT modified; stripping happens in _format_objects.
     Deduplication per ticket is applied (same img_id appears only once).
     """
     refs: dict[str, list[dict]] = {}
@@ -231,6 +239,25 @@ def is_bare_number(key: Any) -> bool:
     return False
 
 
+def coerce_ref(ticket_ref: str, key: Any) -> str | None:
+    """Normalise the ticket_ref / key pair used by most write tools.
+
+    Both crud.py tools (update, delete, apply_stimulus) and the attachment
+    tools accept an optional ticket_ref AND an optional key parameter.
+    This helper merges them into a single resolved string, or None when
+    both are empty, so each tool no longer has to repeat the same one-liner.
+
+    Args:
+        ticket_ref: Preferred human-readable ticket ref, e.g. 'R-016292'.
+        key:        Fallback key (numeric ID, OQL, or empty string).
+
+    Returns:
+        Stripped non-empty string, or None when both inputs are falsy.
+    """
+    result = str(ticket_ref or key or "").strip()
+    return result if result else None
+
+
 def ensure_ref_field(obj_class: str, output_fields: str) -> str:
     """Inject 'ref' and strip synthetic/redundant fields for ticket classes."""
     if output_fields not in ("*", "*+"):
@@ -250,8 +277,10 @@ def ensure_ref_field(obj_class: str, output_fields: str) -> str:
     return ", ".join(fields)
 
 
-async def ensure_class_exists(candidates: list[str], itop_request) -> str:
+async def ensure_class_exists(candidates: list[str], itop_request_fn) -> str:
     """Return the first class in candidates that exists on the iTop server."""
+    from client import itop_core_get
+
     for cls in candidates:
         entry = _registry_entry(cls)
         if entry["exists"] is True:
@@ -260,13 +289,7 @@ async def ensure_class_exists(candidates: list[str], itop_request) -> str:
         if entry["exists"] is False:
             logger.debug("[registry] ensure_class_exists cls=%r -> cached False, skip", cls)
             continue
-        r = await itop_request({
-            "operation": "core/get",
-            "class": cls,
-            "key": f"SELECT {cls}",
-            "output_fields": "id",
-            "limit": "1",
-        })
+        r = await itop_core_get(itop_request_fn, cls, "SELECT " + cls, fields="id", limit=1)
         if r.get("code") == 0:
             entry["exists"] = True
             for obj_data in (r.get("objects") or {}).values():
@@ -287,7 +310,7 @@ async def resolve_output_fields(
     obj_class: str,
     output_fields: str,
     strip: frozenset[str],
-    itop_request,
+    itop_request_fn,
 ) -> tuple[str, frozenset[str]]:
     """Resolve (output_fields, strip) into (fields_to_request, post_strip_set)."""
     logger.debug(
@@ -363,7 +386,7 @@ def apply_field_strip(result: dict, strip: frozenset[str]) -> dict:
 async def resolve_ref_class_by_ref_part(
     obj_class: str,
     key: str,
-    itop_request,
+    itop_request_fn,
 ) -> tuple[str, int, str] | tuple[None, None, None]:
     """Resolve a ref or bare number to (resolved_class, numeric_id, ref_string).
 
@@ -373,18 +396,14 @@ async def resolve_ref_class_by_ref_part(
 
     Returns (None, None, None) when no matching object is found.
     """
+    from client import itop_core_get
+
     suffix = str(key).zfill(6)
     oql = "SELECT " + obj_class + " WHERE ref LIKE '%" + suffix + "'"
     logger.debug(
         "[resolve_ref_class_by_ref_part] key=%r suffix=%r oql=%r", key, suffix, oql
     )
-    result = await itop_request({
-        "operation": "core/get",
-        "class": obj_class,
-        "key": oql,
-        "output_fields": "id,ref",
-        "limit": "1",
-    })
+    result = await itop_core_get(itop_request_fn, obj_class, oql, fields="id,ref", limit=1)
     if result.get("code", -1) != 0:
         logger.debug(
             "[resolve_ref_class_by_ref_part] key=%r -> iTop error code=%r msg=%r",
@@ -411,7 +430,7 @@ async def resolve_ref_class_by_ref_part(
 async def resolve_key(
     obj_class: str,
     ref: str | None,
-    itop_request,
+    itop_request_fn,
 ) -> tuple[str, Any]:
     """Resolve an object identifier to (resolved_class, numeric_key).
 
@@ -420,6 +439,8 @@ async def resolve_key(
     A TTL cache avoids repeated iTop round-trips for the same identifier.
     Fallback: int(ref) or raw ref string.
     """
+    from client import itop_core_get
+
     cache_cleanup()
 
     ref_str = str(ref).strip() if ref is not None else ""
@@ -432,7 +453,7 @@ async def resolve_key(
 
     if obj_class in CLASSES_WITH_REF:
         found_class, found_id, found_ref = await resolve_ref_class_by_ref_part(
-            obj_class, ref_str, itop_request
+            obj_class, ref_str, itop_request_fn
         )
         if found_class is not None and found_id is not None:
             logger.debug(
@@ -442,12 +463,7 @@ async def resolve_key(
             cache_set(obj_class, ref_str, found_class, found_id)
             return found_class, found_id
     else:
-        result = await itop_request({
-            "operation": "core/get",
-            "class": obj_class,
-            "key": ref_str,
-            "output_fields": "id",
-        })
+        result = await itop_core_get(itop_request_fn, obj_class, ref_str, fields="id")
         objects = result.get("objects") or {}
         for obj_data in objects.values():
             resolved_class = obj_data.get("class") or obj_class
@@ -487,37 +503,30 @@ async def resolve_key(
 async def fetch_image_counts(
     obj_class: str,
     obj_id: str | int,
-    itop_request,
+    itop_request_fn,
 ) -> tuple[int, int]:
     """Return (attachment_count, inline_image_count) for a ticket object."""
-    oid = str(obj_id)
+    from client import itop_core_get
 
-    att_result = await itop_request({
-        "operation": "core/get",
-        "class": "Attachment",
-        "key": (
-            "SELECT Attachment"
-            " WHERE item_class = '" + obj_class + "'"
-            " AND item_id = " + oid
-        ),
-        "output_fields": "id",
-    })
+    oid = str(obj_id)
+    att_oql = (
+        "SELECT Attachment"
+        " WHERE item_class = '" + obj_class + "'"
+        " AND item_id = " + oid
+    )
+    att_result = await itop_core_get(itop_request_fn, "Attachment", att_oql, fields="id")
     att_count = len(att_result.get("objects") or {})
     logger.debug(
         "[fetch_image_counts] cls=%r id=%r Attachment count=%d",
         obj_class, oid, att_count,
     )
 
-    ii_result = await itop_request({
-        "operation": "core/get",
-        "class": "InlineImage",
-        "key": (
-            "SELECT InlineImage"
-            " WHERE item_class = '" + obj_class + "'"
-            " AND item_id = " + oid
-        ),
-        "output_fields": "id",
-    })
+    ii_oql = (
+        "SELECT InlineImage"
+        " WHERE item_class = '" + obj_class + "'"
+        " AND item_id = " + oid
+    )
+    ii_result = await itop_core_get(itop_request_fn, "InlineImage", ii_oql, fields="id")
     ii_count = len(ii_result.get("objects") or {})
     logger.debug(
         "[fetch_image_counts] cls=%r id=%r InlineImage count=%d",
@@ -528,7 +537,7 @@ async def fetch_image_counts(
 
 
 # ---------------------------------------------------------------------------
-# Generic helpers
+# Generic utilities
 # ---------------------------------------------------------------------------
 
 def str_or(d: dict, key: str, default: str = "") -> str:
@@ -547,11 +556,19 @@ def parse_key(key: str) -> Any:
         return key
 
 
-def parse_json_arg(raw: str, arg_name: str) -> dict | str:
+def _try_json_parse(raw: str):
+    """Shared JSON parse used by parse_key and parse_json_arg."""
     try:
-        return json.loads(raw)
+        return json.loads(raw), None
     except json.JSONDecodeError as e:
-        return f"Invalid JSON in '{arg_name}': {e.msg} at position {e.pos}"
+        return None, e
+
+
+def parse_json_arg(raw: str, arg_name: str) -> dict | str:
+    parsed, err = _try_json_parse(raw)
+    if err is not None:
+        return f"Invalid JSON in '{arg_name}': {err.msg} at position {err.pos}"
+    return parsed
 
 
 def parse_date_range(start: str, end: str) -> Tuple[str, str]:
@@ -587,8 +604,12 @@ def extract_objects(result: dict) -> list[dict]:
     return out
 
 
-def format_objects(result: dict) -> tuple[str, dict[str, list[dict]]]:
+def _format_objects(result: dict) -> tuple[str, dict[str, list[dict]]]:
     """Format iTop response objects into a readable string and extract inline image refs.
+
+    Internal implementation used exclusively by format_and_cache().
+    External callers should always use format_and_cache() which additionally
+    persists inline image refs to the SQLite cache as a side effect.
 
     Returns a tuple of:
       - text: formatted string suitable for MCP tool output
@@ -652,10 +673,15 @@ def format_objects(result: dict) -> tuple[str, dict[str, list[dict]]]:
     return "\n".join(lines), refs
 
 
+# Keep the old public name as an alias so any external caller is not broken.
+# Prefer _format_objects internally; prefer format_and_cache from tools.
+format_objects = _format_objects
+
+
 def format_and_cache(result: dict) -> str:
     """Format iTop response and persist inline image refs to SQLite.
 
-    Calls format_objects() to get the formatted text and the inline image
+    Calls _format_objects() to get the formatted text and the inline image
     refs map, then writes each ticket's refs to the attachment_store cache
     via write_inline_image_refs(). Returns only the formatted string so all
     existing callers can be migrated by replacing format_objects() with
@@ -669,7 +695,7 @@ def format_and_cache(result: dict) -> str:
     # must not import helpers at the top level.
     from attachment_store import write_inline_image_refs
 
-    text, refs = format_objects(result)
+    text, refs = _format_objects(result)
 
     for ticket_key, img_refs in refs.items():
         try:
