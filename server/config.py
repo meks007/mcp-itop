@@ -101,6 +101,11 @@ CLEANUP_INTERVAL: int = int(os.getenv("CLEANUP_INTERVAL", "300"))
 # Default: 3600 s (1 h).
 INLINE_IMAGE_REF_TTL: int = int(os.getenv("INLINE_IMAGE_REF_TTL", "3600"))
 
+# -- Attachment session TTL -----------------------------------------------
+# How long (seconds) image entries stored by store_images() remain valid.
+# Env var: IMAGE_STORE_TTL_SECONDS. Default: 3600 s (1 h).
+IMAGE_STORE_TTL_SECONDS: int = int(os.getenv("IMAGE_STORE_TTL_SECONDS", "3600"))
+
 # -- Image normalization --------------------------------------------------
 # Maximum size in bytes for a stored image. Images exceeding this limit are
 # first compressed via quality reduction, then scaled down if still too large.
