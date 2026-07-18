@@ -294,15 +294,14 @@ def register(mcp, client: ItopClient):
         redundancy: bool = True,
     ) -> str:
         """Find CIs related to a given object via impact or dependency relations."""
-        result = await client.request({
-            "operation": "core/get_related",
-            "class": obj_class,
-            "key": parse_key(key),
-            "relation": relation,
-            "depth": depth,
-            "direction": direction,
-            "redundancy": redundancy,
-        })
+        result = await client.get_related(
+            obj_class,
+            parse_key(key),
+            relation=relation,
+            depth=depth,
+            direction=direction,
+            redundancy=redundancy,
+        )
         output = format_and_cache(result)
         relations = result.get("relations")
         if relations:
