@@ -32,7 +32,7 @@ async def _fetch_and_cache_ticket(
 ) -> str:
     """Fetch an object via core/get, apply stripping, and run format_and_cache.
 
-    Used by itop_get and the attachments cache-miss path. The format_and_cache
+    Used by Load_object and the attachments cache-miss path. The format_and_cache
     call writes inline image refs to the SQLite cache as a side effect.
 
     Stripping follows the same rules as client.get: _LEAN_STRIP is applied
@@ -77,7 +77,7 @@ def register(mcp, client: ItopClient):
           "15525"     numeric DB id
           SELECT ...  OQL string
         You CANNOT leave key_or_ref empty.
-        You CANNOT leave output_fields empty. If in doubt, use describe class or *
+        You CANNOT leave output_fields empty. If in doubt, use Describe_class or *
         Batch same-class lookups with OQL instead of one call per object.
         Use obj_class="Ticket" when the concrete class is unknown.
         Set Full mode when logs are needed. Do not disclose private_log unless explicitly mentioned.
@@ -131,13 +131,13 @@ def register(mcp, client: ItopClient):
                     parts.append(str(ii_count) + " inline image(s)")
                 elif ii_count is None:
                     parts.append(
-                        "possible inline image(s) -- call get_ticket_images to check"
+                        "possible inline image(s) -- call List_ticket_images to check"
                     )
 
                 if parts:
                     fields["_images"] = (
                         ", ".join(parts)
-                        + ". Call get_ticket_images to fetch them."
+                        + ". Call List_ticket_images to fetch them."
                         " These images are an inherent part of the ticket."
                     )
 
@@ -152,7 +152,7 @@ def register(mcp, client: ItopClient):
         output_fields: str = "id, friendlyname",
         comment: str = "",
     ) -> str:
-        """Create an iTop object. Use itop_describe_class first if the required fields are unknown."""
+        """Create an iTop object. Use Describe_class first if the required fields are unknown."""
         parsed = parse_json_arg(fields, "fields")
         if isinstance(parsed, str):
             return parsed
@@ -179,7 +179,7 @@ def register(mcp, client: ItopClient):
         """Update fields on an existing iTop object.
 
         For tickets, prefer ticket_ref; bare ticket numbers are resolved automatically.
-        Do not update status with this tool -- use itop_apply_stimulus for lifecycle
+        Do not update status with this tool -- use Apply_stimulus_to_object for lifecycle
         transitions such as assignment, resolution, reopening, or pending status."""
         parsed = parse_json_arg(fields, "fields")
         if isinstance(parsed, str):
@@ -187,8 +187,8 @@ def register(mcp, client: ItopClient):
 
         if isinstance(parsed, dict) and "status" in parsed:
             return (
-                "Error: 'status' cannot be set via itop_update. "
-                "Use itop_apply_stimulus with the appropriate stimulus instead:\n"
+                "Error: 'status' cannot be set via Update_object. "
+                "Use Apply_stimulus_to_object with the appropriate stimulus instead:\n"
                 "  ev_assign   - assign ticket\n"
                 "  ev_resolve  - resolve ticket (include solution in fields)\n"
                 "  ev_reopen   - reopen ticket\n"
@@ -243,7 +243,7 @@ def register(mcp, client: ItopClient):
         comment: str = "",
     ) -> str:
         """Apply a ticket lifecycle transition such as assignment, resolution, reopening,
-        or pending status. Use this tool -- not itop_update -- for status changes.
+        or pending status. Use this tool -- not Update_object -- for status changes.
         Resolve tickets with ev_resolve and include a solution in fields; never use
         ev_close. Prefer ticket_ref; bare ticket numbers are resolved automatically."""
         parsed = parse_json_arg(fields, "fields")
