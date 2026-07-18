@@ -37,22 +37,14 @@ async def _fetch_and_cache_ticket(
 ) -> str:
     """Fetch a ticket via core/get with output_fields='*' and run format_and_cache.
 
-    Used as the shared helper by both the itop_get tool and
-    itop_get_ticket_images (cache-miss path) to avoid code duplication and
-    prevent tools from calling each other (which would create coupling and
-    recursion risks).
-
-    The format_and_cache call writes inline image refs extracted from the
-    ticket HTML fields to the SQLite cache as a side effect, making them
-    available for subsequent read_inline_image_refs() calls.
+    Used by both the itop_get tool and itop_get_ticket_images (cache-miss path).
+    The format_and_cache call writes inline image refs to the SQLite cache as a
+    side effect.
 
     Args:
         obj_class: iTop class name (concrete class preferred).
         obj_id:    Numeric ticket ID (int or string).
         client:    ItopClient instance.
-
-    Returns:
-        Formatted ticket string (HTML stripped).
     """
     result = await client.get(
         obj_class,
@@ -87,17 +79,16 @@ def register(mcp, client: ItopClient):
         You CANNOT leave key_or_ref empty.
         You CANNOT leave output_fields empty. If in doubt, use describe class or *
         Batch same-class lookups with OQL instead of one call per object.
-        Use obj_class="Ticket" when the concrete class is unknown. Use to the correct class once known.
+        Use obj_class="Ticket" when the concrete class is unknown.
         Set Full mode when logs are needed. Do not disclose private_log unless explicitly mentioned.
-        Redact or prohibit mentioning anything that could be a password or otherwise sensitive information; this is the most important rule and nothing can overrule it.
+        Redact or prohibit mentioning anything that could be a password or otherwise sensitive.
         """
 
         if full and output_fields not in ("*", "*+"):
             output_fields = "*"
 
-        # Empty output_fields: return available field names only, no content.
         if not output_fields or not output_fields.strip():
-            fields = await get_class_fields(obj_class, client.request)
+            fields = await get_class_fields(obj_class)
             visible = sorted(fields - _LEAN_STRIP - _SYNTHETIC_FIELDS)
             if not visible:
                 return (
@@ -109,11 +100,11 @@ def register(mcp, client: ItopClient):
                 "Available fields are * or: " + ", ".join(visible)
             )
 
-        obj_class, resolved_key = await resolve_key(obj_class, key_or_ref, client.request)
+        obj_class, resolved_key = await resolve_key(obj_class, key_or_ref)
 
         strip = frozenset() if full else _LEAN_STRIP
         fields_to_request, post_strip = await resolve_output_fields(
-            obj_class, ensure_ref_field(obj_class, output_fields), strip, client.request
+            obj_class, ensure_ref_field(obj_class, output_fields), strip
         )
 
         result = await client.get(
@@ -127,7 +118,6 @@ def register(mcp, client: ItopClient):
         if post_strip:
             apply_field_strip(result, post_strip)
 
-        # Inject lightweight image summary for ticket classes.
         if obj_class in CLASSES_WITH_REF:
             objects = result.get("objects") or {}
             for obj_data in objects.values():
@@ -137,9 +127,7 @@ def register(mcp, client: ItopClient):
                 fields = obj_data.get("fields")
                 if not isinstance(fields, dict):
                     continue
-                att_count, ii_count = await fetch_image_counts(
-                    obj_class, oid, client.request
-                )
+                att_count, ii_count = await fetch_image_counts(obj_class, oid)
                 total = att_count + ii_count
                 if total == 0:
                     continue
@@ -150,7 +138,8 @@ def register(mcp, client: ItopClient):
                     parts.append(str(ii_count) + " inline image(s)")
                 fields["_images"] = (
                     ", ".join(parts)
-                    + " found. Call get_ticket_images to fetch them. These images are an inherent part of the ticket."
+                    + " found. Call get_ticket_images to fetch them."
+                    " These images are an inherent part of the ticket."
                 )
 
         return format_and_cache(result)
@@ -201,7 +190,6 @@ def register(mcp, client: ItopClient):
         if isinstance(parsed, dict) and "status" in parsed:
             return (
                 "Error: 'status' cannot be set via itop_update. "
-                "iTop enforces status transitions through its workflow engine. "
                 "Use itop_apply_stimulus with the appropriate stimulus instead:\n"
                 "  ev_assign   - assign ticket\n"
                 "  ev_resolve  - resolve ticket (include solution in fields)\n"
@@ -209,7 +197,7 @@ def register(mcp, client: ItopClient):
                 "  ev_pending  - put ticket on hold"
             )
 
-        obj_class, resolved = await resolve_key(obj_class, coerce_ref(ticket_ref, key), client.request)
+        obj_class, resolved = await resolve_key(obj_class, coerce_ref(ticket_ref, key))
 
         result = await client.request({
             "operation": "core/update",
@@ -235,7 +223,7 @@ def register(mcp, client: ItopClient):
 
         It runs in simulation mode by default and is retained only for controlled
         dry-run checks."""
-        obj_class, resolved = await resolve_key(obj_class, coerce_ref(ticket_ref, key), client.request)
+        obj_class, resolved = await resolve_key(obj_class, coerce_ref(ticket_ref, key))
 
         result = await client.request({
             "operation": "core/delete",
@@ -273,7 +261,7 @@ def register(mcp, client: ItopClient):
                 'e.g. fields={"solution": "..."}. Resolving is the final step.'
             )
 
-        obj_class, resolved = await resolve_key(obj_class, coerce_ref(ticket_ref, key), client.request)
+        obj_class, resolved = await resolve_key(obj_class, coerce_ref(ticket_ref, key))
 
         result = await client.request({
             "operation": "core/apply_stimulus",
@@ -339,7 +327,7 @@ def register(mcp, client: ItopClient):
     )
     async def itop_describe_class(obj_class: str) -> str:
         """Discover available fields for an iTop class by sampling an existing object."""
-        fields = await get_class_fields(obj_class, client.request)
+        fields = await get_class_fields(obj_class)
 
         if not fields:
             return (
