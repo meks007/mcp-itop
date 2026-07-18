@@ -40,11 +40,15 @@ from helpers.utils import (
     _SYNTHETIC_FIELDS,
 )
 
+from helpers.stripping import (
+    _LEAN_STRIP,
+    apply_field_strip,
+)
+
 from helpers.resolvers import (
     ensure_ref_field,
     ensure_class_exists,
     resolve_output_fields,
-    apply_field_strip,
     resolve_ref_class_by_ref_part,
     resolve_key,
     fetch_image_counts,
@@ -81,10 +85,11 @@ __all__ = [
     "str_or", "parse_key", "parse_json_arg", "parse_date_range",
     "coerce_ref", "is_bare_number", "_try_json_parse",
     "CLASSES_WITH_REF", "_SYNTHETIC_FIELDS",
+    # stripping
+    "_LEAN_STRIP", "apply_field_strip",
     # resolvers
     "ensure_ref_field", "ensure_class_exists", "resolve_output_fields",
-    "apply_field_strip", "resolve_ref_class_by_ref_part",
-    "resolve_key", "fetch_image_counts",
+    "resolve_ref_class_by_ref_part", "resolve_key", "fetch_image_counts",
     # formatters
     "extract_objects", "_format_objects", "format_objects",
     "format_and_cache", "format_table", "format_duration",
