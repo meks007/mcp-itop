@@ -48,7 +48,6 @@ from helpers.stripping import (
 from helpers.resolvers import (
     ensure_ref_field,
     ensure_class_exists,
-    resolve_output_fields,
     resolve_ref_class_by_ref_part,
     resolve_key,
     fetch_image_counts,
@@ -63,13 +62,13 @@ from helpers.formatters import (
     format_duration,
 )
 
-# Cache helpers imported by some tool modules via "from helpers import ..."
+# Class metadata cache helpers imported by some tool modules via "from helpers import ..."
 from cache import (
     registry_get_fields,
     registry_get_meta,
     registry_set_meta,
     seed_field_cache,
-    _registry_entry,
+    registry_add_entry,
 )
 
 # Client context helpers -- allow "from helpers import get_client, set_client"
@@ -87,14 +86,14 @@ __all__ = [
     # stripping
     "_LEAN_STRIP", "apply_field_strip",
     # resolvers
-    "ensure_ref_field", "ensure_class_exists", "resolve_output_fields",
+    "ensure_ref_field", "ensure_class_exists",
     "resolve_ref_class_by_ref_part", "resolve_key", "fetch_image_counts",
     # formatters
     "extract_objects", "_format_objects", "format_objects",
     "format_and_cache", "format_table", "format_duration",
-    # cache pass-throughs
+    # class metadata cache pass-throughs
     "registry_get_fields", "registry_get_meta", "registry_set_meta",
-    "seed_field_cache", "_registry_entry",
+    "seed_field_cache", "registry_add_entry",
     # client context
     "get_client", "set_client",
 ]
