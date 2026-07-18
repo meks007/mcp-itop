@@ -35,11 +35,10 @@ services:
       # Only takes effect when MCP_DEBUG=true. Secrets are always redacted.
       MCP_DEBUG_HEADERS: ${MCP_DEBUG_HEADERS:-false}
 
-      # Set to true to additionally log raw SSE chunks from sse_starlette.
-      # Only takes effect when MCP_DEBUG=true.
-      # WARNING: base64 payloads (e.g. attachments) produce extremely large
-      # log lines. Only enable for low-level SSE transport debugging.
-      MCP_DEBUG_SSE: ${MCP_DEBUG_SSE:-false}
+      # Set to true to additionally promote low-level third-party loggers to
+      # DEBUG (sse_starlette, httpcore, PIL). Only takes effect when
+      # MCP_DEBUG=true. May produce extremely large or high-frequency output.
+      MCP_DEBUG_ALL: ${MCP_DEBUG_ALL:-false}
 
       # -- Database backend -------------------------------------------------
       # Select the db backend module (default: sqlite).
@@ -72,6 +71,11 @@ services:
       IMAGE_JPEG_QUALITY: ${IMAGE_JPEG_QUALITY:-85}
 
       # -- Caches -----------------------------------------------------------
+      # TTL in seconds for the bearer token validation cache (sliding window).
+      # Resets on every cache hit; token re-validated only after this many
+      # seconds of inactivity. Set to 0 to disable caching. Default: 300 s.
+      TOKEN_CACHE_TTL: ${TOKEN_CACHE_TTL:-300}
+
       # TTL in seconds for the resolve_key lookup cache (default: 86400 = 24 h).
       # Set to 0 to disable caching entirely.
       RESOLVE_KEY_CACHE_TTL: ${RESOLVE_KEY_CACHE_TTL:-86400}
