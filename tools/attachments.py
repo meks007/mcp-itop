@@ -3,7 +3,7 @@ Attachment tools: fetch image metadata and download attachments as files.
 
 Public API
 ----------
-register(mcp, itop_request_fn, get_token_fn)
+register(mcp, client, get_token_fn)
     Registers the following MCP tools and resources:
 
     Tools:
@@ -71,9 +71,9 @@ from attachment_store import (
     store_images,
     write_inline_image_refs,
 )
+from client import ItopClient
 from config import ITOP_TIMEOUT, ITOP_URL, ITOP_VERIFY_SSL, MCP_DEBUG, logger
 from helpers import coerce_ref, resolve_key
-from client import itop_core_get
 from tools.crud import _fetch_and_cache_ticket
 
 _IMAGE_PREFIXES = ("image/",)
@@ -124,8 +124,8 @@ async def _download_binary(url: str) -> tuple[bytes, str]:
     application/octet-stream.
     """
     logger.debug("[attachments] _download_binary: GET %s", url)
-    async with httpx.AsyncClient(verify=ITOP_VERIFY_SSL, timeout=ITOP_TIMEOUT) as client:
-        response = await client.get(url)
+    async with httpx.AsyncClient(verify=ITOP_VERIFY_SSL, timeout=ITOP_TIMEOUT) as http:
+        response = await http.get(url)
         logger.debug(
             "[attachments] _download_binary: status=%d content-type=%s",
             response.status_code,
@@ -141,14 +141,14 @@ async def _download_binary(url: str) -> tuple[bytes, str]:
         return response.content, mimetype
 
 
-def register(mcp, itop_request_fn, get_token_fn):
+def register(mcp, client: ItopClient, get_token_fn):
     """Register attachment tools and the static image resource.
 
     Args:
-        mcp:             FastMCP server instance.
-        itop_request_fn: Async callable that sends iTop REST requests.
-        get_token_fn:    Zero-argument callable returning the current bearer
-                         token string for the active MCP client session.
+        mcp:          FastMCP server instance.
+        client:       ItopClient instance for REST requests.
+        get_token_fn: Zero-argument callable returning the current bearer
+                      token string for the active MCP client session.
     """
 
     # ------------------------------------------------------------------
@@ -174,7 +174,7 @@ def register(mcp, itop_request_fn, get_token_fn):
         )
 
         ref = coerce_ref(ticket_ref, key)
-        obj_class, resolved = await resolve_key(obj_class, ref, itop_request_fn)
+        obj_class, resolved = await resolve_key(obj_class, ref, client.request)
         logger.debug(
             "[attachments] itop_get_ticket_images: resolved class=%r key=%r",
             obj_class, resolved,
@@ -192,7 +192,7 @@ def register(mcp, itop_request_fn, get_token_fn):
             " WHERE item_class = '" + obj_class + "'"
             " AND item_id = " + obj_id
         )
-        att_result = await itop_core_get(itop_request_fn, "Attachment", att_oql, fields="contents")
+        att_result = await client.get("Attachment", att_oql, fields="contents")
         att_objects = att_result.get("objects") or {}
         logger.debug(
             "[attachments] itop_get_ticket_images: Attachment query returned %d object(s)",
@@ -252,7 +252,7 @@ def register(mcp, itop_request_fn, get_token_fn):
                 " to populate inline image ref cache",
                 obj_class, obj_id,
             )
-            await _fetch_and_cache_ticket(obj_class, obj_id, itop_request_fn)
+            await _fetch_and_cache_ticket(obj_class, obj_id, client)
             inline_refs = read_inline_image_refs(obj_class, obj_id)
             if inline_refs is None:
                 inline_refs = []
@@ -413,7 +413,7 @@ def register(mcp, itop_request_fn, get_token_fn):
         download link. Use itop_get_ticket_images for images. Returns metadata and links only,
         no file binaries. Prefer ticket_ref; use key for a numeric ID or OQL query."""
         ref = coerce_ref(ticket_ref, key)
-        obj_class, resolved = await resolve_key(obj_class, ref, itop_request_fn)
+        obj_class, resolved = await resolve_key(obj_class, ref, client.request)
         if resolved is None:
             return "Error: provide either ticket_ref or key to identify the ticket."
 
@@ -422,7 +422,7 @@ def register(mcp, itop_request_fn, get_token_fn):
             " WHERE item_class = '" + obj_class + "'"
             " AND item_id = " + str(resolved)
         )
-        att_result = await itop_core_get(itop_request_fn, "Attachment", att_oql, fields="contents")
+        att_result = await client.get("Attachment", att_oql, fields="contents")
 
         files = []
 
