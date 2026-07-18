@@ -149,10 +149,10 @@ def register(mcp, client: ItopClient):
         ticket_ref: str = "",
         key: str = "",
     ) -> str:
-        """Find image attachments for an iTop ticket and store them for the current session.
-
+        """List image attachments for an iTop ticket.
+        Use this tool to populate the resource Download ticket images.
         Prefer ticket_ref for tickets; use key for a numeric ID or OQL query.
-        After this tool returns, read the MCP resource itop://attachment/image.jpg
+        After this tool returns, query the resource Download ticket images
         to retrieve the actual image binaries."""
         logger.debug(
             "[attachments] itop_get_ticket_images: called obj_class=%s ticket_ref=%r key=%r",
@@ -404,7 +404,7 @@ def register(mcp, client: ItopClient):
         key: str = "",
     ) -> str:
         """List non-image file attachments for an iTop ticket, including MIME type and browser
-        download link. Use itop_get_ticket_images for images. Returns metadata and links only,
+        download link. Use list_ticket_images for images. Returns metadata and links only,
         no file binaries. Prefer ticket_ref; use key for a numeric ID or OQL query."""
         ref = coerce_ref(ticket_ref, key)
         obj_class, resolved = await resolve_key(obj_class, ref)
@@ -463,11 +463,11 @@ def register(mcp, client: ItopClient):
         _STATIC_RESOURCE_URI,
         name="Download ticket images",
         description=(
-            "Returns all images stored by the most recent itop_get_ticket_images call "
-            "for this session as one ResourceContent per image. "
-            "All images are served as JPEG directly from the BLOB store."
-            "You HAVE TO call list_ticket_images first to populate this resource."
-            "Only fetch this resource ONCE after calling list_ticket_images, it serves ALL images for a ticket in one call."
+            "Returns all images for the most recent list_ticket_images call as JPEG. "
+            "You HAVE TO call list_ticket_images first to populate this resource. "
+            "This resource does NOTHING without calling list_ticket_images first. "
+            "Only fetch this resource ONCE after calling list_ticket_images, "
+            "it serves ALL images for a ticket in one call."
         ),
         mime_type="image/jpeg",
     )
