@@ -2,15 +2,14 @@
 attachment_store/__init__.py - Public API shim for the attachment_store package.
 
 Re-exports all public names from the submodules so that existing imports like
-    from attachment_store import store_images, init_db
+    from attachment_store import store_images, ImageEntry
 continue to work without any changes to callers.
+
+Note: init_db() is no longer exported. Schema registration now happens
+automatically at import time via db.register_schema() in session.py and
+refs.py. Callers only need to call db.init() once at server startup.
 """
 
-from attachment_store.db import (
-    init_db,
-    IMAGE_STORE_TTL_SECONDS,
-    IMAGE_STORE_DB_PATH,
-)
 from attachment_store.image import _normalize_image
 from attachment_store.session import (
     store_images,
@@ -25,7 +24,6 @@ from attachment_store.refs import (
 )
 
 __all__ = [
-    "init_db",
     "store_images",
     "get_images",
     "purge_expired_images",
@@ -34,6 +32,4 @@ __all__ = [
     "read_inline_image_refs",
     "purge_expired_inline_image_refs",
     "_normalize_image",
-    "IMAGE_STORE_TTL_SECONDS",
-    "IMAGE_STORE_DB_PATH",
 ]
