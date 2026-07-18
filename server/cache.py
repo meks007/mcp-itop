@@ -27,9 +27,11 @@ key_cache.set((cls, ref), value)      -> None
 key_cache.cleanup()                   -> int
 
 # Token validation (TTL = TOKEN_CACHE_TTL, sliding window)
-await token_cache.validate(token, probe_fn)  -> bool
-await token_cache.evict_by_token(token)      -> None
-await token_cache.evict_stale()              -> int
+# NOTE: callers are responsible for hashing the raw token before calling.
+#       auth.get_bearer_token_hash() is the single place that does this.
+await token_cache.validate(token_hash, probe_fn)  -> bool
+await token_cache.evict_by_token(token_hash)      -> None
+await token_cache.evict_stale()                   -> int
 
 Backward-compatible aliases keep existing callers working unchanged:
   registry_add_entry, registry_get_meta, registry_set_meta,
@@ -40,7 +42,6 @@ Backward-compatible aliases keep existing callers working unchanged:
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import time
 import logging
 from dataclasses import dataclass, field
@@ -271,7 +272,9 @@ class TokenEntry:
 class TokenValidationCache(TTLCache[str, TokenEntry]):
     """Caches bearer token validation results with a sliding TTL.
 
-    Key: SHA-256 hex digest of the raw token (raw token is never stored).
+    Key: pre-computed SHA-256 hex digest of the raw token. This class never
+    sees or hashes raw tokens -- that responsibility belongs to auth.py via
+    auth.get_bearer_token_hash().
     Value: TokenEntry with valid flag and last_seen timestamp.
 
     sliding=True: every cache hit resets the expiry window so an
@@ -289,19 +292,21 @@ class TokenValidationCache(TTLCache[str, TokenEntry]):
 
     # ------------------------------------------------------------------
 
-    async def validate(self, token: str, probe_fn) -> bool:
-        """Validate a bearer token, using the cache to skip repeated probes.
+    async def validate(self, token_hash: str, probe_fn) -> bool:
+        """Validate a token by its pre-computed hash, using the cache to skip
+        repeated probes.
+
+        token_hash must be the SHA-256 hex digest of the raw bearer token,
+        computed by auth.get_bearer_token_hash(). This method never hashes
+        or inspects the raw token.
 
         probe_fn is an async callable with no arguments that returns bool.
         auth.py passes a closure over the raw iTop list_operations call.
 
         Flow:
-          1. Hash the token.
-          2. Fast path: non-expired entry found -- slide TTL, return valid.
-          3. Slow path: acquire per-key lock, re-check, then call probe_fn.
+          1. Fast path: non-expired entry found -- slide TTL, return valid.
+          2. Slow path: acquire per-key lock, re-check, then call probe_fn.
         """
-        token_hash = hashlib.sha256(token.encode()).hexdigest()
-
         # Fast path -- no lock needed for a plain dict read.
         entry = self.get(token_hash)
         if entry is not None:
@@ -331,13 +336,15 @@ class TokenValidationCache(TTLCache[str, TokenEntry]):
             )
             return valid
 
-    async def evict_by_token(self, token: str) -> None:
-        """Remove the cache entry and its lock for the given raw token.
+    async def evict_by_token(self, token_hash: str) -> None:
+        """Remove the cache entry and its lock for the given token hash.
 
-        Called by itop_request() whenever iTop returns code==1 (UNAUTH).
-        Safe to call when the token is not cached (no-op).
+        token_hash must be the SHA-256 hex digest of the raw bearer token,
+        computed by auth.get_bearer_token_hash().
+
+        Called by auth.evict_token() whenever iTop returns code==1 (UNAUTH).
+        Safe to call when the hash is not cached (no-op).
         """
-        token_hash = hashlib.sha256(token.encode()).hexdigest()
         async with self._lock_guard:
             removed = self._store.pop(token_hash, None)
             self._locks.pop(token_hash, None)
