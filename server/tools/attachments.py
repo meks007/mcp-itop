@@ -173,13 +173,13 @@ def register(mcp, client: ItopClient):
         images = []
 
         # -- Attachment (image types only) --
-        # Use get_raw: we need the full contents blob including base64 data.
+        # Use get: we need the full contents blob including base64 data.
         att_oql = (
             "SELECT Attachment"
             " WHERE item_class = '" + obj_class + "'"
             " AND item_id = " + obj_id
         )
-        att_result = await client.get_raw("Attachment", att_oql, fields="contents")
+        att_result = await client.get("Attachment", att_oql, fields="contents")
         att_objects = att_result.get("objects") or {}
         logger.debug(
             "[attachments] itop_get_ticket_images: Attachment query returned %d object(s)",
@@ -416,8 +416,8 @@ def register(mcp, client: ItopClient):
             " WHERE item_class = '" + obj_class + "'"
             " AND item_id = " + str(resolved)
         )
-        # Use get_raw: contents blob is needed for MIME type inspection.
-        att_result = await client.get_raw("Attachment", att_oql, fields="contents")
+        # Use get: contents blob is needed for MIME type inspection.
+        att_result = await client.get("Attachment", att_oql, fields="contents")
 
         files = []
 
