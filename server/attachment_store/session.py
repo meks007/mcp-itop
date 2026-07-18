@@ -2,7 +2,10 @@
 attachment_store/session.py - Session-bound image storage.
 
 Stores and retrieves image entries keyed by the current client bearer token.
-Each entry is valid for IMAGE_STORE_TTL_SECONDS.
+Each entry is valid for IMAGE_STORE_TTL_SECONDS (from config.py).
+
+Schema registered at module import time via db.register_schema() so that
+db.init() creates the table without any explicit init_db() call from callers.
 """
 
 from __future__ import annotations
@@ -11,17 +14,67 @@ import time
 import logging
 from typing import TypedDict
 
-import db as _db_layer
-from attachment_store.db import IMAGE_STORE_TTL_SECONDS, IMAGE_STORE_DB_PATH
+import db
+from config import IMAGE_STORE_TTL_SECONDS
 from attachment_store.image import _normalize_image
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Schema registration (runs at import time, before db.init())
+# ---------------------------------------------------------------------------
+
+db.register_schema("""
+CREATE TABLE IF NOT EXISTS attachment_sessions (
+    token       TEXT NOT NULL,
+    uri         TEXT NOT NULL,
+    content     BLOB,
+    mimetype    TEXT NOT NULL,
+    filename    TEXT NOT NULL,
+    expires_at  REAL NOT NULL
+)
+""")
+
+db.register_schema(
+    "CREATE INDEX IF NOT EXISTS idx_as_token "
+    "ON attachment_sessions (token)"
+)
+
+db.register_schema(
+    "CREATE INDEX IF NOT EXISTS idx_as_expires "
+    "ON attachment_sessions (expires_at)"
+)
+
+
+def _migrate_content_column(backend) -> None:
+    """Add the content column to attachment_sessions if missing.
+
+    Needed for databases created before the content column was introduced.
+    Cannot be expressed as a plain DDL string because it requires a
+    PRAGMA table_info() check first.
+    """
+    rows = backend.execute("PRAGMA table_info(attachment_sessions)")
+    existing_cols = {row[1] for row in rows}
+    if "content" not in existing_cols:
+        logger.info(
+            "[attachment_store] migrating schema: adding content column"
+        )
+        backend.execute(
+            "ALTER TABLE attachment_sessions ADD COLUMN content BLOB"
+        )
+
+
+db.register_migration(_migrate_content_column)
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
 
 class ImageEntry(TypedDict):
-    uri: str       # short itop:// reference
-    content: bytes # raw JPEG bytes (always populated before store)
-    mimetype: str  # always image/jpeg after normalization
+    uri: str        # short itop:// reference
+    content: bytes  # raw JPEG bytes (always populated before store)
+    mimetype: str   # always image/jpeg after normalization
     filename: str
 
 
@@ -30,7 +83,7 @@ def store_images(token: str, images: list[ImageEntry]) -> None:
 
     Each entry with non-None content is normalized to JPEG via
     _normalize_image() before insertion. Entries without content are
-    stored as-is (should not occur with Option B eager download).
+    stored as-is (should not occur with eager download).
 
     Replaces any existing entries for this token. Expired rows are purged
     by the central housekeeping task. Each entry is valid for
@@ -48,12 +101,11 @@ def store_images(token: str, images: list[ImageEntry]) -> None:
 
     logger.debug(
         "[attachment_store] store_images: token=%s image_count=%d "
-        "ttl=%.0fs expires_at=%.0f db=%s",
+        "ttl=%.0fs expires_at=%.0f",
         token_preview,
         len(images),
         IMAGE_STORE_TTL_SECONDS,
         expires_at,
-        IMAGE_STORE_DB_PATH,
     )
 
     rows = []
@@ -74,21 +126,17 @@ def store_images(token: str, images: list[ImageEntry]) -> None:
             expires_at,
         ))
 
-    backend = _db_layer.get_db()
-    with backend.transaction():
-        deleted_token = backend.execute(
+    with db.transaction():
+        db.execute(
             "DELETE FROM attachment_sessions WHERE token = ?",
             (token,),
         )
-        # execute() returns rows; rowcount is not available via the abstract
-        # interface, so derive the deleted count from the result length.
-        # For DELETE the list is always empty; log 0 instead.
         logger.debug(
             "[attachment_store] store_images: deleted old rows for token=%s",
             token_preview,
         )
 
-        backend.executemany(
+        db.executemany(
             "INSERT INTO attachment_sessions "
             "(token, uri, content, mimetype, filename, expires_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
@@ -134,7 +182,7 @@ def get_images(token: str) -> list[ImageEntry]:
         "[attachment_store] get_images: looking up token=%s", token_preview
     )
 
-    rows = _db_layer.get_db().execute(
+    rows = db.execute(
         "SELECT uri, content, mimetype, filename, expires_at "
         "FROM attachment_sessions "
         "WHERE token = ? AND expires_at >= ? "
@@ -179,23 +227,18 @@ def get_images(token: str) -> list[ImageEntry]:
 
 
 def purge_expired_images() -> int:
-    """Delete all expired rows from attachment_sessions. Returns rows removed.
-
-    The db layer execute() does not expose rowcount. For SQLite backends,
-    the DELETE returns no rows, so we query the count before deleting.
-    """
+    """Delete all expired rows from attachment_sessions. Returns rows removed."""
     logger.debug("[attachment_store] purge_expired_images: running purge")
     now = time.time()
-    backend = _db_layer.get_db()
 
-    count_rows = backend.execute(
+    count_rows = db.execute(
         "SELECT COUNT(*) FROM attachment_sessions WHERE expires_at < ?",
         (now,),
     )
     removed = count_rows[0][0] if count_rows else 0
 
-    with backend.transaction():
-        backend.execute(
+    with db.transaction():
+        db.execute(
             "DELETE FROM attachment_sessions WHERE expires_at < ?",
             (now,),
         )
