@@ -170,3 +170,177 @@ async def itop_core_get(
     if page is not None:
         op["page"] = str(page)
     return await itop_request_fn(op)
+
+
+class ItopClient:
+    """High-level async client for the iTop REST/JSON API.
+
+    Wraps the low-level itop_request() function and provides typed methods
+    for the most common iTop operations. All tool modules should accept an
+    ItopClient instance instead of a raw itop_request_fn callable so that
+    Retry logic, logging, and mocking can be centralised here.
+
+    Usage::
+
+        client = ItopClient(get_bearer_token)
+        result = await client.get("UserRequest", "R-001234")
+    """
+
+    def __init__(self, get_bearer_token: callable) -> None:
+        """Initialise the client.
+
+        Args:
+            get_bearer_token: Zero-argument callable that returns the
+                              current per-request bearer token string.
+        """
+        self._get_bearer_token = get_bearer_token
+
+    # ------------------------------------------------------------------
+    # Low-level request
+    # ------------------------------------------------------------------
+
+    async def request(self, op: dict) -> dict:
+        """Send a raw iTop REST/JSON operation dict.
+
+        Identical to the module-level itop_request() function.  Provided
+        here so callers that already hold an ItopClient instance never need
+        to import the bare function.
+
+        Args:
+            op: iTop operation dict, e.g. {"operation": "list_operations"}.
+
+        Returns:
+            Raw iTop REST response dict (code, message, objects, ...).
+        """
+        return await itop_request(op, self._get_bearer_token)
+
+    # ------------------------------------------------------------------
+    # core/get
+    # ------------------------------------------------------------------
+
+    async def get(
+        self,
+        cls: str,
+        key: str | int,
+        fields: str = "*",
+        limit: int | None = None,
+        page: int | None = None,
+    ) -> dict:
+        """Wrapper for iTop core/get operations.
+
+        Identical to the module-level itop_core_get() function but uses
+        the client's own request() method so the bearer token is always
+        injected correctly.
+
+        Args:
+            cls:    iTop class name, e.g. 'UserRequest', 'Attachment'.
+            key:    Numeric ID, OQL string, or ticket ref.
+            fields: Comma-separated field names or '*' / '*+'.
+            limit:  Max objects to return. None means no limit param sent.
+            page:   Page number for paginated results. None means not sent.
+
+        Returns:
+            Raw iTop REST response dict (code, message, objects).
+        """
+        op: dict = {
+            "operation": "core/get",
+            "class": cls,
+            "key": key,
+            "output_fields": fields,
+        }
+        if limit is not None:
+            op["limit"] = str(limit)
+        if page is not None:
+            op["page"] = str(page)
+        return await self.request(op)
+
+    # ------------------------------------------------------------------
+    # core/create, core/update, core/apply_stimulus
+    # ------------------------------------------------------------------
+
+    async def create(
+        self,
+        cls: str,
+        fields: dict,
+        output_fields: str = "id, friendlyname",
+        comment: str = "",
+    ) -> dict:
+        """Create an iTop object via core/create.
+
+        Args:
+            cls:           iTop class name.
+            fields:        Dict of field name -> value pairs for the new object.
+            output_fields: Comma-separated field names to include in the response.
+            comment:       Optional audit-log comment.
+
+        Returns:
+            Raw iTop REST response dict.
+        """
+        return await self.request({
+            "operation": "core/create",
+            "class": cls,
+            "fields": fields,
+            "output_fields": output_fields,
+            "comment": comment,
+        })
+
+    async def update(
+        self,
+        cls: str,
+        key: str | int,
+        fields: dict,
+        output_fields: str = "id, friendlyname",
+        comment: str = "",
+    ) -> dict:
+        """Update fields on an existing iTop object via core/update.
+
+        Args:
+            cls:           iTop class name.
+            key:           Numeric ID or OQL string identifying the object.
+            fields:        Dict of field name -> new value pairs.
+            output_fields: Comma-separated field names to include in the response.
+            comment:       Optional audit-log comment.
+
+        Returns:
+            Raw iTop REST response dict.
+        """
+        return await self.request({
+            "operation": "core/update",
+            "class": cls,
+            "key": key,
+            "fields": fields,
+            "output_fields": output_fields,
+            "comment": comment,
+        })
+
+    async def apply_stimulus(
+        self,
+        cls: str,
+        key: str | int,
+        stimulus: str,
+        fields: dict | None = None,
+        output_fields: str = "ref, friendlyname, status",
+        comment: str = "",
+    ) -> dict:
+        """Apply a lifecycle stimulus to an iTop object via core/apply_stimulus.
+
+        Args:
+            cls:           iTop class name.
+            key:           Numeric ID or OQL string identifying the object.
+            stimulus:      Stimulus name, e.g. 'ev_assign', 'ev_resolve'.
+            fields:        Optional dict of additional field values to set.
+            output_fields: Comma-separated field names to include in the response.
+            comment:       Optional audit-log comment.
+
+        Returns:
+            Raw iTop REST response dict.
+        """
+        return await self.request({
+            "operation": "core/apply_stimulus",
+            "class": cls,
+            "key": key,
+            "stimulus": stimulus,
+            "fields": fields or {},
+            "output_fields": output_fields,
+            "comment": comment,
+        })
