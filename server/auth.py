@@ -41,18 +41,21 @@ async def _validate_itop_token(token: str) -> bool:
 
     FastMCP calls this before routing any MCP message (initialize,
     tools/list, tools/call, ...). Returns False to yield HTTP 401.
+
+    The token is set into the ContextVar for the duration of the probe so
+    that itop_request() can read it via get_bearer_token() as normal.
     """
     from client import itop_request  # local import avoids circular reference
 
     async def probe_fn() -> bool:
+        token_reset = _bearer_token_var.set(token)
         try:
-            result = await itop_request(
-                {"operation": "list_operations"},
-                get_bearer_token=lambda: token,
-            )
+            result = await itop_request({"operation": "list_operations"})
             return result.get("code", -1) == 0
         except Exception:
             return False
+        finally:
+            _bearer_token_var.reset(token_reset)
 
     return await token_cache.validate(get_bearer_token_hash(token), probe_fn)
 
@@ -100,7 +103,7 @@ def get_bearer_token_hash(token: str | None = None) -> str:
     When called without an argument the token is read from the current
     request context via get_bearer_token(). Pass an explicit token string
     when the raw value is already available (e.g. during token validation
-    before the ContextVar has been set).
+    before the ContextVar has been set by ItopMiddleware).
 
     This is the single place in the codebase responsible for hashing the
     bearer token. cache.py accepts and stores only pre-computed hashes.
