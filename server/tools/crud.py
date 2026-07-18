@@ -170,13 +170,12 @@ def register(mcp, client: ItopClient):
         if isinstance(parsed, str):
             return parsed
 
-        result = await client.request({
-            "operation": "core/create",
-            "class": obj_class,
-            "fields": parsed,
-            "output_fields": ensure_ref_field(obj_class, output_fields),
-            "comment": comment or DEFAULT_COMMENT,
-        })
+        result = await client.create(
+            obj_class,
+            parsed,
+            output_fields=ensure_ref_field(obj_class, output_fields),
+            comment=comment or DEFAULT_COMMENT,
+        )
         return format_and_cache(result)
 
     @mcp.tool(
@@ -211,14 +210,13 @@ def register(mcp, client: ItopClient):
 
         obj_class, resolved = await resolve_key(obj_class, coerce_ref(ticket_ref, key))
 
-        result = await client.request({
-            "operation": "core/update",
-            "class": obj_class,
-            "key": resolved,
-            "fields": parsed,
-            "output_fields": ensure_ref_field(obj_class, output_fields),
-            "comment": comment or DEFAULT_COMMENT,
-        })
+        result = await client.update(
+            obj_class,
+            resolved,
+            parsed,
+            output_fields=ensure_ref_field(obj_class, output_fields),
+            comment=comment or DEFAULT_COMMENT,
+        )
         return format_and_cache(result)
 
     @mcp.tool(
@@ -275,15 +273,14 @@ def register(mcp, client: ItopClient):
 
         obj_class, resolved = await resolve_key(obj_class, coerce_ref(ticket_ref, key))
 
-        result = await client.request({
-            "operation": "core/apply_stimulus",
-            "class": obj_class,
-            "key": resolved,
-            "stimulus": stimulus,
-            "fields": parsed,
-            "output_fields": ensure_ref_field(obj_class, output_fields),
-            "comment": comment or DEFAULT_COMMENT,
-        })
+        result = await client.apply_stimulus(
+            obj_class,
+            resolved,
+            stimulus,
+            fields=parsed,
+            output_fields=ensure_ref_field(obj_class, output_fields),
+            comment=comment or DEFAULT_COMMENT,
+        )
         return format_and_cache(result)
 
     @mcp.tool(
