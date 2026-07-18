@@ -35,6 +35,12 @@ services:
       # Only takes effect when MCP_DEBUG=true. Secrets are always redacted.
       MCP_DEBUG_HEADERS: ${MCP_DEBUG_HEADERS:-false}
 
+      # Set to true to additionally log raw SSE chunks from sse_starlette.
+      # Only takes effect when MCP_DEBUG=true.
+      # WARNING: base64 payloads (e.g. attachments) produce extremely large
+      # log lines. Only enable for low-level SSE transport debugging.
+      MCP_DEBUG_SSE: ${MCP_DEBUG_SSE:-false}
+
       # -- Database backend -------------------------------------------------
       # Select the db backend module (default: sqlite).
       # To add a new backend drop a file into server/db/ and set this var.
