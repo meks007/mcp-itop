@@ -466,8 +466,8 @@ def register(mcp, client: ItopClient):
             "Returns all images stored by the most recent itop_get_ticket_images call "
             "for this session as one ResourceContent per image. "
             "All images are served as JPEG directly from the BLOB store."
-            "Call itop_get_ticket_images first to populate this resource."
-            "Only call this once, it serves ALL images for a ticket in one call."
+            "You HAVE TO call list_ticket_images first to populate this resource."
+            "Only fetch this resource ONCE after calling list_ticket_images, it serves ALL images for a ticket in one call."
         ),
         mime_type="image/jpeg",
     )
