@@ -1,161 +1,415 @@
 """
-Process-level caches for iTop class metadata and resolve_key lookups.
+cache.py - Process-level caches for mcp-itop.
 
-Two independent caches:
+Three caches are provided, all backed by a small generic class hierarchy:
 
-1. Class metadata cache (_ITOP_CLASS_REGISTRY)
-   Stores field inventories and arbitrary metadata per iTop class.
-   Seeded passively from every core/get response via seed_field_cache().
-   Never expires. No active pre-heat -- cache warms lazily on first use.
+  Cache[K, V]             -- abstract base: get/set/evict
+  TTLCache[K, V]          -- adds time-based eviction and cleanup()
 
-2. Key resolution cache (_RESOLVE_KEY_CACHE)
-   Maps (obj_class, ref) to (resolved_class, numeric_id).
-   TTL-based eviction; lazy cleanup on every resolve_key call.
-   TTL is read from RESOLVE_KEY_CACHE_TTL (env, default 86400 s).
+Concrete singletons (module-level, one per concern):
+
+  class_cache   : ClassMetadataCache       -- iTop class field inventories
+  key_cache     : KeyResolutionCache       -- resolved (class, id) per ref
+  token_cache   : TokenValidationCache     -- bearer token validity results
 
 Public API
 ----------
-# Class metadata cache
-registry_add_entry(cls)           -- get-or-create entry for cls
-registry_get_meta(cls, key, default)
-registry_set_meta(cls, key, value)
-registry_get_fields(cls)
-seed_field_cache(cls, fields)
+# Class metadata
+class_cache.probe_entry(cls)          -> ClassEntry
+class_cache.get_fields(cls)           -> frozenset[str]
+class_cache.seed(cls, fields)         -> None
+class_cache.get_meta(cls, key, ...)   -> Any
+class_cache.set_meta(cls, key, value) -> None
 
-# Key resolution cache
-cache_get(obj_class, ref)
-cache_set(obj_class, ref, cls, id)
-cache_cleanup()
+# Key resolution (TTL from RESOLVE_KEY_CACHE_TTL env var)
+key_cache.get((cls, ref))             -> ResolvedKey | None
+key_cache.set((cls, ref), value)      -> None
+key_cache.cleanup()                   -> int
 
-Note: get_class_fields() has moved to ItopClient.get_class_fields() in
-client.py. Use client.get_class_fields(cls) for policy-aware field
-discovery that respects _LEAN_STRIP.
+# Token validation (TTL = TOKEN_CACHE_TTL, sliding window)
+await token_cache.validate(token, probe_fn)  -> bool
+await token_cache.evict_by_token(token)      -> None
+await token_cache.evict_stale()              -> int
+
+Backward-compatible aliases keep existing callers working unchanged:
+  registry_add_entry, registry_get_meta, registry_set_meta,
+  registry_get_fields, seed_field_cache,
+  cache_get, cache_set, cache_cleanup
 """
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import time
 import logging
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Generic, Iterator, TypeVar
 
 from config import RESOLVE_KEY_CACHE_TTL
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Class metadata cache
+# Type variables
 # ---------------------------------------------------------------------------
-# Per-entry shape:
-#   {
-#     "exists": bool | None,     # None = not yet probed
-#     "fields": frozenset[str],  # known field names, grown from live responses
-#     "meta":   dict,            # arbitrary per-class metadata
-#   }
 
-_ITOP_CLASS_REGISTRY: dict[str, dict] = {}
+K = TypeVar("K")
+V = TypeVar("V")
+
+# ---------------------------------------------------------------------------
+# Base class: Cache[K, V]
+# ---------------------------------------------------------------------------
 
 
-def registry_add_entry(cls: str) -> dict:
-    """Get-or-create the registry entry for cls.
+class Cache(Generic[K, V]):
+    """Abstract base for all caches.
 
-    Returns the mutable entry dict so callers can read or write exists/fields/meta
-    directly. Creates a blank entry on first call for a given class name.
-
-    NOTE: must never call logger.debug() -- this function is invoked from within
-    logging formatter paths (via beartype hooks) and any log call here causes
-    infinite recursion.
+    Concrete subclasses store entries in a plain dict and may add eviction.
     """
-    if cls not in _ITOP_CLASS_REGISTRY:
-        _ITOP_CLASS_REGISTRY[cls] = {"exists": None, "fields": frozenset(), "meta": {}}
-    return _ITOP_CLASS_REGISTRY[cls]
+
+    def get(self, key: K) -> V | None:  # noqa: D401
+        """Return the cached value for key, or None on miss."""
+        raise NotImplementedError
+
+    def set(self, key: K, value: V) -> None:
+        """Store value under key."""
+        raise NotImplementedError
+
+    def evict(self, key: K) -> None:
+        """Remove the entry for key (no-op if not present)."""
+        raise NotImplementedError
+
+
+# ---------------------------------------------------------------------------
+# Base class: TTLCache[K, V]
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _TTLEntry(Generic[V]):
+    value: V
+    ts: float  # time.monotonic() at insertion
+
+
+class TTLCache(Cache[K, V]):
+    """Cache with time-to-live eviction.
+
+    Args:
+        ttl:     Seconds before an entry expires.  ttl <= 0 disables caching.
+        sliding: If True, every get() that hits an entry resets its clock.
+                 If False (default), TTL is measured from insertion only.
+    """
+
+    def __init__(self, ttl: float, sliding: bool = False) -> None:
+        self._ttl = ttl
+        self._sliding = sliding
+        self._store: dict[Any, _TTLEntry] = {}
+
+    # ------------------------------------------------------------------
+
+    def get(self, key: K) -> V | None:
+        if self._ttl <= 0:
+            return None
+        entry = self._store.get(key)
+        if entry is None:
+            return None
+        now = time.monotonic()
+        if now - entry.ts > self._ttl:
+            del self._store[key]
+            return None
+        if self._sliding:
+            entry.ts = now
+        return entry.value
+
+    def set(self, key: K, value: V) -> None:
+        if self._ttl <= 0:
+            return
+        self._store[key] = _TTLEntry(value=value, ts=time.monotonic())
+
+    def evict(self, key: K) -> None:
+        self._store.pop(key, None)
+
+    def cleanup(self) -> int:
+        """Evict all expired entries. Returns the count removed."""
+        if self._ttl <= 0:
+            return 0
+        now = time.monotonic()
+        expired = [k for k, e in self._store.items() if now - e.ts > self._ttl]
+        for k in expired:
+            del self._store[k]
+        if expired:
+            logger.debug("[cache] cleanup: evicted %d expired entries", len(expired))
+        return len(expired)
+
+
+# ---------------------------------------------------------------------------
+# ClassMetadataCache
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ClassEntry:
+    exists: bool | None = None       # None = not yet probed
+    fields: frozenset = field(default_factory=frozenset)
+    meta: dict = field(default_factory=dict)
+
+
+class ClassMetadataCache(Cache[str, ClassEntry]):
+    """Stores per-iTop-class field inventories and arbitrary metadata.
+
+    No TTL -- iTop class schemas do not change at runtime. Entries are
+    created on first access and grow over the lifetime of the process.
+    """
+
+    def __init__(self) -> None:
+        self._store: dict[str, ClassEntry] = {}
+
+    # ------------------------------------------------------------------
+
+    def get(self, key: str) -> ClassEntry | None:
+        return self._store.get(key)
+
+    def set(self, key: str, value: ClassEntry) -> None:
+        self._store[key] = value
+
+    def evict(self, key: str) -> None:
+        self._store.pop(key, None)
+
+    # ------------------------------------------------------------------
+    # Domain helpers
+    # ------------------------------------------------------------------
+
+    def probe_entry(self, cls: str) -> ClassEntry:
+        """Get-or-create the ClassEntry for cls.
+
+        NOTE: must never call logger.debug() -- this method is invoked from
+        within logging formatter paths (via beartype hooks) and any log call
+        here causes infinite recursion.
+        """
+        if cls not in self._store:
+            self._store[cls] = ClassEntry()
+        return self._store[cls]
+
+    def get_fields(self, cls: str) -> frozenset:
+        """Return the known field set for cls (empty frozenset if not seeded)."""
+        entry = self._store.get(cls)
+        return entry.fields if entry is not None else frozenset()
+
+    def seed(self, cls: str, fields: dict) -> None:
+        """Grow the field set for cls from a live iTop response fields dict.
+
+        Always unions new fields with existing ones -- never removes any.
+        Sets exists=True as a side effect.
+
+        NOTE: must never call logger.debug() -- same recursion risk as probe_entry.
+        """
+        entry = self.probe_entry(cls)
+        if not fields:
+            logger.warning("[class_cache] seed called for cls=%r with empty fields", cls)
+            return
+        incoming = frozenset(fields.keys())
+        before_set = entry.fields
+        new_fields = incoming - before_set
+        entry.fields = before_set | incoming
+        entry.exists = True
+        if new_fields and logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[class_cache] seed cls=%r +%d new fields (total=%d)",
+                cls, len(new_fields), len(entry.fields),
+            )
+
+    def get_meta(self, cls: str, key: str, default: Any = None) -> Any:
+        """Read arbitrary per-class metadata."""
+        return self.probe_entry(cls).meta.get(key, default)
+
+    def set_meta(self, cls: str, key: str, value: Any) -> None:
+        """Write arbitrary per-class metadata."""
+        self.probe_entry(cls).meta[key] = value
+
+
+# Singleton
+class_cache = ClassMetadataCache()
+
+# ---------------------------------------------------------------------------
+# KeyResolutionCache
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ResolvedKey:
+    resolved_class: str
+    resolved_id: int
+
+
+class KeyResolutionCache(TTLCache[tuple, ResolvedKey]):
+    """Maps (obj_class, ref) to (resolved_class, numeric_id).
+
+    TTL is read from RESOLVE_KEY_CACHE_TTL (env var, default 86400 s).
+    sliding=False: insertion time determines expiry, hits do not reset the clock.
+    """
+
+    pass
+
+
+# Singleton
+key_cache = KeyResolutionCache(ttl=RESOLVE_KEY_CACHE_TTL, sliding=False)
+
+# ---------------------------------------------------------------------------
+# TokenValidationCache
+# ---------------------------------------------------------------------------
+
+TOKEN_CACHE_TTL: float = 60.0  # seconds, sliding window
+
+
+@dataclass
+class TokenEntry:
+    valid: bool
+    last_seen: float
+
+
+class TokenValidationCache(TTLCache[str, TokenEntry]):
+    """Caches bearer token validation results with a sliding TTL.
+
+    Key: SHA-256 hex digest of the raw token (raw token is never stored).
+    Value: TokenEntry with valid flag and last_seen timestamp.
+
+    sliding=True: every cache hit resets the expiry window so an
+    actively-used token is never re-validated until it goes idle for the
+    full TTL duration.
+
+    Per-key asyncio.Lock instances prevent duplicate iTop probe calls when
+    multiple coroutines race to validate the same token simultaneously.
+    """
+
+    def __init__(self, ttl: float, sliding: bool = True) -> None:
+        super().__init__(ttl=ttl, sliding=sliding)
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._lock_guard = asyncio.Lock()
+
+    # ------------------------------------------------------------------
+
+    async def validate(self, token: str, probe_fn) -> bool:
+        """Validate a bearer token, using the cache to skip repeated probes.
+
+        probe_fn is an async callable with no arguments that returns bool.
+        auth.py passes a closure over the raw iTop list_operations call.
+
+        Flow:
+          1. Hash the token.
+          2. Fast path: non-expired entry found -- slide TTL, return valid.
+          3. Slow path: acquire per-key lock, re-check, then call probe_fn.
+        """
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+
+        # Fast path -- no lock needed for a plain dict read.
+        entry = self.get(token_hash)
+        if entry is not None:
+            return entry.valid
+
+        # Slow path: ensure per-key lock exists, then probe.
+        async with self._lock_guard:
+            if token_hash not in self._locks:
+                self._locks[token_hash] = asyncio.Lock()
+            token_lock = self._locks[token_hash]
+
+        async with token_lock:
+            # Re-check after acquiring the lock; another coroutine may have
+            # already completed the probe while we were waiting.
+            entry = self.get(token_hash)
+            if entry is not None:
+                return entry.valid
+
+            try:
+                valid = await probe_fn()
+            except Exception:
+                valid = False
+
+            self.set(token_hash, TokenEntry(valid=valid, last_seen=time.monotonic()))
+            logger.debug(
+                "[token_cache] validated: valid=%s hash_prefix=%s", valid, token_hash[:8]
+            )
+            return valid
+
+    async def evict_by_token(self, token: str) -> None:
+        """Remove the cache entry and its lock for the given raw token.
+
+        Called by itop_request() whenever iTop returns code==1 (UNAUTH).
+        Safe to call when the token is not cached (no-op).
+        """
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        async with self._lock_guard:
+            removed = self._store.pop(token_hash, None)
+            self._locks.pop(token_hash, None)
+        if removed is not None:
+            logger.warning(
+                "[token_cache] evicted (UNAUTH): hash_prefix=%s", token_hash[:8]
+            )
+
+    async def evict_stale(self) -> int:
+        """Remove all token entries past their TTL. Returns count removed.
+
+        Called periodically by housekeeping_loop() in background_tasks.py.
+        Replaces evict_stale_token_cache() from auth.py.
+        """
+        if self._ttl <= 0:
+            return 0
+        now = time.monotonic()
+        async with self._lock_guard:
+            stale = [
+                h for h, e in self._store.items()
+                if now - e.ts > self._ttl
+            ]
+            for h in stale:
+                self._store.pop(h, None)
+                self._locks.pop(h, None)
+        if stale:
+            logger.debug(
+                "[token_cache] evict_stale: removed %d stale entries", len(stale)
+            )
+        return len(stale)
+
+
+# Singleton
+token_cache = TokenValidationCache(ttl=TOKEN_CACHE_TTL, sliding=True)
+
+# ---------------------------------------------------------------------------
+# Backward-compatible aliases
+# ---------------------------------------------------------------------------
+# These names were the original public API of cache.py. Existing callers
+# continue to work without modification until they are updated to use the
+# class methods directly.
+
+def registry_add_entry(cls: str) -> ClassEntry:
+    return class_cache.probe_entry(cls)
 
 
 def registry_get_meta(cls: str, key: str, default: Any = None) -> Any:
-    """Read arbitrary per-class metadata from the class metadata cache."""
-    return registry_add_entry(cls)["meta"].get(key, default)
+    return class_cache.get_meta(cls, key, default)
 
 
 def registry_set_meta(cls: str, key: str, value: Any) -> None:
-    """Write arbitrary per-class metadata into the class metadata cache."""
-    registry_add_entry(cls)["meta"][key] = value
+    class_cache.set_meta(cls, key, value)
 
 
 def registry_get_fields(cls: str) -> frozenset:
-    """Return the known field inventory for a class (may be empty frozenset)."""
-    return registry_add_entry(cls)["fields"]
+    return class_cache.get_fields(cls)
 
 
 def seed_field_cache(cls: str, fields: dict) -> None:
-    """Grow the field inventory for a class from a live response fields dict.
-
-    Already-known fields are always kept (union, never removed).
-    Sets exists=True as a side effect.
-    Called automatically from apply_field_strip() and ensure_class_exists()
-    so the cache fills passively on every iTop response.
-
-    NOTE: must never call logger.debug() -- same recursion risk as registry_add_entry.
-    """
-    entry = registry_add_entry(cls)
-    if not fields:
-        logger.warning("[class_cache] seed_field_cache cls=%r called with empty fields", cls)
-        return
-    incoming = frozenset(fields.keys())
-    before_set = entry["fields"]
-    new_fields = incoming - before_set
-    entry["fields"] = before_set | incoming
-    entry["exists"] = True
-    if new_fields and logger.isEnabledFor(logging.DEBUG):
-        logger.debug(
-            "[class_cache] seed_field_cache cls=%r +%d new fields (total=%d)",
-            cls, len(new_fields), len(entry["fields"]),
-        )
-
-
-# ---------------------------------------------------------------------------
-# Key resolution cache
-# ---------------------------------------------------------------------------
-# Cache shape: { (obj_class, ref): {"class": str, "id": int, "ts": float} }
-
-_RESOLVE_KEY_CACHE: dict[tuple[str, str], dict] = {}
-
-
-def cache_cleanup() -> None:
-    """Remove all key resolution cache entries whose TTL has expired."""
-    if RESOLVE_KEY_CACHE_TTL <= 0:
-        return
-    now = time.monotonic()
-    expired = [
-        k for k, v in _RESOLVE_KEY_CACHE.items()
-        if now - v["ts"] > RESOLVE_KEY_CACHE_TTL
-    ]
-    for k in expired:
-        del _RESOLVE_KEY_CACHE[k]
-    if expired:
-        logger.debug("[key_cache] evicted %d expired entry/entries", len(expired))
+    class_cache.seed(cls, fields)
 
 
 def cache_get(obj_class: str, ref: str) -> tuple[str, int] | None:
-    """Return (resolved_class, resolved_id) from the key cache, or None on miss/expiry."""
-    if RESOLVE_KEY_CACHE_TTL <= 0:
+    result = key_cache.get((obj_class, ref))
+    if result is None:
         return None
-    entry = _RESOLVE_KEY_CACHE.get((obj_class, ref))
-    if entry is None:
-        return None
-    if time.monotonic() - entry["ts"] > RESOLVE_KEY_CACHE_TTL:
-        del _RESOLVE_KEY_CACHE[(obj_class, ref)]
-        logger.debug(
-            "[key_cache] expired entry for class=%r ref=%r", obj_class, ref
-        )
-        return None
-    return entry["class"], entry["id"]
+    return result.resolved_class, result.resolved_id
 
 
 def cache_set(obj_class: str, ref: str, resolved_class: str, resolved_id: int) -> None:
-    """Store a resolved (class, id) pair in the key resolution cache."""
-    if RESOLVE_KEY_CACHE_TTL <= 0:
-        return
-    _RESOLVE_KEY_CACHE[(obj_class, ref)] = {
-        "class": resolved_class,
-        "id": resolved_id,
-        "ts": time.monotonic(),
-    }
+    key_cache.set((obj_class, ref), ResolvedKey(resolved_class, resolved_id))
+
+
+def cache_cleanup() -> None:
+    key_cache.cleanup()
