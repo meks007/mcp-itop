@@ -4,8 +4,6 @@ Knowledge base tools: search, get article, list categories.
 
 from __future__ import annotations
 
-import re
-
 from client import ItopClient
 from helpers import (
     ensure_class_exists,
@@ -28,35 +26,6 @@ _KB_CAT_MAP = {"KBEntry": "KBCategory", "FAQ": "FAQCategory"}
 # We resolve the text field against the registry field inventory rather than
 # via a live request to avoid false positives.
 _KB_TEXT_FIELD_CANDIDATES = ["description", "summary", "solution", "document"]
-
-# Common German/English search terms that add noise to KB searches. Keep this
-# deliberately small: domain-specific terms must remain searchable.
-_KB_SEARCH_STOPWORDS = {
-    "ein", "eine", "einer", "eines", "der", "die", "das", "den", "dem", "des",
-    "und", "oder", "f¸r", "von", "mit", "bei", "auf", "im", "in", "zu", "an",
-    "ist", "sind", "wie", "the", "a", "an", "and", "or", "for", "with", "from",
-}
-
-
-def _keyword_terms(query: str) -> list[str]:
-    """Extract distinctive terms for the default KB search OQL.
-
-    The MCP tool receives natural-language input quite often. iTop LIKE does
-    not tokenize that input, so using the complete phrase is usually too
-    restrictive. Preserve the user's terms, remove only punctuation and very
-    common stopwords, and cap the result to keep the generated OQL manageable.
-    """
-    terms = re.findall(r"[\wƒ÷‹‰ˆ¸ﬂ-]+", query, flags=re.UNICODE)
-    result = []
-    seen = set()
-    for term in terms:
-        normalized = term.strip("-").lower()
-        if len(normalized) < 2 or normalized in _KB_SEARCH_STOPWORDS:
-            continue
-        if normalized not in seen:
-            seen.add(normalized)
-            result.append(term.strip("-"))
-    return result[:8] or [query.strip()]
 
 
 def register(mcp, client: ItopClient):
@@ -113,19 +82,12 @@ def register(mcp, client: ItopClient):
         oql: str = "",
         limit: int = 20,
     ) -> str:
-        """Search knowledge-base articles using distinctive keywords.
+        """Search knowledge-base articles by title or body text.
 
-        IMPORTANT: query is a keyword search input, not a full natural-language
-        sentence or exact phrase. Extract 1-5 meaningful technical terms from
-        the user's request, such as ``Laptop TFT Bildschirm`` or
-        ``Outlook Anmeldung Passwort``. Do not pass the complete user sentence,
-        a symptom description, or a long phrase unchanged. The default search
-        splits query into individual keywords and searches each keyword in title
-        and body with OR, so terms remain findable even when article wording
-        differs. Use explicit oql only when a precise iTop query is required.
-
-        Automatically detects the available KB class and body field.
-        """
+        Search with meaningful, likely keywords rather than full phrases so the
+        built-in LIKE search can match relevant articles more reliably. Automatically
+        detects the available KB class and body field. Supply oql to override the
+        built-in LIKE query entirely."""
         kb_cls = await _kb_class()
         if not kb_cls:
             return "No KB module installed (tried KBEntry, FAQ)."
@@ -135,16 +97,10 @@ def register(mcp, client: ItopClient):
         if oql:
             effective_oql = oql
         else:
-            keywords = _keyword_terms(query)
-            clauses = []
-            for keyword in keywords:
-                safe = keyword.replace("'", "")
-                clauses.append(
-                    "title LIKE '%" + safe + "%'"
-                    " OR " + text_field + " LIKE '%" + safe + "%'"
-                )
-            effective_oql = "SELECT " + kb_cls + " WHERE " + " OR ".join(
-                "(" + clause + ")" for clause in clauses
+            safe = query.replace("'", "")
+            effective_oql = (
+                "SELECT " + kb_cls + " WHERE title LIKE '%" + safe + "%'"
+                " OR " + text_field + " LIKE '%" + safe + "%'"
             )
 
         result = await client.get(
@@ -160,7 +116,7 @@ def register(mcp, client: ItopClient):
                 "No KB articles found for query '" + query + "'.\n"
                 "OQL used: " + effective_oql + "\n"
                 "Body field used: " + text_field + "\n"
-                "Tip: use a few distinctive keywords or supply an explicit oql parameter."
+                "Tip: supply an explicit oql parameter to override the search query."
             )
 
         header = ["ID", "Title", "Category", "Status"]
