@@ -8,6 +8,13 @@ set_client(c)     Bind an ItopClient to the current async context.
 
 Both are called by ItopMiddleware (auth.py) so that every request handler
 and helper function can reach the client without an explicit parameter.
+
+ItopClient.get_raw  -- thin core/get wrapper, returns the raw iTop dict.
+ItopClient.get      -- same as get_raw but applies _LEAN_STRIP when full=False.
+                       Use get_raw when you need the unfiltered response (e.g.
+                       internal resolvers, attachment queries). Use get everywhere
+                       else so that privacy-sensitive fields are stripped
+                       consistently.
 """
 
 from __future__ import annotations
@@ -29,6 +36,7 @@ from config import (
     MCP_DEBUG_HEADERS,
     logger,
 )
+from helpers.stripping import _LEAN_STRIP, apply_field_strip
 
 # ---------------------------------------------------------------------------
 # Module-level HTTP client (shared, lazy-init)
@@ -53,7 +61,7 @@ def _redact_secret(value: object, visible_chars: int = 7) -> str:
     secret = str(value)
     if len(secret) <= visible_chars:
         return "***REDACTED***"
-    return f"{secret[:visible_chars]}***REDACTED***"
+    return secret[:visible_chars] + "***REDACTED***"
 
 
 def _redact_form_data(data: dict) -> dict:
@@ -72,7 +80,7 @@ def _redact_headers(headers: httpx.Headers) -> dict:
         if name.lower() == "authorization":
             if value.lower().startswith("bearer "):
                 token_part = value[len("bearer "):]
-                redacted[name] = f"Bearer {_redact_secret(token_part)}"
+                redacted[name] = "Bearer " + _redact_secret(token_part)
             else:
                 redacted[name] = _redact_secret(value)
         else:
@@ -99,7 +107,7 @@ async def itop_request(operation: dict, get_bearer_token: Callable[[], str]) -> 
 
     token = get_bearer_token()
 
-    url = f"{ITOP_URL}/webservices/rest.php"
+    url = ITOP_URL + "/webservices/rest.php"
     data: dict[str, str] = {
         "version": ITOP_VERSION,
         "json_data": json.dumps(operation),
@@ -136,13 +144,13 @@ async def itop_request(operation: dict, get_bearer_token: Callable[[], str]) -> 
             )
         return {
             "code": e.response.status_code,
-            "message": f"HTTP {e.response.status_code}: {e.response.text[:300]}",
+            "message": "HTTP " + str(e.response.status_code) + ": " + e.response.text[:300],
         }
     except httpx.HTTPError as e:
         logger.warning("iTop network error: %s", e)
         if MCP_DEBUG:
             logger.debug("MCP <- iTop  network error: %s", e)
-        return {"code": -1, "message": f"Network error: {e}"}
+        return {"code": -1, "message": "Network error: " + str(e)}
 
     if result.get("code", 0) != 0:
         logger.warning(
@@ -239,10 +247,10 @@ class ItopClient:
         return await itop_request(op, self._get_bearer_token)
 
     # ------------------------------------------------------------------
-    # core/get
+    # core/get -- raw
     # ------------------------------------------------------------------
 
-    async def get(
+    async def get_raw(
         self,
         cls: str,
         key: str | int,
@@ -250,7 +258,10 @@ class ItopClient:
         limit: int | None = None,
         page: int | None = None,
     ) -> dict:
-        """Wrapper for iTop core/get operations.
+        """Thin wrapper for iTop core/get. Returns the unmodified response dict.
+
+        Use this when the caller needs to inspect the raw iTop payload directly
+        (e.g. internal resolvers, attachment and image count queries).
 
         Args:
             cls:    iTop class name, e.g. 'UserRequest'.
@@ -270,6 +281,42 @@ class ItopClient:
         if page is not None:
             op["page"] = str(page)
         return await self.request(op)
+
+    # ------------------------------------------------------------------
+    # core/get -- with field stripping
+    # ------------------------------------------------------------------
+
+    async def get(
+        self,
+        cls: str,
+        key: str | int,
+        fields: str = "*",
+        limit: int | None = None,
+        page: int | None = None,
+        full: bool = False,
+    ) -> dict:
+        """core/get with automatic field stripping.
+
+        Identical to get_raw except that when full=False (default) the fields
+        listed in _LEAN_STRIP are removed from every returned object before the
+        dict is handed back to the caller. When full=True the response is
+        returned as-is, equivalent to get_raw.
+
+        Use this method in all tool and business-logic code. Reserve get_raw
+        for low-level infrastructure that needs the unfiltered payload.
+
+        Args:
+            cls:    iTop class name, e.g. 'UserRequest'.
+            key:    Numeric ID, OQL string, or ticket ref.
+            fields: Comma-separated field names or '*' / '*+'.
+            limit:  Max objects to return.
+            page:   Page number for paginated results.
+            full:   When True, skip stripping and return the raw dict.
+        """
+        result = await self.get_raw(cls, key, fields=fields, limit=limit, page=page)
+        if not full:
+            apply_field_strip(result, _LEAN_STRIP)
+        return result
 
     # ------------------------------------------------------------------
     # core/create
