@@ -4,6 +4,9 @@ helpers/resolvers.py - iTop-aware ref and class resolution helpers.
 All functions use get_client() from the client module to reach the
 ItopClient bound to the current async context. No itop_request_fn
 parameter is accepted or forwarded anywhere.
+
+apply_field_strip and _LEAN_STRIP live in helpers/stripping.py so that
+client.py can import them without a circular dependency on this module.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from helpers.utils import (
     str_or,
     is_bare_number,
 )
+from helpers.stripping import apply_field_strip
 
 logger = logging.getLogger(__name__)
 
@@ -64,9 +68,11 @@ async def ensure_class_exists(candidates: list[str]) -> str:
             logger.debug("[registry] ensure_class_exists cls=%r -> cached True", cls)
             return cls
         if entry["exists"] is False:
-            logger.debug("[registry] ensure_class_exists cls=%r -> cached False, skip", cls)
+            logger.debug(
+                "[registry] ensure_class_exists cls=%r -> cached False, skip", cls
+            )
             continue
-        r = await client.get(cls, "SELECT " + cls, fields="id", limit=1)
+        r = await client.get_raw(cls, "SELECT " + cls, fields="id", limit=1)
         if r.get("code") == 0:
             entry["exists"] = True
             for obj_data in (r.get("objects") or {}).values():
@@ -81,7 +87,9 @@ async def ensure_class_exists(candidates: list[str]) -> str:
                 "[registry] ensure_class_exists cls=%r -> exists=False code=%r msg=%r",
                 cls, r.get("code"), r.get("message"),
             )
-    logger.debug("[registry] ensure_class_exists candidates=%r -> none found", candidates)
+    logger.debug(
+        "[registry] ensure_class_exists candidates=%r -> none found", candidates
+    )
     return ""
 
 
@@ -137,32 +145,6 @@ async def resolve_output_fields(
     return output_fields, strip
 
 
-def apply_field_strip(result: dict, strip: frozenset[str]) -> dict:
-    """Remove strip fields from every object in an iTop result dict."""
-    if not strip:
-        return result
-    objects = result.get("objects")
-    if not objects:
-        return result
-    for obj_data in objects.values():
-        cls = obj_data.get("class", "")
-        fields = obj_data.get("fields")
-        if not isinstance(fields, dict):
-            continue
-        seed_field_cache(cls, fields)
-        stripped = [key for key in strip if key in fields]
-        for key in strip:
-            fields.pop(key, None)
-        if stripped:
-            logger.debug("[apply_field_strip] cls=%r stripped fields=%r", cls, stripped)
-        else:
-            logger.debug(
-                "[apply_field_strip] cls=%r no fields to strip from strip set=%r",
-                cls, sorted(strip),
-            )
-    return result
-
-
 async def resolve_ref_class_by_ref_part(
     obj_class: str,
     key: str,
@@ -180,7 +162,7 @@ async def resolve_ref_class_by_ref_part(
     logger.debug(
         "[resolve_ref_class_by_ref_part] key=%r suffix=%r oql=%r", key, suffix, oql
     )
-    result = await client.get(obj_class, oql, fields="id,ref", limit=1)
+    result = await client.get_raw(obj_class, oql, fields="id,ref", limit=1)
     if result.get("code", -1) != 0:
         logger.debug(
             "[resolve_ref_class_by_ref_part] key=%r -> iTop error code=%r msg=%r",
@@ -240,7 +222,7 @@ async def resolve_key(
             cache_set(obj_class, ref_str, found_class, found_id)
             return found_class, found_id
     else:
-        result = await client.get(obj_class, ref_str, fields="id")
+        result = await client.get_raw(obj_class, ref_str, fields="id")
         objects = result.get("objects") or {}
         for obj_data in objects.values():
             resolved_class = obj_data.get("class") or obj_class
@@ -308,7 +290,7 @@ async def fetch_image_counts(
         " WHERE item_class = '" + obj_class + "'"
         " AND item_id = " + oid
     )
-    att_result = await client.get("Attachment", att_oql, fields="id")
+    att_result = await client.get_raw("Attachment", att_oql, fields="id")
     att_count = len(att_result.get("objects") or {})
     logger.debug(
         "[fetch_image_counts] cls=%r id=%r Attachment count=%d",
