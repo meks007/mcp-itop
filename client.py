@@ -12,6 +12,7 @@ and helper function can reach the client without an explicit parameter.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar, Token
@@ -86,6 +87,9 @@ def _redact_headers(headers: httpx.Headers) -> dict:
 async def itop_request(operation: dict, get_bearer_token: Callable[[], str]) -> dict:
     """Send a raw operation dict to the iTop REST/JSON API.
 
+    When iTop returns code==1 (UNAUTH), the token is immediately evicted
+    from the validation cache so the next request is forced to re-validate.
+
     Args:
         operation:        iTop operation dict.
         get_bearer_token: Zero-argument callable returning the bearer token.
@@ -148,6 +152,12 @@ async def itop_request(operation: dict, get_bearer_token: Callable[[], str]) -> 
             result.get("message"),
         )
 
+    # UNAUTH eviction: if iTop signals code==1 the token is no longer valid.
+    # Import lazily to avoid the circular import (client <- auth <- client).
+    if result.get("code") == 1:
+        from auth import evict_token  # noqa: PLC0415
+        asyncio.ensure_future(evict_token(token))
+
     if MCP_DEBUG:
         logger.debug(
             "MCP <- iTop  status=%s  response=%s",
@@ -162,7 +172,6 @@ async def itop_request(operation: dict, get_bearer_token: Callable[[], str]) -> 
 # ContextVar: current ItopClient for the active async context
 # ---------------------------------------------------------------------------
 
-# Forward-declared as None; ItopClient is defined below.
 _current_client: ContextVar["ItopClient | None"] = ContextVar(
     "_current_client", default=None
 )
