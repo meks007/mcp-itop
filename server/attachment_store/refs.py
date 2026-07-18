@@ -4,6 +4,9 @@ attachment_store/refs.py - Inline image ref cache.
 Refs are extracted from ticket HTML fields by parse_objects() in
 helpers/html.py and written here so that tools/attachments.py can
 retrieve them without re-fetching the ticket.
+
+Schema registered at module import time via db.register_schema() so that
+db.init() creates the table without any explicit init_db() call from callers.
 """
 
 from __future__ import annotations
@@ -11,10 +14,34 @@ from __future__ import annotations
 import time
 import logging
 
-import db as _db_layer
+import db
 from config import INLINE_IMAGE_REF_TTL
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Schema registration (runs at import time, before db.init())
+# ---------------------------------------------------------------------------
+
+db.register_schema("""
+CREATE TABLE IF NOT EXISTS inline_image_refs (
+    obj_class   TEXT NOT NULL,
+    obj_id      TEXT NOT NULL,
+    img_id      TEXT NOT NULL,
+    img_secret  TEXT NOT NULL,
+    expires_at  REAL NOT NULL,
+    PRIMARY KEY (obj_class, obj_id, img_id)
+)
+""")
+
+db.register_schema(
+    "CREATE INDEX IF NOT EXISTS idx_iir_lookup "
+    "ON inline_image_refs (obj_class, obj_id, expires_at)"
+)
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 
 def write_inline_image_refs(
@@ -34,15 +61,14 @@ def write_inline_image_refs(
         refs:      List of {'id': str, 'secret': str} dicts.
     """
     expires_at = time.time() + INLINE_IMAGE_REF_TTL
-    backend = _db_layer.get_db()
 
-    with backend.transaction():
-        backend.execute(
+    with db.transaction():
+        db.execute(
             "DELETE FROM inline_image_refs WHERE obj_class = ? AND obj_id = ?",
             (obj_class, obj_id),
         )
         if refs:
-            backend.executemany(
+            db.executemany(
                 "INSERT OR REPLACE INTO inline_image_refs "
                 "(obj_class, obj_id, img_id, img_secret, expires_at) "
                 "VALUES (?, ?, ?, ?, ?)",
@@ -73,7 +99,7 @@ def read_inline_image_refs(
     """
     now = time.time()
 
-    rows = _db_layer.get_db().execute(
+    rows = db.execute(
         "SELECT img_id, img_secret, expires_at "
         "FROM inline_image_refs "
         "WHERE obj_class = ? AND obj_id = ? "
@@ -113,16 +139,15 @@ def purge_expired_inline_image_refs() -> int:
         "[attachment_store] purge_expired_inline_image_refs: running purge"
     )
     now = time.time()
-    backend = _db_layer.get_db()
 
-    count_rows = backend.execute(
+    count_rows = db.execute(
         "SELECT COUNT(*) FROM inline_image_refs WHERE expires_at < ?",
         (now,),
     )
     removed = count_rows[0][0] if count_rows else 0
 
-    with backend.transaction():
-        backend.execute(
+    with db.transaction():
+        db.execute(
             "DELETE FROM inline_image_refs WHERE expires_at < ?",
             (now,),
         )
