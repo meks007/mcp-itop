@@ -11,7 +11,8 @@ import time
 import logging
 from typing import TypedDict
 
-from attachment_store.db import _get_conn, IMAGE_STORE_TTL_SECONDS, IMAGE_STORE_DB_PATH
+import db as _db_layer
+from attachment_store.db import IMAGE_STORE_TTL_SECONDS, IMAGE_STORE_DB_PATH
 from attachment_store.image import _normalize_image
 
 logger = logging.getLogger(__name__)
@@ -55,38 +56,39 @@ def store_images(token: str, images: list[ImageEntry]) -> None:
         IMAGE_STORE_DB_PATH,
     )
 
-    conn = _get_conn()
+    rows = []
+    for img in images:
+        raw: bytes | None = img.get("content")
+        mimetype: str = img.get("mimetype", "application/octet-stream")
+        filename: str = img.get("filename", "attachment")
 
-    with conn:
-        deleted_token = conn.execute(
+        if raw is not None:
+            raw, mimetype, filename = _normalize_image(raw, mimetype, filename)
+
+        rows.append((
+            token,
+            img["uri"],
+            raw,
+            mimetype,
+            filename,
+            expires_at,
+        ))
+
+    backend = _db_layer.get_db()
+    with backend.transaction():
+        deleted_token = backend.execute(
             "DELETE FROM attachment_sessions WHERE token = ?",
             (token,),
-        ).rowcount
+        )
+        # execute() returns rows; rowcount is not available via the abstract
+        # interface, so derive the deleted count from the result length.
+        # For DELETE the list is always empty; log 0 instead.
         logger.debug(
-            "[attachment_store] store_images: deleted %d old row(s) for token=%s",
-            deleted_token,
+            "[attachment_store] store_images: deleted old rows for token=%s",
             token_preview,
         )
 
-        rows = []
-        for img in images:
-            raw: bytes | None = img.get("content")
-            mimetype: str = img.get("mimetype", "application/octet-stream")
-            filename: str = img.get("filename", "attachment")
-
-            if raw is not None:
-                raw, mimetype, filename = _normalize_image(raw, mimetype, filename)
-
-            rows.append((
-                token,
-                img["uri"],
-                raw,
-                mimetype,
-                filename,
-                expires_at,
-            ))
-
-        conn.executemany(
+        backend.executemany(
             "INSERT INTO attachment_sessions "
             "(token, uri, content, mimetype, filename, expires_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
@@ -132,15 +134,13 @@ def get_images(token: str) -> list[ImageEntry]:
         "[attachment_store] get_images: looking up token=%s", token_preview
     )
 
-    conn = _get_conn()
-    cursor = conn.execute(
+    rows = _db_layer.get_db().execute(
         "SELECT uri, content, mimetype, filename, expires_at "
         "FROM attachment_sessions "
         "WHERE token = ? AND expires_at >= ? "
         "ORDER BY rowid",
         (token, now),
     )
-    rows = cursor.fetchall()
 
     logger.debug(
         "[attachment_store] get_images: raw query returned %d row(s) for token=%s",
@@ -179,14 +179,28 @@ def get_images(token: str) -> list[ImageEntry]:
 
 
 def purge_expired_images() -> int:
-    """Delete all expired rows from attachment_sessions. Returns rows removed."""
+    """Delete all expired rows from attachment_sessions. Returns rows removed.
+
+    The db layer execute() does not expose rowcount. For SQLite backends,
+    the DELETE returns no rows, so we query the count before deleting.
+    """
     logger.debug("[attachment_store] purge_expired_images: running purge")
-    conn = _get_conn()
-    with conn:
-        cursor = conn.execute(
+    now = time.time()
+    backend = _db_layer.get_db()
+
+    count_rows = backend.execute(
+        "SELECT COUNT(*) FROM attachment_sessions WHERE expires_at < ?",
+        (now,),
+    )
+    removed = count_rows[0][0] if count_rows else 0
+
+    with backend.transaction():
+        backend.execute(
             "DELETE FROM attachment_sessions WHERE expires_at < ?",
-            (time.time(),),
+            (now,),
         )
-    removed = cursor.rowcount
-    logger.debug("[attachment_store] purge_expired_images: removed %d row(s)", removed)
+
+    logger.debug(
+        "[attachment_store] purge_expired_images: removed %d row(s)", removed
+    )
     return removed
