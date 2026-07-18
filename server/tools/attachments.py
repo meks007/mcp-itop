@@ -82,15 +82,16 @@ def _is_image(mimetype: str) -> bool:
 
 def _attachment_url(attachment_id: str | int) -> str:
     return (
-        f"{ITOP_URL}/webservices/ajax.document.php"
-        f"?operation=download_document&class=Attachment&field=contents&id={attachment_id}"
+        ITOP_URL + "/webservices/ajax.document.php"
+        "?operation=download_document&class=Attachment&field=contents&id="
+        + str(attachment_id)
     )
 
 
 def _inline_image_url(img_id: str | int, secret: str) -> str:
     return (
-        f"{ITOP_URL}/webservices/ajax.document.php"
-        f"?operation=download_inlineimage&id={img_id}&s={secret}"
+        ITOP_URL + "/webservices/ajax.document.php"
+        "?operation=download_inlineimage&id=" + str(img_id) + "&s=" + secret
     )
 
 
@@ -172,12 +173,13 @@ def register(mcp, client: ItopClient):
         images = []
 
         # -- Attachment (image types only) --
+        # Use get_raw: we need the full contents blob including base64 data.
         att_oql = (
             "SELECT Attachment"
             " WHERE item_class = '" + obj_class + "'"
             " AND item_id = " + obj_id
         )
-        att_result = await client.get("Attachment", att_oql, fields="contents")
+        att_result = await client.get_raw("Attachment", att_oql, fields="contents")
         att_objects = att_result.get("objects") or {}
         logger.debug(
             "[attachments] itop_get_ticket_images: Attachment query returned %d object(s)",
@@ -352,7 +354,9 @@ def register(mcp, client: ItopClient):
         ]
         try:
             token = get_bearer_token()
-            token_preview = (token[:8] + "...") if token and len(token) > 8 else (token or "(empty)")
+            token_preview = (
+                (token[:8] + "...") if token and len(token) > 8 else (token or "(empty)")
+            )
             if token:
                 logger.debug(
                     "[attachments] itop_get_ticket_images: writing %d image(s) "
@@ -360,14 +364,18 @@ def register(mcp, client: ItopClient):
                     len(store_entries), token_preview,
                 )
                 store_images(token, store_entries)
-                logger.debug("[attachments] itop_get_ticket_images: attachment_store write complete")
+                logger.debug(
+                    "[attachments] itop_get_ticket_images: attachment_store write complete"
+                )
             else:
                 logger.debug(
-                    "[attachments] itop_get_ticket_images: empty token, skipping attachment_store write"
+                    "[attachments] itop_get_ticket_images: empty token,"
+                    " skipping attachment_store write"
                 )
         except Exception as exc:
             logger.warning(
-                "[attachments] itop_get_ticket_images: attachment_store write failed: %s", exc
+                "[attachments] itop_get_ticket_images: attachment_store write failed: %s",
+                exc,
             )
 
         label = ticket_ref or key or str(resolved)
@@ -379,7 +387,8 @@ def register(mcp, client: ItopClient):
         return (
             str(len(images)) + " image attachment(s) found for "
             + obj_class + " " + label + dedup_note + ".\n"
-            + "Read the MCP resource " + _STATIC_RESOURCE_URI + " to retrieve all images at once."
+            + "Read the MCP resource " + _STATIC_RESOURCE_URI
+            + " to retrieve all images at once."
         )
 
     # ------------------------------------------------------------------
@@ -407,7 +416,8 @@ def register(mcp, client: ItopClient):
             " WHERE item_class = '" + obj_class + "'"
             " AND item_id = " + str(resolved)
         )
-        att_result = await client.get("Attachment", att_oql, fields="contents")
+        # Use get_raw: contents blob is needed for MIME type inspection.
+        att_result = await client.get_raw("Attachment", att_oql, fields="contents")
 
         files = []
 
@@ -467,7 +477,9 @@ def register(mcp, client: ItopClient):
 
         try:
             token = get_bearer_token()
-            token_preview = (token[:8] + "...") if token and len(token) > 8 else (token or "(empty)")
+            token_preview = (
+                (token[:8] + "...") if token and len(token) > 8 else (token or "(empty)")
+            )
             logger.debug(
                 "[attachments] serve_ticket_images: token=%s (len=%d)",
                 token_preview,
@@ -514,7 +526,9 @@ def register(mcp, client: ItopClient):
 
             if content_bytes is None:
                 msg = entry.get("filename", "?") + ": no content in store"
-                logger.warning("[attachments] serve_ticket_images: [%d] %s", i + 1, msg)
+                logger.warning(
+                    "[attachments] serve_ticket_images: [%d] %s", i + 1, msg
+                )
                 errors.append(msg)
                 continue
 
