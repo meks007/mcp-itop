@@ -1,9 +1,9 @@
 """
 helpers/resolvers.py - iTop-aware ref and class resolution helpers.
 
-All functions in this module issue iTop REST requests to probe class
-existence, resolve ticket refs to numeric IDs, or enumerate field sets.
-Pure formatting helpers without network calls live in helpers/formatters.py.
+All functions use get_client() from the client module to reach the
+ItopClient bound to the current async context. No itop_request_fn
+parameter is accepted or forwarded anywhere.
 """
 
 from __future__ import annotations
@@ -11,11 +11,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from config import ITOP_URL, RESOLVE_KEY_CACHE_TTL
+from config import RESOLVE_KEY_CACHE_TTL
 from cache import (
     cache_cleanup,
     cache_get,
     cache_set,
+    get_class_fields,
     registry_get_fields,
     seed_field_cache,
     _registry_entry,
@@ -49,8 +50,14 @@ def ensure_ref_field(obj_class: str, output_fields: str) -> str:
     return ", ".join(fields)
 
 
-async def ensure_class_exists(candidates: list[str], itop_request_fn) -> str:
-    """Return the first class in candidates that exists on the iTop server."""
+async def ensure_class_exists(candidates: list[str]) -> str:
+    """Return the first class in candidates that exists on the iTop server.
+
+    Uses get_client() from the current async context.
+    """
+    from client import get_client
+    client = get_client()
+
     for cls in candidates:
         entry = _registry_entry(cls)
         if entry["exists"] is True:
@@ -59,13 +66,7 @@ async def ensure_class_exists(candidates: list[str], itop_request_fn) -> str:
         if entry["exists"] is False:
             logger.debug("[registry] ensure_class_exists cls=%r -> cached False, skip", cls)
             continue
-        r = await itop_request_fn({
-            "operation": "core/get",
-            "class": cls,
-            "key": "SELECT " + cls,
-            "output_fields": "id",
-            "limit": "1",
-        })
+        r = await client.get(cls, "SELECT " + cls, fields="id", limit=1)
         if r.get("code") == 0:
             entry["exists"] = True
             for obj_data in (r.get("objects") or {}).values():
@@ -80,9 +81,7 @@ async def ensure_class_exists(candidates: list[str], itop_request_fn) -> str:
                 "[registry] ensure_class_exists cls=%r -> exists=False code=%r msg=%r",
                 cls, r.get("code"), r.get("message"),
             )
-    logger.debug(
-        "[registry] ensure_class_exists candidates=%r -> none found", candidates
-    )
+    logger.debug("[registry] ensure_class_exists candidates=%r -> none found", candidates)
     return ""
 
 
@@ -90,9 +89,11 @@ async def resolve_output_fields(
     obj_class: str,
     output_fields: str,
     strip: frozenset[str],
-    itop_request_fn,
 ) -> tuple[str, frozenset[str]]:
-    """Resolve (output_fields, strip) into (fields_to_request, post_strip_set)."""
+    """Resolve (output_fields, strip) into (fields_to_request, post_strip_set).
+
+    Uses get_class_fields() which internally calls get_client().
+    """
     logger.debug(
         "[resolve_output_fields] cls=%r output_fields=%r strip=%r",
         obj_class, output_fields, sorted(strip),
@@ -165,21 +166,21 @@ def apply_field_strip(result: dict, strip: frozenset[str]) -> dict:
 async def resolve_ref_class_by_ref_part(
     obj_class: str,
     key: str,
-    itop_request_fn,
 ) -> tuple[str, int, str] | tuple[None, None, None]:
     """Resolve a ref or bare number to (resolved_class, numeric_id, ref_string).
 
-    Builds an OQL query against obj_class using a suffix LIKE match on the
-    ref field. obj_class must be a member of CLASSES_WITH_REF.
-
+    Uses get_client() from the current async context.
     Returns (None, None, None) when no matching object is found.
     """
+    from client import get_client
+    client = get_client()
+
     suffix = str(key).zfill(6)
     oql = "SELECT " + obj_class + " WHERE ref LIKE '%" + suffix + "'"
     logger.debug(
         "[resolve_ref_class_by_ref_part] key=%r suffix=%r oql=%r", key, suffix, oql
     )
-    result = await itop_request_fn({
+    result = await client.request({
         "operation": "core/get",
         "class": obj_class,
         "key": oql,
@@ -212,15 +213,17 @@ async def resolve_ref_class_by_ref_part(
 async def resolve_key(
     obj_class: str,
     ref: str | None,
-    itop_request_fn,
 ) -> tuple[str, Any]:
     """Resolve an object identifier to (resolved_class, numeric_key).
 
-    For CLASSES_WITH_REF: ref is matched via suffix OQL on the ref field.
-    For all other classes: ref is passed directly as key in a core/get call.
-    A TTL cache avoids repeated iTop round-trips for the same identifier.
+    Uses get_client() from the current async context.
+    For CLASSES_WITH_REF: ref matched via suffix OQL on the ref field.
+    For all other classes: ref passed directly as key in a core/get call.
     Fallback: int(ref) or raw ref string.
     """
+    from client import get_client
+    client = get_client()
+
     cache_cleanup()
 
     ref_str = str(ref).strip() if ref is not None else ""
@@ -233,7 +236,7 @@ async def resolve_key(
 
     if obj_class in CLASSES_WITH_REF:
         found_class, found_id, found_ref = await resolve_ref_class_by_ref_part(
-            obj_class, ref_str, itop_request_fn
+            obj_class, ref_str
         )
         if found_class is not None and found_id is not None:
             logger.debug(
@@ -243,7 +246,7 @@ async def resolve_key(
             cache_set(obj_class, ref_str, found_class, found_id)
             return found_class, found_id
     else:
-        result = await itop_request_fn({
+        result = await client.request({
             "operation": "core/get",
             "class": obj_class,
             "key": ref_str,
@@ -284,12 +287,17 @@ async def resolve_key(
 async def fetch_image_counts(
     obj_class: str,
     obj_id: str | int,
-    itop_request_fn,
 ) -> tuple[int, int]:
-    """Return (attachment_count, inline_image_count) for a ticket object."""
+    """Return (attachment_count, inline_image_count) for a ticket object.
+
+    Uses get_client() from the current async context.
+    """
+    from client import get_client
+    client = get_client()
+
     oid = str(obj_id)
 
-    att_result = await itop_request_fn({
+    att_result = await client.request({
         "operation": "core/get",
         "class": "Attachment",
         "key": (
@@ -305,7 +313,7 @@ async def fetch_image_counts(
         obj_class, oid, att_count,
     )
 
-    ii_result = await itop_request_fn({
+    ii_result = await client.request({
         "operation": "core/get",
         "class": "InlineImage",
         "key": (
