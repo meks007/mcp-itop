@@ -92,11 +92,11 @@ def register(mcp, client: ItopClient):
             visible = sorted(fields - _LEAN_STRIP - _SYNTHETIC_FIELDS)
             if not visible:
                 return (
-                    "You need to query with key AND output_fields."
+                    "You need to query with key AND output_fields. "
                     "No instances of this class found. Available fields are *."
                 )
             return (
-                "You need to query with key AND output_fields."
+                "You need to query with key AND output_fields. "
                 "Available fields are * or: " + ", ".join(visible)
             )
 
