@@ -13,7 +13,7 @@ Module layout:
   config.py             - env vars, logging, constants
   cache.py              - class field registry, resolve_key cache, preheat
   auth.py               - BearerTokenMiddleware ContextVar + get_bearer_token()
-  client.py             - iTop REST/JSON HTTP client
+  client.py             - iTop REST/JSON HTTP client + itop_core_get()
   helpers.py            - shared formatting and parsing utilities
   attachment_store.py   - SQLite store for image URIs and inline image refs
   background_tasks.py   - central housekeeping asyncio loop
@@ -78,10 +78,10 @@ mcp = FastMCP(
 
 
 # ---------------------------------------------------------------------------
-# Bind bearer token to itop_request
+# Bind bearer token to itop_request_fn
 # ---------------------------------------------------------------------------
 
-async def itop_request(operation: dict) -> dict:
+async def itop_request_fn(operation: dict) -> dict:
     """Wrapper that injects the per-request bearer token into the HTTP client.
 
     preheat_once() is called here on every request but is a no-op once all
@@ -106,13 +106,13 @@ def _get_token() -> str:
 # Register all tools and resources
 # ---------------------------------------------------------------------------
 
-_analytics.register(mcp, itop_request)
+_analytics.register(mcp, itop_request_fn)
 # Pass get_token_fn so attachments.py can write to the SQLite store and
 # read it back inside the static itop://attachment/images resource handler.
-_attachments.register(mcp, itop_request, _get_token)
-_kb.register(mcp, itop_request)
-_crud.register(mcp, itop_request)
-_comments.register(mcp, itop_request)
+_attachments.register(mcp, itop_request_fn, _get_token)
+_kb.register(mcp, itop_request_fn)
+_crud.register(mcp, itop_request_fn)
+_comments.register(mcp, itop_request_fn)
 
 
 # ---------------------------------------------------------------------------
@@ -208,51 +208,6 @@ if MCP_DEBUG:
 # Entry point
 # ---------------------------------------------------------------------------
 
-def main():
-    """Run the iTop MCP server via uvicorn (Streamable HTTP).
-
-    iTop authentication is supplied per-client via an
-    'Authorization: Bearer <itop_token>' HTTP header. The token is
-    forwarded to iTop on every REST call; actual validity is enforced
-    by iTop. MCP_DEBUG=true enables verbose request/response logging.
-
-    The housekeeping task is started via uvicorn's on_startup callback so
-    it runs inside the already-running event loop, after FastMCP has fully
-    initialised its own task group via its internal lifespan handler.
-    """
-    from config import ITOP_URL
-    from background_tasks import housekeeping_loop
-
-    if not ITOP_URL:
-        print("Error: ITOP_URL is not set.", file=sys.stderr)
-        print("Create .env file with ITOP_URL (see .env.example)", file=sys.stderr)
-        sys.exit(1)
-
-    # Open the SQLite attachment store eagerly so any permission or path
-    # problem surfaces immediately at startup, not on the first tool call.
-    import attachment_store
-    attachment_store.init_db()
-
-    async def _on_startup():
-        asyncio.create_task(housekeeping_loop())
-        logger.info("[server] housekeeping task started")
-
-    logger.info(
-        "Starting iTop MCP server on %s:%d (debug=%s)",
-        _MCP_HOST, _MCP_PORT, MCP_DEBUG,
-    )
-    uvicorn.run(
-        app,
-        host=_MCP_HOST,
-        port=_MCP_PORT,
-        callback_notify=asyncio.Event().set,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Alternate entry: run via uvicorn programmatically with startup hook
-# ---------------------------------------------------------------------------
-
 async def _serve():
     """Async entry point that lets us register the housekeeping task after
     uvicorn has started the event loop and FastMCP has initialised its
@@ -260,7 +215,7 @@ async def _serve():
 
     uvicorn.run() is synchronous and blocks; to attach an on_startup hook
     we use uvicorn.Server directly with a Config that sets the lifespan to
-    'on' and register the hook via the server's startup sequence.
+    'on' and register the hook via the server startup sequence.
     """
     from background_tasks import housekeeping_loop
     import attachment_store
