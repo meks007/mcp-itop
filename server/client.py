@@ -272,7 +272,7 @@ class ItopClient:
         return await self.request(op)
 
     # ------------------------------------------------------------------
-    # core/create, core/update, core/apply_stimulus
+    # core/create
     # ------------------------------------------------------------------
 
     async def create(
@@ -291,6 +291,10 @@ class ItopClient:
             "comment": comment,
         })
 
+    # ------------------------------------------------------------------
+    # core/update
+    # ------------------------------------------------------------------
+
     async def update(
         self,
         cls: str,
@@ -308,6 +312,38 @@ class ItopClient:
             "output_fields": output_fields,
             "comment": comment,
         })
+
+    # ------------------------------------------------------------------
+    # core/delete
+    # ------------------------------------------------------------------
+
+    async def delete(
+        self,
+        cls: str,
+        key: str | int,
+        comment: str = "",
+        simulate: bool = True,
+    ) -> dict:
+        """Delete an iTop object via core/delete.
+
+        Args:
+            cls:      iTop class name, e.g. 'UserRequest'.
+            key:      Numeric ID or OQL string identifying the object(s).
+            comment:  Audit comment recorded on the operation.
+            simulate: When True (default) the deletion is only simulated;
+                      no data is removed. Set to False only for real deletions.
+        """
+        return await self.request({
+            "operation": "core/delete",
+            "class": cls,
+            "key": key,
+            "simulate": simulate,
+            "comment": comment,
+        })
+
+    # ------------------------------------------------------------------
+    # core/apply_stimulus
+    # ------------------------------------------------------------------
 
     async def apply_stimulus(
         self,
@@ -328,3 +364,11 @@ class ItopClient:
             "output_fields": output_fields,
             "comment": comment,
         })
+
+    # ------------------------------------------------------------------
+    # list_operations
+    # ------------------------------------------------------------------
+
+    async def operations(self) -> dict:
+        """List all available REST/JSON operations on the iTop server."""
+        return await self.request({"operation": "list_operations"})
