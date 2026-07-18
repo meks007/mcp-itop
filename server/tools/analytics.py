@@ -142,7 +142,8 @@ def register(mcp, client: ItopClient):
         limit: int = 500,
     ) -> str:
         """Agent workload analysis showing ticket counts, open/closed breakdown,
-        total time spent, and current backlog per agent or team."""
+        total time spent, and current backlog per agent or team.
+        Agents with more than 10 open tickets are flagged as overloaded."""
         s, e = parse_date_range(start_date, end_date)
 
         oql = f"SELECT UserRequest WHERE start_date >= '{s}' AND start_date < '{e}'"
@@ -215,9 +216,13 @@ def register(mcp, client: ItopClient):
         status: str = "assigned",
         limit: int = 50,
     ) -> str:
-        """Find assigned tickets with no agent activity for longer than the given threshold.
+        """Find tickets with no recent activity for longer than the given idle threshold.
 
-        Helps detect agents who may not be responding."""
+        Filters by status (default: assigned; any valid iTop status is accepted).
+        A ticket is considered idle only when BOTH its assignment_date AND its
+        last_update are older than the threshold. Returns one row per ticket,
+        not per agent -- an agent may appear multiple times.
+        Helps detect stalled tickets and unresponsive agents."""
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
             "%Y-%m-%d %H:%M:%S"
         )
@@ -277,8 +282,8 @@ def register(mcp, client: ItopClient):
             ])
 
         remaining = len(idle_list) - 30
-        out = [f"**Idle Agents** (>{hours}h without action, status={status})", ""]
-        out.append(f"Found {len(idle_list)} idle tickets:")
+        out = [f"**Idle Tickets** (>{hours}h without action, status={status})", ""]
+        out.append(f"Found {len(idle_list)} idle ticket(s):")
         out.append("")
         out.append(format_table(header, rows))
         if remaining > 0:
@@ -291,8 +296,12 @@ def register(mcp, client: ItopClient):
         min_similar: int = 3,
         limit: int = 200,
     ) -> str:
-        """Detect service classification mismatches by grouping similar tickets and
-        checking whether they were routed to different services."""
+        """Detect service classification mismatches over the last N days (default: 30).
+
+        Groups tickets with similar titles using keyword overlap (>=2 shared words of
+        3+ characters, common stop-words excluded). Groups smaller than min_similar
+        tickets (default: 3) are ignored. Only groups routed to more than one distinct
+        service are reported as potential mismatches."""
         import re
 
         s = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
@@ -445,9 +454,12 @@ def register(mcp, client: ItopClient):
         days: int = 60,
         limit: int = 500,
     ) -> str:
-        """Analyse how often each agent corrects the service category selected by callers.
+        """Analyse the service diversity of tickets handled by each agent over the last N days.
 
-        A high diversity score means the agent actively fixes misclassifications."""
+        The diversity score (unique services / total tickets x 100) measures how many
+        different service categories an agent handles. A high score may indicate the agent
+        works across many services or actively recategorises tickets, but is not a direct
+        measure of caller-correction -- no caller-vs-agent service comparison is performed."""
         s = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
         e = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -503,8 +515,8 @@ def register(mcp, client: ItopClient):
 
         header = ["Agent", "Tickets", "Services", "Primary Rate", "Diversity Score", "Assessment"]
         out = [
-            f"**Agent Service Correction Analysis** (last {days} days, >={min_tickets} tickets)",
-            "Note: Diversity score = unique services / total tickets x 100. Higher = more correction.",
+            f"**Agent Service Diversity Analysis** (last {days} days, >={min_tickets} tickets)",
+            "Note: Diversity score = unique services / total tickets x 100. Higher = broader service range.",
             "",
         ]
         out.append(format_table(header, rows))
