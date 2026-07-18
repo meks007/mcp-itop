@@ -366,6 +366,39 @@ class ItopClient:
         })
 
     # ------------------------------------------------------------------
+    # core/get_related
+    # ------------------------------------------------------------------
+
+    async def get_related(
+        self,
+        cls: str,
+        key: str | int,
+        relation: str = "impacts",
+        depth: int = 4,
+        direction: str = "down",
+        redundancy: bool = True,
+    ) -> dict:
+        """Traverse impact/dependency relations via core/get_related.
+
+        Args:
+            cls:        iTop class name, e.g. 'Server'.
+            key:        Numeric ID or OQL string identifying the seed object.
+            relation:   Relation name -- 'impacts' or 'depends on'.
+            depth:      Max hops to traverse.
+            direction:  'down' (what cls impacts) or 'up' (what impacts cls).
+            redundancy: When True, redundant paths are included in the result.
+        """
+        return await self.request({
+            "operation": "core/get_related",
+            "class": cls,
+            "key": key,
+            "relation": relation,
+            "depth": depth,
+            "direction": direction,
+            "redundancy": redundancy,
+        })
+
+    # ------------------------------------------------------------------
     # list_operations
     # ------------------------------------------------------------------
 
