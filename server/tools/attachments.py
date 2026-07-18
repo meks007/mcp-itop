@@ -7,7 +7,7 @@ register(mcp, client)
     Registers the following MCP tools and resources:
 
     Tools:
-        itop_get_ticket_images(obj_class, ticket_ref, key)
+        List_ticket_images(obj_class, ticket_ref, key)
             Fetches image attachments for a ticket, stores them in the
             SQLite attachment store, and returns only the image count plus
             the static MCP resource URI _STATIC_RESOURCE_URI.
@@ -27,14 +27,14 @@ register(mcp, client)
                              then read the cache. If still empty the ticket
                              has no inline images.
 
-        itop_get_ticket_attachments(obj_class, ticket_ref, key)
+        List_ticket_attachments(obj_class, ticket_ref, key)
             List all non-image file attachments for a ticket.
             Returns metadata and browser download links only.
 
     Resources:
         _STATIC_RESOURCE_URI  (static)
             Returns all images stored by the most recent
-            itop_get_ticket_images call for this client session as a
+            List_ticket_images call for this client session as a
             multi-content ResourceResult (one ResourceContent per image).
             All images are always served as JPEG from the BLOB store.
 
@@ -138,7 +138,7 @@ def register(mcp, client: ItopClient):
     """
 
     # ------------------------------------------------------------------
-    # Tool: itop_get_ticket_images
+    # Tool: List_ticket_images
     # ------------------------------------------------------------------
 
     @mcp.tool(
@@ -392,7 +392,7 @@ def register(mcp, client: ItopClient):
         )
 
     # ------------------------------------------------------------------
-    # Tool: itop_get_ticket_attachments
+    # Tool: List_ticket_attachments
     # ------------------------------------------------------------------
 
     @mcp.tool(
@@ -404,7 +404,7 @@ def register(mcp, client: ItopClient):
         key: str = "",
     ) -> str:
         """List non-image file attachments for an iTop ticket, including MIME type and browser
-        download link. Use list_ticket_images for images. Returns metadata and links only,
+        download link. Use List_ticket_images for images. Returns metadata and links only,
         no file binaries. Prefer ticket_ref; use key for a numeric ID or OQL query."""
         ref = coerce_ref(ticket_ref, key)
         obj_class, resolved = await resolve_key(obj_class, ref)
@@ -463,10 +463,10 @@ def register(mcp, client: ItopClient):
         _STATIC_RESOURCE_URI,
         name="Download ticket images",
         description=(
-            "Returns all images for the most recent list_ticket_images call as JPEG. "
-            "You HAVE TO call list_ticket_images first to populate this resource. "
-            "This resource does NOTHING without calling list_ticket_images first. "
-            "Only fetch this resource ONCE after calling list_ticket_images, "
+            "Returns all images for the most recent List_ticket_images call as JPEG. "
+            "You HAVE TO call List_ticket_images first to populate this resource. "
+            "This resource does NOTHING without calling List_ticket_images first. "
+            "Only fetch this resource ONCE after calling List_ticket_images, "
             "it serves ALL images for a ticket in one call."
         ),
         mime_type="image/jpeg",
@@ -506,7 +506,7 @@ def register(mcp, client: ItopClient):
             return ResourceResult(
                 contents=(
                     "No images available for this session. "
-                    "Call itop_get_ticket_images first."
+                    "Call List_ticket_images first."
                 )
             )
 
