@@ -80,7 +80,7 @@ def register(mcp, client: ItopClient):
         You CANNOT leave output_fields empty. If in doubt, use Describe_class or *
         Batch same-class lookups with OQL instead of one call per object.
         Use obj_class="Ticket" when the concrete class is unknown.
-        Set full=True only when private_log is explicitly needed; this overrides
+        Set full=True only when private_log is explicitly asked for by the user; this overrides
         output_fields to * automatically. public_log is always included without full=True.
         Do not disclose private_log unless explicitly requested by the user.
         Redact or prohibit mentioning anything that could be a password or otherwise sensitive.
