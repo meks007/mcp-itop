@@ -9,7 +9,7 @@ Provides AI assistants (Claude Desktop, opencode, etc.) with tools to:
 
 Module layout:
   config.py             - env vars, logging, constants
-  cache.py              - class field registry, resolve_key cache, preheat
+  cache.py              - class field registry, resolve_key cache (lazy fill)
   auth.py               - ItopMiddleware, get_bearer_token(), token validation cache
   client.py             - iTop REST/JSON HTTP client, ItopClient, get_client()
   helpers/              - shared formatting and parsing utilities
@@ -36,7 +36,6 @@ from fastmcp import FastMCP
 from fastmcp.server.auth.providers.debug import DebugTokenVerifier
 
 from auth import ItopMiddleware, _validate_itop_token, get_bearer_token
-from cache import preheat_once
 from client import ItopClient
 from config import MCP_DEBUG, MCP_DEBUG_HEADERS, logger
 
@@ -71,15 +70,11 @@ mcp = FastMCP(
 # ItopClient
 # ---------------------------------------------------------------------------
 
-async def _preheat_hook(c: ItopClient) -> None:
-    """on_request hook: warm field caches on first request, no-op afterwards."""
-    await preheat_once()
-
-
 # Single shared ItopClient. Bearer token is resolved lazily via ContextVar on
 # every request, so this instance is safe to share across concurrent requests.
-# The on_request hook triggers preheat_once() while a valid token is available.
-client = ItopClient(get_bearer_token, on_request=_preheat_hook)
+# No on_request hook -- the field cache fills passively via seed_field_cache()
+# on every iTop response (see cache.py).
+client = ItopClient(get_bearer_token)
 
 # ---------------------------------------------------------------------------
 # Register all tools and resources
