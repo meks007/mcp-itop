@@ -4,6 +4,8 @@ Knowledge base tools: search, get article, list categories.
 
 from __future__ import annotations
 
+import re
+
 from client import ItopClient
 from helpers import (
     ensure_class_exists,
@@ -78,30 +80,31 @@ def register(mcp, client: ItopClient):
         name="Search_KB_articles"
     )
     async def itop_search_kb(
-        query: str,
-        oql: str = "",
+        keywords: str,
         limit: int = 20,
     ) -> str:
-        """Search knowledge-base articles by title or body text.
+        """Search knowledge-base articles by title, summary, or description.
 
-        Search with meaningful, likely keywords rather than full phrases so the
-        built-in LIKE search can match relevant articles more reliably. Automatically
-        detects the available KB class and body field. Supply oql to override the
-        built-in LIKE query entirely."""
+        Pass meaningful, specific keywords that describe the topic - individual
+        nouns such as object type, symptom, or component. Multiple keywords can
+        be separated by spaces or commas; each is searched independently with OR
+        logic, which yields far better results than passing full phrases or
+        sentences. Automatically detects the available KB class and body field."""
         kb_cls = await _kb_class()
         if not kb_cls:
             return "No KB module installed (tried KBEntry, FAQ)."
 
         text_field = await _kb_text_field(kb_cls)
 
-        if oql:
-            effective_oql = oql
-        else:
-            safe = query.replace("'", "")
-            effective_oql = (
-                "SELECT " + kb_cls + " WHERE title LIKE '%" + safe + "%'"
-                " OR " + text_field + " LIKE '%" + safe + "%'"
-            )
+        terms = [t.strip() for t in re.split(r"[\s,]+", keywords) if t.strip()]
+        if not terms:
+            terms = [keywords.replace("'", "")]
+        safe_terms = [t.replace("'", "") for t in terms]
+        clauses = " OR ".join(
+            "title LIKE '%" + t + "%' OR " + text_field + " LIKE '%" + t + "%'"
+            for t in safe_terms
+        )
+        effective_oql = "SELECT " + kb_cls + " WHERE " + clauses
 
         result = await client.get(
             kb_cls,
@@ -113,10 +116,9 @@ def register(mcp, client: ItopClient):
         articles = extract_objects(result)
         if not articles:
             return (
-                "No KB articles found for query '" + query + "'.\n"
+                "No KB articles found for keywords '" + keywords + "'.\n"
                 "OQL used: " + effective_oql + "\n"
-                "Body field used: " + text_field + "\n"
-                "Tip: supply an explicit oql parameter to override the search query."
+                "Body field used: " + text_field + "."
             )
 
         header = ["ID", "Title", "Category", "Status"]
@@ -130,7 +132,7 @@ def register(mcp, client: ItopClient):
                 str_or(f, "status", "?"),
             ])
 
-        out = ["**" + kb_cls + " Articles** matching '" + query + "':", ""]
+        out = ["**" + kb_cls + " Articles** matching '" + keywords + "':", ""]
         out.append(format_table(header, rows))
         return "\n".join(out)
 
