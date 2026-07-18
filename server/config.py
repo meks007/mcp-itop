@@ -30,13 +30,26 @@ MCP_DEBUG = os.getenv("MCP_DEBUG", "false").lower() in ("true", "1", "yes")
 # MCP_DEBUG is also enabled.  Auth secrets in headers are always redacted.
 MCP_DEBUG_HEADERS = os.getenv("MCP_DEBUG_HEADERS", "false").lower() in ("true", "1", "yes")
 
-# -- SSE transport debug flag ---------------------------------------------
-# Set MCP_DEBUG_SSE=true to additionally log raw SSE chunks emitted by
-# sse_starlette. Only takes effect when MCP_DEBUG is also enabled.
-# WARNING: when base64-encoded data is transmitted these log lines can be
-# extremely large and make the debug output essentially unreadable.
-# Leave this off unless you need low-level SSE transport debugging.
-MCP_DEBUG_SSE = os.getenv("MCP_DEBUG_SSE", "false").lower() in ("true", "1", "yes")
+# -- All-loggers debug flag -----------------------------------------------
+# Set MCP_DEBUG_ALL=true to additionally promote the following normally-
+# suppressed third-party loggers to DEBUG level. Only takes effect when
+# MCP_DEBUG is also enabled. Disabled by default because these loggers
+# produce extremely large or high-frequency output:
+#
+#   sse_starlette / sse_starlette.sse
+#       Raw SSE chunks. When base64-encoded data (e.g. attachments) is
+#       transmitted, every chunk line can be hundreds of KB long.
+#
+#   httpcore / httpcore.connection / httpcore.http11 / httpcore.http2
+#       Per-send/receive TCP and TLS lifecycle events (~8 lines per
+#       iTop request). httpx already logs a clean one-liner at INFO.
+#
+#   PIL / PIL.TiffImagePlugin / PIL.PngImagePlugin
+#       EXIF tag details and PNG stream offsets logged during image
+#       normalisation.
+#
+# Leave this off unless you need very low-level transport debugging.
+MCP_DEBUG_ALL = os.getenv("MCP_DEBUG_ALL", "false").lower() in ("true", "1", "yes")
 
 # -- Logging --------------------------------------------------------------
 logging.basicConfig(
@@ -55,31 +68,23 @@ if MCP_DEBUG:
     ):
         logging.getLogger(_lib_logger).setLevel(logging.DEBUG)
 
-    # SSE chunk loggers -- opt-in only.
-    # sse_starlette logs every raw SSE chunk at DEBUG level. When the server
-    # sends base64-encoded attachments this produces extremely large log lines
-    # that drown out everything else. Keep them at WARNING by default and only
-    # promote to DEBUG when MCP_DEBUG_SSE is explicitly requested.
-    if MCP_DEBUG_SSE:
-        for _lib_logger in (
-            "sse_starlette",
-            "sse_starlette.sse",
-        ):
-            logging.getLogger(_lib_logger).setLevel(logging.DEBUG)
-        logger.debug(
-            "MCP_DEBUG_SSE is enabled - raw SSE chunks will be logged "
-            "(may produce very large lines for b64 payloads)."
-        )
-    else:
-        for _lib_logger in (
-            "sse_starlette",
-            "sse_starlette.sse",
-        ):
-            logging.getLogger(_lib_logger).setLevel(logging.WARNING)
-        logger.debug(
-            "SSE chunk logging suppressed (MCP_DEBUG_SSE not set). "
-            "Set MCP_DEBUG_SSE=true to enable."
-        )
+    # Low-level / high-volume loggers -- opt-in only via MCP_DEBUG_ALL.
+    # When MCP_DEBUG_ALL is false we pin them to WARNING explicitly so they
+    # stay quiet even though basicConfig set the root logger to DEBUG.
+    _VERBOSE_LOGGERS = (
+        "sse_starlette",
+        "sse_starlette.sse",
+        "httpcore",
+        "httpcore.connection",
+        "httpcore.http11",
+        "httpcore.http2",
+        "PIL",
+        "PIL.TiffImagePlugin",
+        "PIL.PngImagePlugin",
+    )
+    _verbose_level = logging.DEBUG if MCP_DEBUG_ALL else logging.WARNING
+    for _lib_logger in _VERBOSE_LOGGERS:
+        logging.getLogger(_lib_logger).setLevel(_verbose_level)
 
     logger.debug(
         "MCP_DEBUG is enabled - request/response payloads will be logged (secrets redacted)."
@@ -87,6 +92,15 @@ if MCP_DEBUG:
     logger.debug(
         "Transport loggers set to DEBUG: mcp.server.streamable_http, mcp.server"
     )
+    if MCP_DEBUG_ALL:
+        logger.debug(
+            "MCP_DEBUG_ALL is enabled - sse_starlette, httpcore and PIL loggers set to DEBUG."
+        )
+    else:
+        logger.debug(
+            "Low-level loggers suppressed (MCP_DEBUG_ALL not set): "
+            "sse_starlette, httpcore, PIL. Set MCP_DEBUG_ALL=true to enable."
+        )
 
     if MCP_DEBUG_HEADERS:
         logger.debug(
