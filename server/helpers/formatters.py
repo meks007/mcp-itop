@@ -34,7 +34,22 @@ def extract_objects(result: dict) -> list[dict]:
     return out
 
 
-def _format_objects(result: dict) -> tuple[str, dict[str, list[dict]]]:
+def _is_empty(fv) -> bool:
+    """Return True only for values that carry no information.
+
+    None, empty string, empty dict, and empty list are considered empty.
+    Integers, floats, and booleans (including 0 and False) are never empty.
+    """
+    if fv is None:
+        return True
+    if isinstance(fv, str):
+        return not fv
+    if isinstance(fv, (dict, list)):
+        return not fv
+    return False
+
+
+def _format_objects(result: dict, *, strip_empty: bool = True) -> tuple[str, dict[str, list[dict]]]:
     """Format iTop response objects into a readable string and extract inline image refs.
 
     Internal implementation -- call format_and_cache() from tool code instead.
@@ -50,6 +65,11 @@ def _format_objects(result: dict) -> tuple[str, dict[str, list[dict]]]:
          modifying field values.
       2. HTML stripping then removes all tags (including <img>) from fields.
       3. The formatted text is assembled from the stripped values.
+
+    When strip_empty=True (default), fields whose value is None, an empty
+    string (including strings that were HTML-only and stripped to nothing),
+    an empty dict, or an empty list are omitted from the output. Integers,
+    floats, and booleans (including 0 and False) are never omitted.
 
     Seeds the field registry from every response so resolve_output_fields
     hits the warm-cache path on subsequent calls for the same class.
@@ -94,7 +114,11 @@ def _format_objects(result: dict) -> tuple[str, dict[str, list[dict]]]:
                 fv = _strip_html(fv)
             elif isinstance(fv, (dict, list)):
                 fv = strip_html_recursive(fv)
+                if strip_empty and _is_empty(fv):
+                    continue
                 fv = json.dumps(fv, indent=2, ensure_ascii=False)
+            if strip_empty and _is_empty(fv):
+                continue
             lines.append("  " + fn + ": " + str(fv))
         for fn, fv in synthetic.items():
             display_name = fn.lstrip("_")
@@ -102,16 +126,21 @@ def _format_objects(result: dict) -> tuple[str, dict[str, list[dict]]]:
     return "\n".join(lines), refs
 
 
-# Public alias kept for any external caller that imports format_objects directly.
-format_objects = _format_objects
+def format_objects(result: dict, *, strip_empty: bool = True) -> tuple[str, dict[str, list[dict]]]:
+    """Public alias for _format_objects. Kept for external callers."""
+    return _format_objects(result, strip_empty=strip_empty)
 
 
-def format_and_cache(result: dict) -> str:
+def format_and_cache(result: dict, *, strip_empty: bool = True) -> str:
     """Format iTop response and persist inline image refs to SQLite.
 
     Calls _format_objects() to get the formatted text and the inline image
     refs map, then writes each ticket's refs to the attachment_store cache
     via write_inline_image_refs().
+
+    When strip_empty=True (default), fields with no meaningful value
+    (None, empty string, empty dict, empty list) are omitted from output.
+    Integers, floats, and booleans (including 0 and False) are never omitted.
 
     The deferred import of attachment_store avoids a circular import:
       helpers -> attachment_store -> config  (safe)
@@ -119,7 +148,7 @@ def format_and_cache(result: dict) -> str:
     """
     from attachment_store import write_inline_image_refs
 
-    text, refs = _format_objects(result)
+    text, refs = _format_objects(result, strip_empty=strip_empty)
 
     for ticket_key, img_refs in refs.items():
         try:
