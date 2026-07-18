@@ -235,13 +235,12 @@ def register(mcp, client: ItopClient):
         dry-run checks."""
         obj_class, resolved = await resolve_key(obj_class, coerce_ref(ticket_ref, key))
 
-        result = await client.request({
-            "operation": "core/delete",
-            "class": obj_class,
-            "key": resolved,
-            "simulate": simulate,
-            "comment": comment or DEFAULT_COMMENT,
-        })
+        result = await client.delete(
+            obj_class,
+            resolved,
+            comment=comment or DEFAULT_COMMENT,
+            simulate=simulate,
+        )
         return format_and_cache(result)
 
     @mcp.tool(
@@ -318,7 +317,7 @@ def register(mcp, client: ItopClient):
     )
     async def itop_list_operations() -> str:
         """List all available REST/JSON operations on the iTop server."""
-        result = await client.request({"operation": "list_operations"})
+        result = await client.operations()
         if result.get("code", -1) != 0:
             return "Error: " + str_or(result, "message", "Unknown error")
         ops = result.get("operations", [])
