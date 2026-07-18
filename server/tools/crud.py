@@ -67,7 +67,7 @@ def register(mcp, client: ItopClient):
         limit: int = 25,
         page: int = 0,
         full: bool = False,
-    ) -> str:
+    ):
         """Retrieve iTop objects by class and key.
 
         key_or_ref identifies the object.
