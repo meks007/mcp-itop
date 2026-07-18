@@ -43,11 +43,12 @@ _HTML_ENTITY_RE = re.compile(r"&(?:#\d+|#x[\da-fA-F]+|[a-zA-Z]+);")
 
 # Matches <img> tags that carry data-img-id and data-img-secret attributes.
 # Both attributes may appear in any order and the tag may have other attrs.
+# Triple-quoted raw strings are used to avoid quote-escaping issues.
 _INLINE_IMG_RE = re.compile(
-    r'<img\b[^>]*\bdata-img-id=["\'']?(\d+)["\'']?'
-    r'[^>]*\bdata-img-secret=["\'']?([0-9a-fA-F]+)["\'']?[^>]*>|'
-    r'<img\b[^>]*\bdata-img-secret=["\'']?([0-9a-fA-F]+)["\'']?'
-    r'[^>]*\bdata-img-id=["\'']?(\d+)["\'']?[^>]*>',
+    r"""<img\b[^>]*\bdata-img-id=["']?(\d+)["']?"""
+    r"""[^>]*\bdata-img-secret=["']?([0-9a-fA-F]+)["']?[^>]*>|"""
+    r"""<img\b[^>]*\bdata-img-secret=["']?([0-9a-fA-F]+)["']?"""
+    r"""[^>]*\bdata-img-id=["']?(\d+)["']?[^>]*>""",
     re.IGNORECASE | re.DOTALL,
 )
 
