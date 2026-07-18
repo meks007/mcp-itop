@@ -9,10 +9,10 @@ from __future__ import annotations
 
 from typing import Optional, Union
 
-from helpers import format_and_cache, resolve_key
+from helpers import coerce_ref, format_and_cache, resolve_key
 
 
-def register(mcp, itop_request):
+def register(mcp, itop_request_fn):
     """Register all comment tools on the given mcp instance."""
 
     @mcp.tool(
@@ -36,10 +36,11 @@ def register(mcp, itop_request):
 
         log_field = "public_log" if is_public else "private_log"
 
-        ref = str(ticket_ref or ticket_id or "").strip() or None
-        ticket_class, key = await resolve_key(ticket_class, ref, itop_request)
+        ticket_class, key = await resolve_key(
+            ticket_class, coerce_ref(ticket_ref or "", ticket_id or ""), itop_request_fn
+        )
 
-        result = await itop_request({
+        result = await itop_request_fn({
             "operation": "core/update",
             "class": ticket_class,
             "key": key,
