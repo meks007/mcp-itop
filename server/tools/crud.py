@@ -114,14 +114,21 @@ def register(mcp, client: ItopClient):
             full=full,
         )
 
+        # format_and_cache must run before fetch_image_counts so that
+        # parse_objects() seeds the inline ref cache for this ticket.
+        # fetch_image_counts reads that cache; without this ordering it
+        # always returns ii_count=None (miss) on the first Load_object
+        # call, producing a spurious "possible inline image(s)" hint.
+        text = format_and_cache(result)
+
         if obj_class in CLASSES_WITH_REF:
             objects = result.get("objects") or {}
+            annotations = []
             for obj_data in objects.values():
                 oid = obj_data.get("key")
                 if not oid:
                     continue
-                fields = obj_data.get("fields")
-                if not isinstance(fields, dict):
+                if not isinstance(obj_data.get("fields"), dict):
                     continue
 
                 att_count, ii_count = await fetch_image_counts(obj_class, oid)
@@ -131,19 +138,23 @@ def register(mcp, client: ItopClient):
                     parts.append(str(att_count) + " attachment(s)")
                 if ii_count:
                     parts.append(str(ii_count) + " inline image(s)")
-                elif ii_count is None:
-                    parts.append(
-                        "possible inline image(s) -- call List_ticket_images to check"
-                    )
+                # ii_count == 0: confirmed no inline images, nothing to show.
+                # ii_count is None: cannot happen -- format_and_cache above
+                # always writes a cache entry ([] or real refs) for every
+                # ticket that appears in the response.
 
                 if parts:
-                    fields["_images"] = (
-                        ", ".join(parts)
+                    annotations.append(
+                        "[images] "
+                        + ", ".join(parts)
                         + ". Call List_ticket_images to fetch them."
-                        " These images are an inherent part of the ticket."
+                        + " These images are an inherent part of the ticket."
                     )
 
-        return format_and_cache(result)
+            if annotations:
+                text = text + "\n" + "\n".join(annotations)
+
+        return text
 
     @mcp.tool(
         name="Create_object"
