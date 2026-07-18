@@ -53,7 +53,7 @@ Originally inspired by [gest0r1/mcp-itop](https://github.com/gest0r1/mcp-itop) â
 | Tool | Description |
 |------|-------------|
 | `itop_add_comment` | Add a public or private comment to a ticket. |
-| `itop_get_log` | Read the comment history (`public_log` or `private_log`). |
+> `itop_get_log` was removed and is now included in `itop_get`
 
 ### Knowledge Base
 
