@@ -18,7 +18,6 @@ from helpers import (
     resolve_key,
     str_or,
     CLASSES_WITH_REF,
-    _LEAN_STRIP,
     _SYNTHETIC_FIELDS,
 )
 from config import DEFAULT_COMMENT
