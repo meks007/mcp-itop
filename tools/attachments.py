@@ -3,7 +3,7 @@ Attachment tools: fetch image metadata and download attachments as files.
 
 Public API
 ----------
-register(mcp, client, get_token_fn)
+register(mcp, client)
     Registers the following MCP tools and resources:
 
     Tools:
@@ -45,17 +45,10 @@ The contents AttributeBlob is returned by the REST API as a dict:
 
 Attachment  : may be any MIME type; mimetype is checked before including.
               The base64 payload is decoded to bytes immediately and stored
-              as a BLOB in the attachment store. The uri column holds only
-              the short itop://attachment/<id> reference.
-              ajax.document.php requires an active iTop session (cookie) and
-              does NOT accept the bearer token, so binary data is taken
-              directly from the REST API response without a second HTTP call.
+              as a BLOB in the attachment store.
 InlineImage : resolved from <img data-img-id data-img-secret> tags found in
               ticket HTML fields after format_and_cache() has run. Secret and
-              id are read from the inline_image_refs SQLite cache. Download
-              uses /webservices/ajax.document.php (no session cookie required).
-              Content is downloaded eagerly so all entries in the store always
-              carry a non-None BLOB.
+              id are read from the inline_image_refs SQLite cache.
 """
 
 from __future__ import annotations
@@ -71,6 +64,7 @@ from attachment_store import (
     store_images,
     write_inline_image_refs,
 )
+from auth import get_bearer_token
 from client import ItopClient
 from config import ITOP_TIMEOUT, ITOP_URL, ITOP_VERIFY_SSL, MCP_DEBUG, logger
 from helpers import coerce_ref, resolve_key
@@ -101,12 +95,7 @@ def _inline_image_url(img_id: str | int, secret: str) -> str:
 
 
 def _unpack_contents(contents: object) -> tuple:
-    """Unpack iTop contents blob into (mimetype, b64_data, filename).
-
-    iTop serialises AttributeBlob as:
-      {"mimetype": "image/jpeg", "data": "<base64>", "filename": "foo.jpg"}
-    Returns empty strings for any missing key.
-    """
+    """Unpack iTop contents blob into (mimetype, b64_data, filename)."""
     if isinstance(contents, dict):
         return (
             (contents.get("mimetype") or "").strip(),
@@ -117,12 +106,7 @@ def _unpack_contents(contents: object) -> tuple:
 
 
 async def _download_binary(url: str) -> tuple[bytes, str]:
-    """Download binary content from url.
-
-    Returns (content_bytes, mimetype).
-    mimetype is taken from the Content-Type response header, falling back to
-    application/octet-stream.
-    """
+    """Download binary content from url. Returns (content_bytes, mimetype)."""
     logger.debug("[attachments] _download_binary: GET %s", url)
     async with httpx.AsyncClient(verify=ITOP_VERIFY_SSL, timeout=ITOP_TIMEOUT) as http:
         response = await http.get(url)
@@ -141,14 +125,15 @@ async def _download_binary(url: str) -> tuple[bytes, str]:
         return response.content, mimetype
 
 
-def register(mcp, client: ItopClient, get_token_fn):
+def register(mcp, client: ItopClient):
     """Register attachment tools and the static image resource.
 
     Args:
-        mcp:          FastMCP server instance.
-        client:       ItopClient instance for REST requests.
-        get_token_fn: Zero-argument callable returning the current bearer
-                      token string for the active MCP client session.
+        mcp:    FastMCP server instance.
+        client: ItopClient instance for REST requests.
+
+    The bearer token is read from the request context via get_bearer_token()
+    so no get_token_fn parameter is needed.
     """
 
     # ------------------------------------------------------------------
@@ -174,7 +159,7 @@ def register(mcp, client: ItopClient, get_token_fn):
         )
 
         ref = coerce_ref(ticket_ref, key)
-        obj_class, resolved = await resolve_key(obj_class, ref, client.request)
+        obj_class, resolved = await resolve_key(obj_class, ref)
         logger.debug(
             "[attachments] itop_get_ticket_images: resolved class=%r key=%r",
             obj_class, resolved,
@@ -305,7 +290,7 @@ def register(mcp, client: ItopClient, get_token_fn):
             "[attachments] itop_get_ticket_images: total images collected=%d", len(images)
         )
 
-        # Deduplicate by img_id for InlineImages and by SHA-256 of base64 for Attachments.
+        # Deduplicate by img_id for InlineImages and by SHA-256 for Attachments.
         seen_hashes: set[str] = set()
         seen_inline_ids: set[str] = set()
         unique_images = []
@@ -366,7 +351,7 @@ def register(mcp, client: ItopClient, get_token_fn):
             for img in images
         ]
         try:
-            token = get_token_fn()
+            token = get_bearer_token()
             token_preview = (token[:8] + "...") if token and len(token) > 8 else (token or "(empty)")
             if token:
                 logger.debug(
@@ -413,7 +398,7 @@ def register(mcp, client: ItopClient, get_token_fn):
         download link. Use itop_get_ticket_images for images. Returns metadata and links only,
         no file binaries. Prefer ticket_ref; use key for a numeric ID or OQL query."""
         ref = coerce_ref(ticket_ref, key)
-        obj_class, resolved = await resolve_key(obj_class, ref, client.request)
+        obj_class, resolved = await resolve_key(obj_class, ref)
         if resolved is None:
             return "Error: provide either ticket_ref or key to identify the ticket."
 
@@ -477,18 +462,11 @@ def register(mcp, client: ItopClient, get_token_fn):
         mime_type="image/jpeg",
     )
     async def serve_ticket_images() -> ResourceResult:
-        """Serve all ticket images stored for the current bearer token session.
-
-        All entries are stored as JPEG BLOBs (normalization happens at write time
-        in attachment_store.store_images). No HTTP download is needed here.
-
-        Returns a plain-text ResourceResult when no images are available
-        (not yet stored, token mismatch, or TTL expired).
-        """
+        """Serve all ticket images stored for the current bearer token session."""
         logger.debug("[attachments] serve_ticket_images: resource handler invoked")
 
         try:
-            token = get_token_fn()
+            token = get_bearer_token()
             token_preview = (token[:8] + "...") if token and len(token) > 8 else (token or "(empty)")
             logger.debug(
                 "[attachments] serve_ticket_images: token=%s (len=%d)",
@@ -497,7 +475,7 @@ def register(mcp, client: ItopClient, get_token_fn):
             )
         except Exception as exc:
             logger.warning(
-                "[attachments] serve_ticket_images: get_token_fn raised: %s", exc
+                "[attachments] serve_ticket_images: get_bearer_token raised: %s", exc
             )
             token = ""
 
