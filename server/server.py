@@ -28,12 +28,11 @@ Framework: fastmcp (PrefectHQ) >= 2.11.0
 Startup sequence
 ----------------
   1. Preflight checks (ITOP_URL present)
-  2. db.init()                 -- synchronous; runs before any async work
-  3. ASGI app built            -- FastMCP + middleware stack
-  4. uvicorn starts            -- ASGI lifespan on_startup fires:
-       - housekeeping asyncio task created
-  5. MCP session manager starts
-  6. Server ready and accepting connections
+  2. db.init()                 -- synchronous; before any async work
+  3. asyncio.run(_serve())
+       a. housekeeping task created
+       b. uvicorn starts, binds, MCP session manager starts
+       c. Server ready and accepting connections
 """
 
 from __future__ import annotations
@@ -174,23 +173,17 @@ if MCP_DEBUG:
     logger.debug("Client<->MCP HTTP debug logging middleware attached.")
 
 # ---------------------------------------------------------------------------
-# ASGI lifespan: start housekeeping after uvicorn is up
-# ---------------------------------------------------------------------------
-
-async def _on_startup() -> None:
-    """ASGI lifespan startup hook -- runs inside the uvicorn event loop."""
-    from background_tasks import housekeeping_loop
-    asyncio.create_task(housekeeping_loop())
-    logger.info("[server] housekeeping task started")
-
-
-app.add_event_handler("startup", _on_startup)
-
-# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 async def _serve() -> None:
+    from background_tasks import housekeeping_loop
+
+    # Start housekeeping before uvicorn so it is running when the first
+    # request arrives. The task runs for the lifetime of the process.
+    asyncio.create_task(housekeeping_loop())
+    logger.info("[server] housekeeping task started")
+
     config = uvicorn.Config(
         app,
         host=_MCP_HOST,
@@ -221,9 +214,8 @@ def main() -> None:
     logger.info("[server] db backend ready")
 
     # ------------------------------------------------------------------
-    # 2. Start uvicorn. The ASGI lifespan on_startup hook (_on_startup)
-    #    will fire after uvicorn binds and before the first request is
-    #    accepted, starting the housekeeping task in the event loop.
+    # 2. Start uvicorn. _serve() creates the housekeeping task first,
+    #    then hands control to uvicorn.
     # ------------------------------------------------------------------
     logger.info(
         "Starting iTop MCP server on %s:%d (debug=%s)",
