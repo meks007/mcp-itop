@@ -81,9 +81,17 @@ ITOP_TIMEOUT = float(os.getenv("ITOP_TIMEOUT", "30"))
 
 DEFAULT_COMMENT = "Modified via MCP"
 
+# -- Token validation cache -----------------------------------------------
+# TTL in seconds for the bearer token validation cache (sliding window).
+# The window resets on every request that hits the cache, so a token
+# actively used within this interval is never re-validated against iTop.
+# Set to 0 to disable caching (validate on every request).
+# Default: 300 s (5 min).
+TOKEN_CACHE_TTL: float = float(os.getenv("TOKEN_CACHE_TTL", "300"))
+
 # -- resolve_key cache ----------------------------------------------------
 # TTL in seconds for the resolve_key lookup cache.
-# Entries older than this value are evicted on the next resolve_key call.
+# Entries older than this value are evicted by the housekeeping loop.
 # Set to 0 to disable caching entirely.
 RESOLVE_KEY_CACHE_TTL = int(os.getenv("RESOLVE_KEY_CACHE_TTL", "86400"))
 
