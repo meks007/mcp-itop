@@ -8,6 +8,7 @@ is exactly one interval knob in the environment.
 
 Registered cleanup activities:
   - cache_cleanup()                    : evict stale resolve_key cache entries
+  - evict_stale_token_cache()          : evict expired token validation entries
   - purge_expired_images()             : delete expired attachment_sessions rows
   - purge_expired_inline_image_refs()  : delete expired inline_image_refs rows
 
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 
+from auth import evict_stale_token_cache
 from cache import cache_cleanup
 from attachment_store import purge_expired_images, purge_expired_inline_image_refs
 from config import CLEANUP_INTERVAL, logger
@@ -42,6 +44,11 @@ async def housekeeping_loop() -> None:
             cache_cleanup()
         except Exception as exc:
             logger.warning("[housekeeping] cache_cleanup failed: %s", exc)
+
+        try:
+            await evict_stale_token_cache()
+        except Exception as exc:
+            logger.warning("[housekeeping] evict_stale_token_cache failed: %s", exc)
 
         try:
             removed = purge_expired_images()
