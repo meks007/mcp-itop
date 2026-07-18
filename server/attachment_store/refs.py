@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 import logging
 
-from attachment_store.db import _get_conn
+import db as _db_layer
 from config import INLINE_IMAGE_REF_TTL
 
 logger = logging.getLogger(__name__)
@@ -33,15 +33,16 @@ def write_inline_image_refs(
         obj_id:    Numeric ticket ID as string.
         refs:      List of {'id': str, 'secret': str} dicts.
     """
-    conn = _get_conn()
     expires_at = time.time() + INLINE_IMAGE_REF_TTL
-    with conn:
-        conn.execute(
+    backend = _db_layer.get_db()
+
+    with backend.transaction():
+        backend.execute(
             "DELETE FROM inline_image_refs WHERE obj_class = ? AND obj_id = ?",
             (obj_class, obj_id),
         )
         if refs:
-            conn.executemany(
+            backend.executemany(
                 "INSERT OR REPLACE INTO inline_image_refs "
                 "(obj_class, obj_id, img_id, img_secret, expires_at) "
                 "VALUES (?, ?, ?, ?, ?)",
@@ -70,17 +71,15 @@ def read_inline_image_refs(
         obj_class: iTop class name.
         obj_id:    Numeric ticket ID as string.
     """
-    conn = _get_conn()
     now = time.time()
 
-    cursor = conn.execute(
+    rows = _db_layer.get_db().execute(
         "SELECT img_id, img_secret, expires_at "
         "FROM inline_image_refs "
         "WHERE obj_class = ? AND obj_id = ? "
         "ORDER BY img_id",
         (obj_class, obj_id),
     )
-    rows = cursor.fetchall()
 
     if not rows:
         logger.debug(
@@ -110,15 +109,26 @@ def read_inline_image_refs(
 
 def purge_expired_inline_image_refs() -> int:
     """Delete all expired rows from inline_image_refs. Returns rows removed."""
-    logger.debug("[attachment_store] purge_expired_inline_image_refs: running purge")
-    conn = _get_conn()
-    with conn:
-        cursor = conn.execute(
-            "DELETE FROM inline_image_refs WHERE expires_at < ?",
-            (time.time(),),
-        )
-    removed = cursor.rowcount
     logger.debug(
-        "[attachment_store] purge_expired_inline_image_refs: removed %d row(s)", removed
+        "[attachment_store] purge_expired_inline_image_refs: running purge"
+    )
+    now = time.time()
+    backend = _db_layer.get_db()
+
+    count_rows = backend.execute(
+        "SELECT COUNT(*) FROM inline_image_refs WHERE expires_at < ?",
+        (now,),
+    )
+    removed = count_rows[0][0] if count_rows else 0
+
+    with backend.transaction():
+        backend.execute(
+            "DELETE FROM inline_image_refs WHERE expires_at < ?",
+            (now,),
+        )
+
+    logger.debug(
+        "[attachment_store] purge_expired_inline_image_refs: removed %d row(s)",
+        removed,
     )
     return removed
