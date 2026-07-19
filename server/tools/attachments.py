@@ -148,7 +148,7 @@ def register(mcp, client: ItopClient):
         obj_class: str,
         ticket_ref: str = "",
         key: str = "",
-    ) -> str:
+    ):
         """Fetch and store all image attachments for an iTop ticket (file attachments
         and inline images). Downloads binaries, deduplicates by content hash, and
         writes them to the session image store. Returns the image count.
