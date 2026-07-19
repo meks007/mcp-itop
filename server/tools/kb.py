@@ -82,7 +82,7 @@ def register(mcp, client: ItopClient):
     async def itop_search_kb(
         keywords: str,
         limit: int = 20,
-    ) -> str:
+    ):
         """Search knowledge-base articles by title, summary, or description.
 
         Pass meaningful, specific keywords that describe the topic - individual
@@ -139,7 +139,7 @@ def register(mcp, client: ItopClient):
     @mcp.tool(
         name="Get_KB_article"
     )
-    async def itop_get_kb_article(article_id: int) -> str:
+    async def itop_get_kb_article(article_id: int):
         """Get the full content of a knowledge-base article by numeric ID. Auto-detects KBEntry vs FAQ."""
         kb_cls = await _kb_class()
         if not kb_cls:
@@ -159,7 +159,7 @@ def register(mcp, client: ItopClient):
     @mcp.tool(
         name="List_KB_categories"
     )
-    async def itop_list_kb_categories() -> str:
+    async def itop_list_kb_categories():
         """List all knowledge-base categories. Auto-detects KBCategory vs FAQCategory."""
         kb_cls = await _kb_class()
         if not kb_cls:
