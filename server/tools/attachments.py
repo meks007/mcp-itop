@@ -9,9 +9,10 @@ register(mcp, client)
     Tools:
         List_ticket_images(obj_class, ticket_ref, key)
             Fetches image attachments for a ticket, stores them in the
-            SQLite attachment store, and returns only the image count plus
+            SQLite attachment store, and returns the image count plus
             the static MCP resource URI _STATIC_RESOURCE_URI.
-            The client must read that resource to retrieve the actual images.
+            The client may read that resource once per image to retrieve
+            each binary in sequence (one image per resource call).
 
             Inline images are resolved exclusively from refs parsed out of
             the ticket HTML fields by format_and_cache() (via parse_objects).
@@ -33,10 +34,11 @@ register(mcp, client)
 
     Resources:
         _STATIC_RESOURCE_URI  (static)
-            Returns all images stored by the most recent
-            List_ticket_images call for this client session as a
-            multi-content ResourceResult (one ResourceContent per image).
-            All images are always served as JPEG from the BLOB store.
+            Returns one image per call from the store populated by the most
+            recent List_ticket_images call for this client session.
+            Each call marks the served image as done and advances to the
+            next. Returns an empty response when all images have been served
+            or the store is empty. All images are served as JPEG.
 
 iTop blob field notes
 ---------------------
@@ -59,7 +61,7 @@ import httpx
 from fastmcp.resources import ResourceResult, ResourceContent
 
 from attachment_store import (
-    get_images,
+    get_next_image,
     read_inline_image_refs,
     store_images,
     write_inline_image_refs,
@@ -151,9 +153,10 @@ def register(mcp, client: ItopClient):
     ):
         """Fetch and store all image attachments for an iTop ticket (file attachments
         and inline images). Downloads binaries, deduplicates by content hash, and
-        writes them to the session image store. Returns the image count.
-        After this tool returns, read the resource Download ticket images
-        to retrieve all image binaries at once.
+        writes them to the session image store. Returns the image count N.
+        After this tool returns, you MAY read the resource Download ticket images
+        up to N times to retrieve images one by one. Each resource call serves the
+        next image in sequence; you do not have to read all N images.
         Prefer ticket_ref; use key for a numeric ID or OQL query."""
         logger.debug(
             "[attachments] itop_get_ticket_images: called obj_class=%s ticket_ref=%r key=%r",
@@ -389,7 +392,7 @@ def register(mcp, client: ItopClient):
             str(len(images)) + " image attachment(s) found for "
             + obj_class + " " + label + dedup_note + ".\n"
             + "Read the MCP resource " + _STATIC_RESOURCE_URI
-            + " to retrieve all images at once."
+            + " once per image (up to " + str(len(images)) + " time(s)) to retrieve them."
         )
 
     # ------------------------------------------------------------------
@@ -464,16 +467,17 @@ def register(mcp, client: ItopClient):
         _STATIC_RESOURCE_URI,
         name="Download ticket images",
         description=(
-            "Returns all images for the most recent List_ticket_images call as JPEG. "
-            "You HAVE TO call List_ticket_images first to populate this resource. "
-            "This resource does NOTHING without calling List_ticket_images first. "
-            "Only fetch this resource ONCE after calling List_ticket_images, "
-            "it serves ALL images for a ticket in one call."
+            "Returns one image per call from the store populated by List_ticket_images. "
+            "You MUST call List_ticket_images first. "
+            "Each call serves the next unserved image in sequence and marks it done. "
+            "Call this resource once per image, up to the count returned by "
+            "List_ticket_images. Returns an empty response when all images have been "
+            "served or the store is empty."
         ),
         mime_type="image/jpeg",
     )
     async def serve_ticket_images() -> ResourceResult:
-        """Serve all ticket images stored for the current bearer token session."""
+        """Serve the next unserved ticket image for the current bearer token session."""
         logger.debug("[attachments] serve_ticket_images: resource handler invoked")
 
         try:
@@ -493,59 +497,34 @@ def register(mcp, client: ItopClient):
             token = ""
 
         if not token:
-            return ResourceResult(
-                contents="No active session token. Connect with a valid iTop bearer token."
-            )
+            return ResourceResult(contents=[])
 
-        entries = get_images(token)
-        logger.debug(
-            "[attachments] serve_ticket_images: attachment_store returned %d entry/entries",
-            len(entries),
-        )
+        entry = get_next_image(token)
 
-        if not entries:
-            return ResourceResult(
-                contents=(
-                    "No images available for this session. "
-                    "Call List_ticket_images first."
-                )
-            )
-
-        resource_contents: list[ResourceContent] = []
-        errors: list[str] = []
-
-        for i, entry in enumerate(entries):
-            content_bytes: bytes | None = entry.get("content")
-            mime: str = entry.get("mimetype", "image/jpeg")
+        if entry is None:
             logger.debug(
-                "[attachments] serve_ticket_images: [%d/%d] filename=%s uri=%s content=%s",
-                i + 1, len(entries),
-                entry.get("filename", "?"),
-                entry.get("uri", "?"),
-                ("%d bytes" % len(content_bytes)) if content_bytes is not None else "None",
+                "[attachments] serve_ticket_images: no unserved image for token=%s",
+                token_preview,
             )
+            return ResourceResult(contents=[])
 
-            if content_bytes is None:
-                msg = entry.get("filename", "?") + ": no content in store"
-                logger.warning(
-                    "[attachments] serve_ticket_images: [%d] %s", i + 1, msg
-                )
-                errors.append(msg)
-                continue
-
-            resource_contents.append(
-                ResourceContent(content=content_bytes, mime_type=mime)
-            )
-
-        if not resource_contents:
-            error_detail = "; ".join(errors) if errors else "unknown error"
-            return ResourceResult(
-                contents="Failed to serve all images. Errors: " + error_detail
-            )
+        content_bytes: bytes | None = entry.get("content")
+        mime: str = entry.get("mimetype", "image/jpeg")
 
         logger.debug(
-            "[attachments] serve_ticket_images: returning %d ResourceContent(s),"
-            " %d error(s) skipped",
-            len(resource_contents), len(errors),
+            "[attachments] serve_ticket_images: filename=%s uri=%s content=%s",
+            entry.get("filename", "?"),
+            entry.get("uri", "?"),
+            ("%d bytes" % len(content_bytes)) if content_bytes is not None else "None",
         )
-        return ResourceResult(contents=resource_contents)
+
+        if content_bytes is None:
+            logger.warning(
+                "[attachments] serve_ticket_images: entry has no content uri=%s",
+                entry.get("uri", "?"),
+            )
+            return ResourceResult(contents=[])
+
+        return ResourceResult(
+            contents=[ResourceContent(content=content_bytes, mime_type=mime)]
+        )
