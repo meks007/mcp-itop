@@ -190,7 +190,7 @@ def register(mcp, client: ItopClient):
 
         For tickets, prefer ticket_ref; bare ticket numbers are resolved automatically.
         Do not update status with this tool -- use Apply_stimulus_to_object for lifecycle
-        transitions such as assignment, resolution, reopening, or pending status."""
+        transitions such as assignment, resolution, reopening, proposing or pending status."""
         parsed = parse_json_arg(fields, "fields")
         if isinstance(parsed, str):
             return parsed
@@ -202,6 +202,7 @@ def register(mcp, client: ItopClient):
                 "  ev_assign   - assign ticket\n"
                 "  ev_resolve  - resolve ticket (include solution in fields)\n"
                 "  ev_reopen   - reopen ticket\n"
+                "  ev_propose  - propose solution\n"
                 "  ev_pending  - put ticket on hold"
             )
 
