@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS attachment_sessions (
     content     BLOB,
     mimetype    TEXT NOT NULL,
     filename    TEXT NOT NULL,
-    expires_at  REAL NOT NULL
+    expires_at  REAL NOT NULL,
+    served      INTEGER NOT NULL DEFAULT 0
 )
 """)
 
@@ -64,7 +65,27 @@ def _migrate_content_column(backend) -> None:
         )
 
 
+def _migrate_served_column(backend) -> None:
+    """Add the served column to attachment_sessions if missing.
+
+    Needed for databases created before the served column was introduced.
+    Existing rows default to served=0 so they are served on next resource call.
+    Cache housekeeping (purge_expired_images) is not affected: it evicts by
+    expires_at only and never reads served.
+    """
+    rows = backend.execute("PRAGMA table_info(attachment_sessions)")
+    existing_cols = {row[1] for row in rows}
+    if "served" not in existing_cols:
+        logger.info(
+            "[attachment_store] migrating schema: adding served column"
+        )
+        backend.execute(
+            "ALTER TABLE attachment_sessions ADD COLUMN served INTEGER NOT NULL DEFAULT 0"
+        )
+
+
 db.register_migration(_migrate_content_column)
+db.register_migration(_migrate_served_column)
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -87,7 +108,8 @@ def store_images(token: str, images: list[ImageEntry]) -> None:
 
     Replaces any existing entries for this token. Expired rows are purged
     by the central housekeeping task. Each entry is valid for
-    IMAGE_STORE_TTL.
+    IMAGE_STORE_TTL. The served flag is reset to 0 implicitly because all
+    old rows are deleted and new rows default to served=0.
 
     Args:
         token:  The raw bearer token for the current MCP client session.
@@ -138,8 +160,8 @@ def store_images(token: str, images: list[ImageEntry]) -> None:
 
         db.executemany(
             "INSERT INTO attachment_sessions "
-            "(token, uri, content, mimetype, filename, expires_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "(token, uri, content, mimetype, filename, expires_at, served) "
+            "VALUES (?, ?, ?, ?, ?, ?, 0)",
             rows,
         )
         logger.debug(
@@ -166,11 +188,16 @@ def store_images(token: str, images: list[ImageEntry]) -> None:
     )
 
 
-def get_images(token: str) -> list[ImageEntry]:
-    """Return all non-expired image entries for the given bearer token.
+def get_next_image(token: str) -> ImageEntry | None:
+    """Return the next unserved non-expired image entry for the given token.
 
-    Returns an empty list when no valid entries exist (not yet stored,
-    expired, or wrong token).
+    Selects the lowest-rowid row where token matches, served=0, and the
+    entry has not expired. Marks that row served=1 atomically within the
+    same transaction before returning. Returns None when no unserved entry
+    exists (store empty, all served, or all expired).
+
+    Cache housekeeping is not affected: purge_expired_images evicts by
+    expires_at only and never reads the served flag.
 
     Args:
         token: The raw bearer token for the current MCP client session.
@@ -179,55 +206,62 @@ def get_images(token: str) -> list[ImageEntry]:
     now = time.time()
 
     logger.debug(
-        "[attachment_store] get_images: looking up token=%s", token_preview
+        "[attachment_store] get_next_image: looking up token=%s", token_preview
     )
 
-    rows = db.execute(
-        "SELECT uri, content, mimetype, filename, expires_at "
-        "FROM attachment_sessions "
-        "WHERE token = ? AND expires_at >= ? "
-        "ORDER BY rowid",
-        (token, now),
-    )
-
-    logger.debug(
-        "[attachment_store] get_images: raw query returned %d row(s) for token=%s",
-        len(rows),
-        token_preview,
-    )
-
-    entries: list[ImageEntry] = []
-    for i, row in enumerate(rows):
-        content: bytes | None = row[1]
-        entry: ImageEntry = {
-            "uri": row[0],
-            "content": content,
-            "mimetype": row[2],
-            "filename": row[3],
-        }
-        remaining_ttl = row[4] - now
-        logger.debug(
-            "[attachment_store] get_images: [%d] uri=%s mimetype=%s filename=%s"
-            " content=%s remaining_ttl=%.0fs",
-            i,
-            entry["uri"],
-            entry["mimetype"],
-            entry["filename"],
-            ("%d bytes" % len(content)) if content is not None else "None",
-            remaining_ttl,
+    with db.transaction():
+        rows = db.execute(
+            "SELECT rowid, uri, content, mimetype, filename, expires_at "
+            "FROM attachment_sessions "
+            "WHERE token = ? AND served = 0 AND expires_at >= ? "
+            "ORDER BY rowid "
+            "LIMIT 1",
+            (token, now),
         )
-        entries.append(entry)
+
+        if not rows:
+            logger.debug(
+                "[attachment_store] get_next_image: no unserved entry for token=%s",
+                token_preview,
+            )
+            return None
+
+        row = rows[0]
+        rowid = row[0]
+        content: bytes | None = row[2]
+        remaining_ttl = row[5] - now
+
+        db.execute(
+            "UPDATE attachment_sessions SET served = 1 WHERE rowid = ?",
+            (rowid,),
+        )
+
+    entry: ImageEntry = {
+        "uri": row[1],
+        "content": content,
+        "mimetype": row[3],
+        "filename": row[4],
+    }
 
     logger.debug(
-        "[attachment_store] get_images: returning %d valid entry/entries for token=%s",
-        len(entries),
-        token_preview,
+        "[attachment_store] get_next_image: serving rowid=%d uri=%s"
+        " mimetype=%s filename=%s content=%s remaining_ttl=%.0fs",
+        rowid,
+        entry["uri"],
+        entry["mimetype"],
+        entry["filename"],
+        ("%d bytes" % len(content)) if content is not None else "None",
+        remaining_ttl,
     )
-    return entries
+
+    return entry
 
 
 def purge_expired_images() -> int:
-    """Delete all expired rows from attachment_sessions. Returns rows removed."""
+    """Delete all expired rows from attachment_sessions. Returns rows removed.
+
+    Evicts by expires_at only. The served flag has no effect on eviction.
+    """
     logger.debug("[attachment_store] purge_expired_images: running purge")
     now = time.time()
 
