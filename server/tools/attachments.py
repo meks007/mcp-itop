@@ -465,7 +465,7 @@ def register(mcp, client: ItopClient):
 
     @mcp.resource(
         _STATIC_RESOURCE_URI,
-        name="Download ticket images",
+        name="Download ticket image",
         description=(
             "Returns one image per call from the store populated by List_ticket_images. "
             "You MUST call List_ticket_images first. "
