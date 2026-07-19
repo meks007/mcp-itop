@@ -13,7 +13,7 @@ refs.py. Callers only need to call db.init() once at server startup.
 from attachment_store.image import _normalize_image
 from attachment_store.session import (
     store_images,
-    get_images,
+    get_next_image,
     purge_expired_images,
     ImageEntry,
 )
@@ -25,7 +25,7 @@ from attachment_store.refs import (
 
 __all__ = [
     "store_images",
-    "get_images",
+    "get_next_image",
     "purge_expired_images",
     "ImageEntry",
     "write_inline_image_refs",
