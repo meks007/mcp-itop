@@ -466,9 +466,13 @@ def cache_cleanup() -> None:
 # ---------------------------------------------------------------------------
 # Transition map cache
 # ---------------------------------------------------------------------------
-# Stores the full enumerate_transitions schema per iTop class.
+# Stores the extracted transition schema (fields + transitions) per iTop class.
+# The full iTop REST envelope (code, message, result) is NOT stored -- only the
+# inner "result" dict is cached, consistent with how extract_objects() and other
+# helpers expose only the relevant payload to callers.
+#
 # Key:   obj_class string, e.g. "UserRequest"
-# Value: dict with keys "fields" and "transitions"
+# Value: dict with keys "fields" and "transitions" (i.e. response["result"])
 # TTL:   TRANSITION_CACHE_TTL env var, default 3600 s (1 h)
 
 import os as _os
@@ -480,11 +484,15 @@ _transition_cache: TTLCache = TTLCache(
 
 
 async def get_transition_map(obj_class: str, client) -> dict:
-    """Return the cached transition map for obj_class, fetching on cache miss.
+    """Return the transition schema for obj_class, fetching from iTop on cache miss.
 
-    The schema is fetched via client.enumerate_transitions() and cached for
-    TRANSITION_CACHE_TTL seconds (default 3600). Subsequent calls within the
-    TTL window return the cached dict without an iTop round-trip.
+    Mirrors the pattern of extract_objects() and format_and_cache(): the client
+    method returns the full iTop response, and this helper unwraps and validates
+    the relevant payload before storing it. Callers receive only the schema dict
+    (keys "fields" and "transitions"), never the raw REST envelope.
+
+    TTL is controlled by the TRANSITION_CACHE_TTL env var (default 3600 s).
+    The cache is in-process only; restart the server to force a reload.
 
     Args:
         obj_class: iTop class name, e.g. "UserRequest".
@@ -492,6 +500,9 @@ async def get_transition_map(obj_class: str, client) -> dict:
 
     Returns:
         dict with top-level keys "fields" and "transitions".
+
+    Raises:
+        ValueError: if the iTop response is missing or has an unexpected structure.
     """
     cached = _transition_cache.get(obj_class)
     if cached is not None:
@@ -499,6 +510,25 @@ async def get_transition_map(obj_class: str, client) -> dict:
         return cached
 
     logger.debug("[transition_cache] miss for cls=%r -- fetching from iTop", obj_class)
-    data = await client.enumerate_transitions(obj_class)
-    _transition_cache.set(obj_class, data)
-    return data
+
+    # enumerate_transitions() raises ValueError on non-zero code; no need to
+    # re-check here. Unwrap response["result"] to get the schema dict, exactly
+    # as tools unwrap response["objects"] after a core/get call.
+    response = await client.enumerate_transitions(obj_class)
+    schema = response.get("result")
+
+    if not isinstance(schema, dict):
+        raise ValueError(
+            "enumerate_transitions returned no valid result for " + obj_class
+        )
+    if not isinstance(schema.get("transitions"), dict):
+        raise ValueError(
+            "enumerate_transitions result missing transitions map for " + obj_class
+        )
+    if not isinstance(schema.get("fields"), dict):
+        raise ValueError(
+            "enumerate_transitions result missing fields map for " + obj_class
+        )
+
+    _transition_cache.set(obj_class, schema)
+    return schema
