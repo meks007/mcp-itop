@@ -491,7 +491,7 @@ class ItopClient:
             ValueError: if the iTop response signals a non-zero error code.
         """
         response = await self.request({
-            "operation": "core/enumerate_transitions",
+            "operation": "company/enumerate_transitions",
             "class": cls,
         })
         if response.get("code", 0) != 0:
