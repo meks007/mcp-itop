@@ -139,11 +139,18 @@ async def resolve_key(
     obj_class: str,
     ref: str | None,
 ) -> tuple[str, Any]:
-    """Resolve an object identifier to (resolved_class, numeric_key).
+    """Resolve an object identifier to (resolved_class, key_for_core_get).
 
     Uses get_client() from the current async context.
+
+    OQL strings (starting with SELECT, case-insensitive) are returned
+    immediately as-is. No resolution lookup is performed and the string is
+    never cached -- the caller's core/get call handles multi-object results
+    together with its own limit/page parameters.
+
     For CLASSES_WITH_REF: ref matched via suffix OQL on the ref field.
-    For all other classes: ref passed directly as key in a core/get call.
+    For all other classes: ref passed directly as key in a core/get call to
+    resolve a bare name or ID to a numeric primary key.
     Fallback: int(ref) or raw ref string.
 
     cache_cleanup() is NOT called here; it runs exclusively in the
@@ -155,6 +162,15 @@ async def resolve_key(
     ref_str = str(ref).strip() if ref is not None else ""
     if not ref_str:
         return obj_class, ref
+
+    # OQL strings must be forwarded directly without any resolution step.
+    # Resolving them would collapse a multi-row result to a single numeric ID.
+    if ref_str.upper().startswith("SELECT "):
+        logger.debug(
+            "[resolve_key] OQL passthrough: ref=%r -> class=%r key=%r",
+            ref_str, obj_class, ref_str,
+        )
+        return obj_class, ref_str
 
     cached = cache_get(obj_class, ref_str)
     if cached is not None:
