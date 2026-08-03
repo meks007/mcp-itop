@@ -16,6 +16,7 @@ post_strip_set) themselves.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from config import RESOLVE_KEY_CACHE_TTL
@@ -34,6 +35,19 @@ from helpers.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Matches the first word after SELECT in an OQL string, e.g.
+#   "SELECT UserRequest WHERE ..."  -> "UserRequest"
+#   "SELECT UserRequest"            -> "UserRequest"
+# Case-insensitive; only word characters are captured so partial matches
+# (e.g. SELECT with no class) return None safely.
+_OQL_CLASS_RE = re.compile(r"^\s*SELECT\s+(\w+)", re.IGNORECASE)
+
+
+def _oql_class(ref_str: str) -> str | None:
+    """Return the class name embedded in an OQL string, or None if not OQL."""
+    m = _OQL_CLASS_RE.match(ref_str)
+    return m.group(1) if m else None
 
 
 def ensure_ref_field(obj_class: str, output_fields: str) -> str:
@@ -144,9 +158,11 @@ async def resolve_key(
     Uses get_client() from the current async context.
 
     OQL strings (starting with SELECT, case-insensitive) are returned
-    immediately as-is. No resolution lookup is performed and the string is
-    never cached -- the caller's core/get call handles multi-object results
-    together with its own limit/page parameters.
+    immediately as-is. The class name embedded in the OQL overrides the
+    obj_class parameter -- "SELECT UserRequest WHERE ..." always uses
+    UserRequest as the class for the core/get call, regardless of what
+    obj_class was passed. This prevents abstract base classes (e.g. Ticket)
+    from overriding a concrete class explicitly named in the OQL.
 
     For CLASSES_WITH_REF: ref matched via suffix OQL on the ref field.
     For all other classes: ref passed directly as key in a core/get call to
@@ -164,13 +180,17 @@ async def resolve_key(
         return obj_class, ref
 
     # OQL strings must be forwarded directly without any resolution step.
-    # Resolving them would collapse a multi-row result to a single numeric ID.
-    if ref_str.upper().startswith("SELECT "):
+    # The class embedded in the OQL takes priority over the obj_class hint
+    # so that e.g. obj_class="Ticket" + OQL="SELECT UserRequest ..." correctly
+    # uses UserRequest for the core/get call instead of the abstract base class.
+    oql_cls = _oql_class(ref_str)
+    if oql_cls is not None:
+        effective_class = oql_cls
         logger.debug(
-            "[resolve_key] OQL passthrough: ref=%r -> class=%r key=%r",
-            ref_str, obj_class, ref_str,
+            "[resolve_key] OQL passthrough: ref=%r -> class=%r (overrides obj_class=%r)",
+            ref_str, effective_class, obj_class,
         )
-        return obj_class, ref_str
+        return effective_class, ref_str
 
     cached = cache_get(obj_class, ref_str)
     if cached is not None:
