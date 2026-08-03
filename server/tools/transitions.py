@@ -45,6 +45,8 @@ Path modes (schema mode only)
 
 from __future__ import annotations
 
+import json as _json
+
 from client import ItopClient
 from cache import get_transition_map
 from helpers import resolve_key, format_and_cache, ensure_ref_field
@@ -60,6 +62,9 @@ _REQUIRED_OPTIONS: frozenset[str] = frozenset({
 
 _ID_FIELDS_NOTE = "Note: for ID fields, load the referenced object only if the ID is not yet known."
 
+# Values that iTop uses for unset/empty fields (foreign keys default to 0).
+_EMPTY_VALUES: frozenset[str] = frozenset({"", "0", "null", "None"})
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -73,9 +78,24 @@ def _parse_field_lines(field_lines: str) -> dict[str, str]:
       - Lines starting with '#' are treated as comments and ignored.
       - Only the first '=' is used as the delimiter; values may contain '='.
       - Whitespace around the key is stripped; value whitespace is preserved.
+
+    Fallback: if the input starts with '{' it is assumed to be a JSON object
+    and parsed directly. This handles agents that pass JSON instead of
+    Key=Value text despite the docstring instruction. Each value is cast to
+    str so the returned type is always dict[str, str].
     """
+    raw = (field_lines or "").strip()
+
+    if raw.startswith("{"):
+        try:
+            parsed = _json.loads(raw)
+            if isinstance(parsed, dict):
+                return {k: str(v) for k, v in parsed.items()}
+        except Exception:
+            pass  # fall through to line-by-line parsing
+
     result: dict[str, str] = {}
-    for line in (field_lines or "").splitlines():
+    for line in raw.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
@@ -108,6 +128,20 @@ def _get_current_state(result: dict, obj_id: str) -> str | None:
         return None
     obj_data = next(iter(objects.values()))
     return obj_data.get("fields", {}).get("status") or None
+
+
+def _get_current_fields(result: dict) -> dict[str, str]:
+    """Extract the fields dict from a core/get result dict.
+
+    Returns an empty dict when the result contains no objects.
+    All values are cast to str so callers can compare uniformly.
+    """
+    objects = result.get("objects") or {}
+    if not objects:
+        return {}
+    obj_data = next(iter(objects.values()))
+    raw = obj_data.get("fields", {}) or {}
+    return {k: str(v) for k, v in raw.items()}
 
 
 def _is_internal(from_state: str, stimulus: str, to_state: str, transitions: dict) -> bool:
@@ -539,17 +573,23 @@ def register(mcp, client: ItopClient) -> None:
           obj_class     - iTop class name, e.g. UserRequest
           obj_id        - numeric object ID or ticket ref (e.g. R-001234)
           target_state  - desired target state (e.g. assigned, waiting_for_approval)
-          field_lines   - one attribute per line in Key=Value format, e.g.:
-                            agent_id=15
-                            team_id=7
-                            solution=<p>Fixed by restarting the service.</p>
+          field_lines   - required fields in Key=Value format, one per line.
+                          IMPORTANT: use plain Key=Value text, NOT JSON syntax.
+                          Example:
+                            approver_id=24
+                            approval_reason=Approval requested for R-000105.
+                          Do NOT pass JSON like {"approver_id": 24}.
           output_fields - comma-separated fields to return on success
                           (default: ref, friendlyname, status)
 
         The tool will:
           1. Verify target_state is directly reachable via a user-action stimulus.
           2. Reject the call when the stimulus is internal (system-driven).
-          3. Validate that all MANDATORY fields are present and non-empty.
+          3. Validate that all required fields satisfy their option constraints:
+               MANDATORY  -- non-empty on the object or provided in field_lines.
+               MUSTPROMPT -- must be explicitly provided in field_lines.
+               MUSTCHANGE -- must be provided in field_lines AND differ from
+                             the current value already set on the object.
           4. Apply the stimulus via iTop core/apply_stimulus.
           5. Return the updated object on success, or a descriptive error.
 
@@ -559,10 +599,14 @@ def register(mcp, client: ItopClient) -> None:
         transitions = schema.get("transitions", {})
 
         obj_class, resolved = await resolve_key(obj_class, obj_id)
-        result = await client.get(obj_class, resolved, fields="status")
+
+        # Single fetch: status + all fields for validation in one round-trip.
+        result = await client.get(obj_class, resolved, fields="*")
         current_state = _get_current_state(result, obj_id)
         if not current_state:
             return "Error: object " + obj_id + " not found or status field unavailable."
+
+        current_fields = _get_current_fields(result)
 
         current_map = transitions.get(current_state, {})
         reachable = current_map.get("targets", {})
@@ -598,20 +642,49 @@ def register(mcp, client: ItopClient) -> None:
         state_fields = target_state_map.get("fields", {})
         target_fields: dict = state_fields if isinstance(state_fields, dict) else {}
 
+        # ----------------------------------------------------------------
+        # Validate required fields respecting per-flag semantics:
+        #
+        #   MUSTCHANGE  -- must be provided AND differ from the current value.
+        #                  Takes priority over MUSTPROMPT/MANDATORY when combined.
+        #   MUSTPROMPT  -- must be explicitly provided in field_lines even when
+        #                  the field already has a value on the object.
+        #   MANDATORY   -- value must be non-empty either on the object already
+        #                  or in field_lines. Already-set fields satisfy this.
+        # ----------------------------------------------------------------
         missing: list[str] = []
         for field_name, field_opts in target_fields.items():
-            options = (
+            options = set(
                 field_opts.get("options", [])
                 if isinstance(field_opts, dict)
                 else []
-            )
-            if "OPT_ATT_MANDATORY" in options:
-                if not provided.get(field_name, "").strip():
+            ) & _REQUIRED_OPTIONS
+
+            if not options:
+                continue
+
+            provided_val = provided.get(field_name, "").strip()
+            current_val  = current_fields.get(field_name, "").strip()
+
+            if "OPT_ATT_MUSTCHANGE" in options:
+                # Must be explicitly provided AND different from current value.
+                if not provided_val or provided_val == current_val:
+                    missing.append(
+                        field_name + " (MUSTCHANGE: provide a new value different from '"
+                        + current_val + "')"
+                    )
+            elif "OPT_ATT_MUSTPROMPT" in options:
+                # Must be explicitly provided, even if already set on the object.
+                if not provided_val:
+                    missing.append(field_name + " (MUSTPROMPT: must be explicitly provided)")
+            elif "OPT_ATT_MANDATORY" in options:
+                # Satisfied by either a provided value or an existing non-empty value.
+                if provided_val in _EMPTY_VALUES and current_val in _EMPTY_VALUES:
                     missing.append(field_name)
 
         if missing:
             return (
-                "Error: missing mandatory fields for transition to '"
+                "Error: field constraints not satisfied for transition to '"
                 + target_state + "':\n"
                 + "\n".join("  - " + f for f in missing)
                 + "\n\nCall Describe_state_change to see all required fields."
