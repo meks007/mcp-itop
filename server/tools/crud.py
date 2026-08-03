@@ -22,7 +22,88 @@ from helpers import (
     CLASSES_WITH_REF,
     _SYNTHETIC_FIELDS,
 )
+from helpers.stripping import _LEAN_STRIP
 from config import DEFAULT_COMMENT
+from cache import get_class_schema
+
+
+# ---------------------------------------------------------------------------
+# Type taxonomy helpers
+# ---------------------------------------------------------------------------
+
+# iTop type prefixes that identify derived / read-only / relational fields.
+# These are not writable via core/create or core/update and are grouped
+# separately in the Describe_class output.
+_DERIVED_TYPE_PREFIXES = (
+    "AttributeExternalField",
+    "AttributeFriendlyName",
+    "AttributeFinalClass",
+    "AttributeSubItem",
+    "AttributeStopWatch",
+    "AttributeCaseLog",
+    "AttributeCustomFields",
+)
+
+_LINK_TYPE_PREFIXES = (
+    "Link:",
+)
+
+
+def _field_kind(type_str: str) -> str:
+    """Classify an iTop field type string into a broad display category.
+
+    Returns one of: 'enum', 'ref', 'link', 'html', 'text', 'derived', 'value'.
+    """
+    if type_str.startswith(("eEnum", "eMetaEnum")):
+        return "enum"
+    if type_str.startswith("Class:"):
+        return "ref"
+    if type_str.startswith("Link:"):
+        return "link"
+    if type_str == "Value:HTML":
+        return "html"
+    if type_str in ("Value:TEXT",):
+        return "text"
+    for prefix in _DERIVED_TYPE_PREFIXES:
+        if type_str.startswith(prefix):
+            return "derived"
+    return "value"
+
+
+def _format_field_entry(name: str, meta: dict) -> str:
+    """Render a single field entry as an indented multi-line string."""
+    type_str = meta.get("type", "?")
+    lines = ["  - " + name]
+    lines.append("    type: " + type_str)
+
+    kind = _field_kind(type_str)
+
+    if kind == "enum":
+        allowed = meta.get("allowed_values")
+        if isinstance(allowed, dict) and allowed:
+            lines.append("    allowed values:")
+            for k, v in allowed.items():
+                lines.append("      " + repr(k) + ": " + str(v))
+        elif meta.get("values_limited"):
+            lines.append("    values: (limited set -- query iTop for options)")
+
+    elif kind == "ref":
+        target = type_str[len("Class:"):]
+        lines.append("    target class: " + target)
+        if meta.get("values_limited"):
+            lines.append("    values limited: yes")
+
+    elif kind == "link":
+        target = type_str[len("Link:"):]
+        lines.append("    target class: " + target)
+
+    elif kind == "html":
+        lines.append("    format: html")
+
+    elif kind == "text":
+        lines.append("    format: text")
+
+    return "\n".join(lines)
 
 
 async def _fetch_and_cache_ticket(
@@ -282,21 +363,71 @@ def register(mcp, client: ItopClient):
         name="Describe_class"
     )
     async def itop_describe_class(obj_class: str) -> str:
-        """Discover available fields for an iTop class by sampling an existing object."""
-        fields = await client.get_class_fields(obj_class)
+        """Describe the field schema of an iTop class.
 
-        if not fields:
+        Uses company/describe_class to return authoritative field metadata
+        including field type, format (text/html), and allowed enum values.
+        Works for classes with zero instances. Results are cached for the
+        lifetime of the server process.
+        """
+        try:
+            schema = await get_class_schema(obj_class, client)
+        except ValueError as exc:
             return (
-                "Class '" + obj_class + "' has zero instances or does not exist.\n"
-                "Cannot sample fields without an existing object."
+                "Error fetching schema for '" + obj_class + "': " + str(exc)
+            )
+        except Exception as exc:
+            return (
+                "Unexpected error fetching schema for '" + obj_class + "': " + str(exc)
             )
 
-        lines = ["Class " + obj_class + " - known fields (" + str(len(fields)) + "):"]
-        for name in sorted(fields):
-            lines.append("  - " + name)
+        if not schema:
+            return "Class '" + obj_class + "' returned an empty schema."
 
-        lines.append(
-            "\nNote: this is best-effort, not authoritative schema. "
-            "Missing attributes may still be valid."
-        )
+        # Split fields into groups for readability.
+        # Fields in _LEAN_STRIP (e.g. private_log) are excluded from output
+        # to stay consistent with the stripping policy applied to object data.
+        enums = {}
+        refs = {}
+        links = {}
+        html_text = {}
+        derived = {}
+        plain = {}
+
+        for name, meta in schema.items():
+            if name in _LEAN_STRIP:
+                continue
+            kind = _field_kind(meta.get("type", ""))
+            if kind == "enum":
+                enums[name] = meta
+            elif kind == "ref":
+                refs[name] = meta
+            elif kind == "link":
+                links[name] = meta
+            elif kind in ("html", "text"):
+                html_text[name] = meta
+            elif kind == "derived":
+                derived[name] = meta
+            else:
+                plain[name] = meta
+
+        lines = [
+            "Class " + obj_class + " -- " + str(len(schema)) + " fields"
+            + " (" + str(len(_LEAN_STRIP & schema.keys())) + " private, hidden)",
+        ]
+
+        def _section(title: str, fields: dict) -> None:
+            if not fields:
+                return
+            lines.append("\n" + title + " (" + str(len(fields)) + "):")
+            for name in sorted(fields):
+                lines.append(_format_field_entry(name, fields[name]))
+
+        _section("Enum fields", enums)
+        _section("Object reference fields (ExternalKey)", refs)
+        _section("Relation / link-set fields", links)
+        _section("HTML and text fields", html_text)
+        _section("Simple value fields", plain)
+        _section("Derived, system and read-only fields", derived)
+
         return "\n".join(lines)
