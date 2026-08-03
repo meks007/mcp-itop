@@ -350,74 +350,36 @@ class ItopClient:
             fields: Comma-separated field names or '*' / '*+'.
             limit:  Max objects to return.
             page:   Page number for paginated results.
-            full:   When True, skip stripping and return the raw dict.
+            full:   When True, skip field stripping (returns raw payload).
         """
-        if full and fields not in ("*", "*+"):
-            fields = "*"
-
         result = await self.get_raw(cls, key, fields=fields, limit=limit, page=page)
-
         if not full:
             apply_field_strip(result, _LEAN_STRIP)
-
         return result
 
     # ------------------------------------------------------------------
-    # Field discovery
+    # get_class_fields
     # ------------------------------------------------------------------
 
-    async def get_class_fields(self, obj_class: str) -> frozenset[str]:
-        """Return the visible field inventory for obj_class, minus _LEAN_STRIP.
+    async def get_class_fields(self, cls: str) -> set[str]:
+        """Return the set of field names available on a given iTop class.
 
-        Uses the class_cache when warm. On a cold cache, probes iTop with
-        a single core/get call and seeds the cache from the response.
-        Marks the class as non-existent on probe failure so subsequent calls
-        skip the round-trip.
+        Samples a single existing object to discover the field schema.
+        Returns an empty set when no objects exist or the class is unknown.
 
-        The returned set never contains fields in _LEAN_STRIP -- it reflects
-        what callers are permitted to see, not the raw iTop schema.
+        The result is stripped by _LEAN_STRIP so that privacy-sensitive
+        fields are excluded from discovery just as they are from get().
+
+        Args:
+            cls: iTop class name, e.g. 'UserRequest'.
         """
-        from cache import class_cache, seed_field_cache  # noqa: PLC0415
-
-        entry = class_cache.probe_entry(obj_class)
-
-        if entry.fields:
-            logger.debug(
-                "[get_class_fields] cls=%r warm cache (%d fields)",
-                obj_class, len(entry.fields),
-            )
-            return entry.fields - _LEAN_STRIP
-
-        if entry.exists is False:
-            logger.debug("[get_class_fields] cls=%r known non-existent", obj_class)
-            return frozenset()
-
-        logger.debug("[get_class_fields] cls=%r cache cold, probing iTop", obj_class)
-        result = await self.get_raw(
-            obj_class,
-            "SELECT " + obj_class,
-            fields="*",
-            limit=1,
-        )
-        if result.get("code", -1) != 0:
-            logger.debug(
-                "[get_class_fields] cls=%r probe failed code=%r msg=%r",
-                obj_class, result.get("code"), result.get("message"),
-            )
-            entry.exists = False
-            return frozenset()
-
+        result = await self.get(cls, "SELECT " + cls, fields="*", limit=1)
         objects = result.get("objects") or {}
         if not objects:
-            logger.debug("[get_class_fields] cls=%r probe returned no objects", obj_class)
-            entry.exists = False
-            return frozenset()
-
-        for obj_data in objects.values():
-            seed_field_cache(obj_class, obj_data.get("fields") or {})
-            break
-
-        return entry.fields - _LEAN_STRIP
+            return set()
+        first = next(iter(objects.values()))
+        fields_dict = first.get("fields") or {}
+        return set(fields_dict.keys())
 
     # ------------------------------------------------------------------
     # core/create
@@ -448,7 +410,7 @@ class ItopClient:
         cls: str,
         key: str | int,
         fields: dict,
-        output_fields: str = "id, friendlyname",
+        output_fields: str = "ref, friendlyname, status",
         comment: str = "",
     ) -> dict:
         """Update fields on an existing iTop object via core/update."""
@@ -472,21 +434,13 @@ class ItopClient:
         comment: str = "",
         simulate: bool = True,
     ) -> dict:
-        """Delete an iTop object via core/delete.
-
-        Args:
-            cls:      iTop class name, e.g. 'UserRequest'.
-            key:      Numeric ID or OQL string identifying the object(s).
-            comment:  Audit comment recorded on the operation.
-            simulate: When True (default) the deletion is only simulated;
-                      no data is removed. Set to False only for real deletions.
-        """
+        """Delete an iTop object via core/delete (simulation mode by default)."""
         return await self.request({
             "operation": "core/delete",
             "class": cls,
             "key": key,
-            "simulate": simulate,
             "comment": comment,
+            "simulate": simulate,
         })
 
     # ------------------------------------------------------------------
@@ -512,6 +466,40 @@ class ItopClient:
             "output_fields": output_fields,
             "comment": comment,
         })
+
+    # ------------------------------------------------------------------
+    # core/enumerate_transitions
+    # ------------------------------------------------------------------
+
+    async def enumerate_transitions(self, cls: str) -> dict:
+        """Fetch the full state machine and field map for an iTop class.
+
+        Calls core/enumerate_transitions and returns the parsed response.
+        The response contains two top-level keys:
+          - fields:      global field definitions (type, enum values)
+          - transitions: per-state map of required fields and reachable targets
+
+        The caller is responsible for caching the result.
+
+        Args:
+            cls: iTop class name, e.g. 'UserRequest'.
+
+        Returns:
+            dict with keys 'fields' and 'transitions'.
+
+        Raises:
+            ValueError: if the iTop response signals a non-zero error code.
+        """
+        response = await self.request({
+            "operation": "core/enumerate_transitions",
+            "class": cls,
+        })
+        if response.get("code", 0) != 0:
+            raise ValueError(
+                "enumerate_transitions failed for " + cls + ": "
+                + response.get("message", "unknown error")
+            )
+        return response
 
     # ------------------------------------------------------------------
     # core/get_related
