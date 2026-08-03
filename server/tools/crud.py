@@ -185,6 +185,11 @@ def register(mcp, client: ItopClient):
                 "Available fields are * or: " + ", ".join(visible)
             )
 
+        # Preserve the originally requested class before resolve_key overwrites
+        # obj_class with the concrete resolved class. The original value is
+        # passed to format_and_cache so it can warn the agent when the returned
+        # finalclass differs (e.g. agent passed "Ticket", iTop returned "UserRequest").
+        requested_class = obj_class
         obj_class, resolved_key = await resolve_key(obj_class, key_or_ref)
 
         result = await client.get(
@@ -227,7 +232,7 @@ def register(mcp, client: ItopClient):
                         + " These images are an inherent part of the ticket."
                     )
 
-        return format_and_cache(result, annotations=annotations or None)
+        return format_and_cache(result, annotations=annotations or None, requested_class=requested_class)
 
     @mcp.tool(
         name="Create_object"
