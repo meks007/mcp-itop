@@ -1,48 +1,44 @@
 """
 State transition tools: Describe_state_change, Apply_stimulus_to_object.
 
-Replaces the Apply_stimulus_to_object tool previously registered in crud.py.
-
 Design
 ------
 Both tools share a common lookup pattern:
 
   1. Fetch the normalised transition schema for obj_class via
      get_transition_map() (cached per class, TTL from TRANSITION_CACHE_TTL).
-     The schema contains only user-action and selected internal stimuli, and
-     only fields with a required option (MANDATORY, MUSTPROMPT, MUSTCHANGE).
+     The schema contains every transition returned by the REST API and only
+     fields with a required option (MANDATORY, MUSTPROMPT, MUSTCHANGE).
 
   2. Optionally read the current status of the ticket via a core/get call
      (only when obj_id is provided -- object mode).
 
-  3. In schema mode (no obj_id), traverse the graph with DFS to find:
-       a. Complete paths: reach target_state through user actions.
-       b. Partial paths: reach a dead end before target_state because no
-          further user-action or exposed internal stimulus is available
-          (e.g. the ticket is now waiting for an internal system event).
+  3. In schema mode (no obj_id), first compute which states can reach the
+     requested target_state via reverse-reachability (BFS from target
+     walking edges backwards). Then run a forward DFS restricted to that
+     reachable set, so the path finder never wanders into branches that
+     cannot lead to target_state (e.g. it will not follow resolved->closed
+     when searching for approved).
 
   4. Consolidate required fields PER PATH from every visited state, not
-     just the target state. Fields from each state along the path are merged;
-     duplicate field names accumulate their option flags.
+     just the target state. Fields from each state are merged; duplicate
+     field names accumulate their option flags.
 
   5. In object mode (obj_id provided), read the current state, verify that
-     target_state is directly reachable via a user-action stimulus, and return
-     only the fields required for that single immediate transition.
+     target_state is directly reachable via a user-action stimulus, and
+     return only the fields required for that single immediate transition.
 
 Stimulus classification
 -----------------------
   StimulusUserAction  -- agent can invoke via Apply_stimulus_to_object.
   StimulusInternal    -- system-driven; shown in path output as [internal]
                          but cannot be executed by Apply_stimulus_to_object.
-                         Only included when listed in EXPOSED_INTERNAL_STIMULI
-                         (see cache.py).
 
 Path modes (schema mode only)
 ------------------------------
-  "usual" (default) -- up to MAX_USUAL_PATHS complete paths, scored and
-                       deduplicated by agent-visible stimulus sequence.
-                       Remaining slots filled with partial paths.
-  "all"             -- all complete paths then all partial paths, no limit.
+  "usual" (default) -- up to MAX_USUAL_PATHS paths, scored and deduplicated
+                       by agent-visible (non-internal) stimulus sequence.
+  "all"             -- all paths, no limit.
 """
 
 from __future__ import annotations
@@ -54,9 +50,6 @@ from helpers import resolve_key, format_and_cache, ensure_ref_field
 
 MAX_USUAL_PATHS = 10
 
-# Required option flags used when consolidating path fields.
-# Mirrors REQUIRED_FIELD_OPTIONS in cache.py; duplicated here so transitions.py
-# has no import dependency on the cache constants.
 _REQUIRED_OPTIONS: frozenset[str] = frozenset({
     "OPT_ATT_MANDATORY",
     "OPT_ATT_MUSTPROMPT",
@@ -142,15 +135,9 @@ def _format_path_fields(
     """Return required fields consolidated across every state visited by path.
 
     Visits the start state and every destination state in order. For each
-    state, collects fields that carry at least one required option flag
-    (MANDATORY, MUSTPROMPT, MUSTCHANGE). Duplicate field names accumulate
-    their option flags across states (e.g. team_id required in both 'new'
-    and 'assigned' merges into a single entry with combined flags).
-
-    Fields without any required option are excluded (they were already
-    stripped by cache.py normalisation, but this guard is kept for safety).
+    state, collects fields that carry at least one required option flag.
+    Duplicate field names accumulate their option flags across states.
     """
-    required_options = _REQUIRED_OPTIONS
     state_names = [start] + [to_state for _, _, to_state in path]
     collected: dict[str, set[str]] = {}
 
@@ -164,7 +151,7 @@ def _format_path_fields(
                 if isinstance(field_opts, dict)
                 else []
             )
-            relevant = set(options) & required_options
+            relevant = set(options) & _REQUIRED_OPTIONS
             if relevant:
                 collected.setdefault(field_name, set()).update(relevant)
 
@@ -214,6 +201,41 @@ def _format_state_fields(state: str, transitions: dict, fields_def: dict) -> lis
 
 
 # ---------------------------------------------------------------------------
+# Reverse reachability
+# ---------------------------------------------------------------------------
+
+def _states_reaching_target(transitions: dict, target: str) -> set[str]:
+    """Return every state that has at least one path leading to target.
+
+    Builds a reverse adjacency map (to_state -> set of from_states) and
+    walks backwards from target via BFS. Only states in the returned set
+    can possibly reach target through the exposed lifecycle graph.
+
+    This is used to prune the forward DFS so that branches leading to
+    genuine terminal states (e.g. closed) are never followed when they
+    cannot continue toward the requested target_state.
+    """
+    predecessors: dict[str, set[str]] = {}
+    for from_state, state_map in transitions.items():
+        targets = state_map.get("targets", {})
+        if not isinstance(targets, dict):
+            continue
+        for to_state in targets:
+            predecessors.setdefault(to_state, set()).add(from_state)
+
+    reachable: set[str] = {target}
+    pending: list[str] = [target]
+    while pending:
+        current = pending.pop()
+        for prev in predecessors.get(current, set()):
+            if prev not in reachable:
+                reachable.add(prev)
+                pending.append(prev)
+
+    return reachable
+
+
+# ---------------------------------------------------------------------------
 # Path finding
 # ---------------------------------------------------------------------------
 
@@ -221,43 +243,31 @@ def _find_paths(
     transitions: dict,
     start: str,
     target: str,
-) -> tuple[
-    list[list[tuple[str, str, str]]],
-    list[list[tuple[str, str, str]]],
-]:
-    """Find complete and partial paths from start toward target.
+) -> list[list[tuple[str, str, str]]]:
+    """Find all non-cyclic paths from start to target.
 
-    A complete path reaches target_state via one or more user-action or
-    exposed internal stimulus edges without revisiting any state.
+    Before traversal, computes the reverse-reachable set for target so that
+    the DFS never follows edges into states that cannot lead to target.
+    This eliminates spurious branches such as resolved->closed when searching
+    for a state that closed cannot reach.
 
-    A partial path ends at a state that has no further outgoing edges in
-    the normalised schema (i.e. only system-driven edges were available
-    and none are in EXPOSED_INTERNAL_STIMULI). The partial path has not
-    yet reached target_state.
-
-    Returns:
-        (complete, partial) -- each a list of paths.
-        Each path is a list of (from_state, stimulus, to_state) steps.
+    Returns a list of complete paths. Each path is a list of steps:
+        (from_state, stimulus, to_state)
     """
-    complete: list[list[tuple[str, str, str]]] = []
-    partial: list[list[tuple[str, str, str]]] = []
+    reachable = _states_reaching_target(transitions, target)
+
+    results: list[list[tuple[str, str, str]]] = []
 
     def dfs(
         current: str,
         path: list[tuple[str, str, str]],
         visited: set[str],
     ) -> None:
-        targets = transitions.get(current, {}).get("targets", {})
-
-        if not targets:
-            # Dead end before reaching target -- record as partial if we moved
-            if path:
-                partial.append(path)
-            return
-
-        advanced = False
-        for next_state, stim_map in targets.items():
+        state_targets = transitions.get(current, {}).get("targets", {})
+        for next_state, stim_map in state_targets.items():
             if next_state in visited:
+                continue
+            if next_state not in reachable:
                 continue
             if not isinstance(stim_map, dict) or not stim_map:
                 continue
@@ -266,19 +276,13 @@ def _find_paths(
             step = (current, stimulus, next_state)
             next_path = path + [step]
 
-            advanced = True
             if next_state == target:
-                complete.append(next_path)
+                results.append(next_path)
             else:
                 dfs(next_state, next_path, visited | {next_state})
 
-        # If every outgoing edge was to an already-visited state and we have
-        # not reached target, treat current position as a dead end.
-        if not advanced and path:
-            partial.append(path)
-
     dfs(start, [], {start})
-    return complete, partial
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +296,7 @@ def _external_signature(
     """Return the agent-visible (non-internal) stimulus sequence for a path.
 
     Used to deduplicate paths that share the same user-action sequence but
-    differ only in which system-driven side steps are included.
+    differ only in which internal edges are traversed along the way.
     """
     return tuple(
         stimulus
@@ -326,7 +330,6 @@ def _select_paths(
     """Return at most limit deduplicated paths, best-scored first.
 
     Deduplication key: (start_state, external_signature).
-    Within the same signature the shortest / fewest-internal-step path wins.
     """
     sorted_paths = sorted(
         paths,
@@ -372,16 +375,15 @@ def register(mcp, client: ItopClient) -> None:
 
         WITHOUT obj_id (schema mode):
           Traverses the class lifecycle graph from current_state (or all
-          states when current_state is omitted) and returns:
-            - Complete paths: reach target_state through user actions.
-            - Partial paths: reach a dead end before target_state because no
-              further user action is available at that point (e.g. the ticket
-              must wait for a system event such as approval).
-          Each path is accompanied by its own consolidated list of required
+          states when current_state is omitted). Only paths that can actually
+          reach target_state are returned; branches leading to unrelated
+          terminal states are pruned before traversal.
+          Each path is accompanied by its consolidated list of required
           fields, merged from every state visited along that path.
+          Internal (system-driven) steps are shown with [internal] label.
           path_mode controls the output volume:
-            "usual" (default) -- up to 10 paths (complete first, then partial).
-            "all"             -- all complete paths then all partial paths.
+            "usual" (default) -- up to 10 deduplicated paths.
+            "all"             -- all paths, no limit.
 
         WITH obj_id (object mode):
           Reads the current state of the specific object, verifies that
@@ -397,11 +399,10 @@ def register(mcp, client: ItopClient) -> None:
           path_mode     - "usual" (default) or "all"; ignored when obj_id set
 
         Returns:
-          - Reachable paths from current to target state (schema mode), or
-            single direct transition (object mode)
-          - Required fields consolidated per path (schema) or per target (object)
-          - [internal] label on system-driven edges
-          - Hint to provide obj_id when the result list is capped
+          - Reachable paths with per-path required fields (schema mode), or
+            single direct transition with required fields (object mode).
+          - [internal] label on system-driven edges.
+          - Hint to provide obj_id when the result list is capped.
         """
         if path_mode not in {"usual", "all"}:
             return "Error: path_mode must be \"usual\" or \"all\"."
@@ -427,13 +428,17 @@ def register(mcp, client: ItopClient) -> None:
                 valid = ", ".join(reachable.keys()) if reachable else "none"
                 return (
                     "Error: target_state '" + target_state + "' is not directly reachable "
-                    "from current state '" + cur + "' via a user action.\n"
+                    "from current state '" + cur + "' via an exposed transition.\n"
                     "Directly reachable states from '" + cur + "': " + valid
                 )
 
             stim_map = reachable[target_state]
             stimulus = list(stim_map.keys())[0]
-            stype = stim_map[stimulus].get("type", "") if isinstance(stim_map[stimulus], dict) else ""
+            stype = (
+                stim_map[stimulus].get("type", "")
+                if isinstance(stim_map[stimulus], dict)
+                else ""
+            )
 
             if stype != "StimulusUserAction":
                 return (
@@ -487,17 +492,14 @@ def register(mcp, client: ItopClient) -> None:
                 "Known states: " + ", ".join(all_states)
             )
 
-        all_complete: list[tuple[str, list[tuple[str, str, str]]]] = []
-        all_partial: list[tuple[str, list[tuple[str, str, str]]]] = []
-
+        all_paths: list[tuple[str, list[tuple[str, str, str]]]] = []
         for start in start_states:
             if start == target_state:
                 continue
-            c, p = _find_paths(transitions, start, target_state)
-            all_complete.extend((start, path) for path in c)
-            all_partial.extend((start, path) for path in p)
+            for path in _find_paths(transitions, start, target_state):
+                all_paths.append((start, path))
 
-        if not all_complete and not all_partial:
+        if not all_paths:
             return (
                 "No paths found to target_state '" + target_state + "'"
                 + (" from '" + current_state + "'" if current_state else "")
@@ -505,56 +507,30 @@ def register(mcp, client: ItopClient) -> None:
             )
 
         if path_mode == "all":
-            shown_complete = all_complete
-            shown_partial = all_partial
+            shown_paths = all_paths
         else:
-            shown_complete = _select_paths(all_complete, transitions, MAX_USUAL_PATHS)
-            remaining = MAX_USUAL_PATHS - len(shown_complete)
-            shown_partial = (
-                _select_paths(all_partial, transitions, remaining)
-                if remaining > 0
-                else []
-            )
+            shown_paths = _select_paths(all_paths, transitions, MAX_USUAL_PATHS)
 
-        total_complete = len(all_complete)
-        total_partial = len(all_partial)
-        shown_total = len(shown_complete) + len(shown_partial)
-        grand_total = total_complete + total_partial
+        total = len(all_paths)
+        shown = len(shown_paths)
 
-        prefix = (
+        lines = [
             "Paths to '" + target_state + "'"
             + (" from '" + current_state + "'" if current_state else "")
-            + " (" + str(shown_total) + " of " + str(grand_total) + " shown):"
-        )
-        lines = [prefix, ""]
+            + " (" + str(shown) + " of " + str(total) + " shown):",
+            "",
+        ]
 
-        path_num = 1
-        for start, path in shown_complete:
-            lines.append("Path " + str(path_num) + ": " + _format_path(path, transitions))
+        for i, (start, path) in enumerate(shown_paths, 1):
+            lines.append("Path " + str(i) + ": " + _format_path(path, transitions))
             lines.append("Required fields along this path:")
             lines += _format_path_fields(start, path, transitions, fields_def)
             lines.append("")
-            path_num += 1
 
-        for start, path in shown_partial:
-            terminal = path[-1][2] if path else start
+        if path_mode == "usual" and shown < total:
             lines.append(
-                "Partial path " + str(path_num) + ": "
-                + _format_path(path, transitions)
-            )
-            lines.append(
-                "Stops at '" + terminal
-                + "': no further transition is available in the exposed lifecycle map."
-            )
-            lines.append("Required fields along this path:")
-            lines += _format_path_fields(start, path, transitions, fields_def)
-            lines.append("")
-            path_num += 1
-
-        if path_mode == "usual" and shown_total < grand_total:
-            lines.append(
-                "Showing " + str(shown_total) + " representative paths out of "
-                + str(grand_total) + " found. Strongly recommended: provide obj_id "
+                "Showing " + str(shown) + " representative paths out of "
+                + str(total) + " found. Strongly recommended: provide obj_id "
                 "for the valid next transition and required fields."
             )
 
@@ -577,13 +553,13 @@ def register(mcp, client: ItopClient) -> None:
         from the current state of the object.
 
         Parameters:
-          obj_class    - iTop class name, e.g. UserRequest
-          obj_id       - numeric object ID or ticket ref (e.g. R-001234)
-          target_state - desired target state (e.g. assigned, waiting_for_approval)
-          field_lines  - one attribute per line in Key=Value format, e.g.:
-                           agent_id=15
-                           team_id=7
-                           solution=<p>Fixed by restarting the service.</p>
+          obj_class     - iTop class name, e.g. UserRequest
+          obj_id        - numeric object ID or ticket ref (e.g. R-001234)
+          target_state  - desired target state (e.g. assigned, waiting_for_approval)
+          field_lines   - one attribute per line in Key=Value format, e.g.:
+                            agent_id=15
+                            team_id=7
+                            solution=<p>Fixed by restarting the service.</p>
           output_fields - comma-separated fields to return on success
                           (default: ref, friendlyname, status)
 
@@ -598,7 +574,6 @@ def register(mcp, client: ItopClient) -> None:
         """
         schema = await get_transition_map(obj_class, client)
         transitions = schema.get("transitions", {})
-        fields_def = schema.get("fields", {})
 
         obj_class, resolved = await resolve_key(obj_class, obj_id)
         result = await client.get(obj_class, resolved, fields="status")
@@ -619,7 +594,11 @@ def register(mcp, client: ItopClient) -> None:
 
         stim_map = reachable[target_state]
         stimulus = list(stim_map.keys())[0]
-        stype = stim_map[stimulus].get("type", "") if isinstance(stim_map[stimulus], dict) else ""
+        stype = (
+            stim_map[stimulus].get("type", "")
+            if isinstance(stim_map[stimulus], dict)
+            else ""
+        )
 
         if stype != "StimulusUserAction":
             return (
