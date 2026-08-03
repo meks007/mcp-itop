@@ -19,9 +19,10 @@ Module layout:
   tools/
     analytics.py        - SLA, workload, idle agents, service/caller quality
     kb.py               - knowledge base search and retrieval
-    crud.py             - generic CRUD + stimulus + impact tools
+    crud.py             - generic CRUD + impact tools
     comments.py         - ticket log read/write
     attachments.py      - image and file attachment tools + static image resource
+    transitions.py      - state transition tools (Describe_state_change, Apply_stimulus_to_object)
 
 Framework: fastmcp (PrefectHQ) >= 2.11.0
 
@@ -54,6 +55,7 @@ import tools.attachments as _attachments
 import tools.comments as _comments
 import tools.crud as _crud
 import tools.kb as _kb
+import tools.transitions as _transitions
 
 # ---------------------------------------------------------------------------
 # Server config
@@ -94,6 +96,7 @@ _attachments.register(mcp, client)
 _kb.register(mcp, client)
 _crud.register(mcp, client)
 _comments.register(mcp, client)
+_transitions.register(mcp, client)
 
 # ---------------------------------------------------------------------------
 # ASGI app
