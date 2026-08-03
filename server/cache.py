@@ -18,6 +18,8 @@ Public API
 class_cache.probe_entry(cls)          -> ClassEntry
 class_cache.get_fields(cls)           -> frozenset[str]
 class_cache.seed(cls, fields)         -> None
+class_cache.seed_schema(cls, schema)  -> None
+class_cache.get_schema(cls)           -> dict | None
 class_cache.get_meta(cls, key, ...)   -> Any
 class_cache.set_meta(cls, key, value) -> None
 
@@ -35,6 +37,9 @@ await token_cache.evict_stale()                   -> int
 
 # Transition map (TTL from TRANSITION_CACHE_TTL env var, default 3600 s)
 await get_transition_map(obj_class, client)       -> dict
+
+# Class schema (company/describe_class result, lifetime of process)
+await get_class_schema(obj_class, client)         -> dict
 
 Backward-compatible aliases keep existing callers working unchanged:
   registry_add_entry, registry_get_meta, registry_set_meta,
@@ -193,6 +198,7 @@ class TTLCache(Cache[K, V]):
 class ClassEntry:
     exists: bool | None = None       # None = not yet probed
     fields: frozenset = field(default_factory=frozenset)
+    schema: dict = field(default_factory=dict)  # raw describe_class payload
     meta: dict = field(default_factory=dict)
 
 
@@ -276,6 +282,44 @@ class ClassMetadataCache(Cache[str, ClassEntry]):
                 "[class_cache] seed cls=%r +%d new fields (total=%d)",
                 cls, len(new_fields), len(entry.fields),
             )
+
+    def seed_schema(self, cls: str, schema: dict) -> None:
+        """Store the full describe_class field schema for cls.
+
+        schema is the dict returned under the 'fields' key of the
+        company/describe_class REST response.  The field name set is
+        derived from the schema keys and unioned into entry.fields so
+        that get_fields() stays consistent.
+
+        NOTE: must never call logger.debug() -- same recursion risk as probe_entry.
+        """
+        entry = self.probe_entry(cls)
+        if not schema:
+            logger.warning("[class_cache] seed_schema called for cls=%r with empty schema", cls)
+            return
+        entry.schema = schema
+        incoming = frozenset(schema.keys())
+        entry.fields = entry.fields | incoming
+        entry.exists = True
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[class_cache] seed_schema cls=%r fields=%d",
+                cls, len(entry.fields),
+            )
+
+    def get_schema(self, cls: str) -> dict | None:
+        """Return the cached describe_class schema for cls, or None if not seeded."""
+        entry = self._store.get(cls)
+        if entry is None or not entry.schema:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("[class_cache] get_schema miss cls=%r", cls)
+            return None
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[class_cache] get_schema hit cls=%r fields=%d",
+                cls, len(entry.schema),
+            )
+        return entry.schema
 
     def get_meta(self, cls: str, key: str, default: Any = None) -> Any:
         """Read arbitrary per-class metadata."""
@@ -616,3 +660,77 @@ async def get_transition_map(obj_class: str, client) -> dict:
         len(normalised["fields"]),
     )
     return normalised
+
+
+# ---------------------------------------------------------------------------
+# Class schema cache (company/describe_class)
+# ---------------------------------------------------------------------------
+# Stores the full field schema per iTop class for the lifetime of the process.
+# No TTL: iTop class definitions do not change at runtime without a restart.
+# A per-class asyncio.Lock prevents duplicate REST calls on parallel access.
+#
+# Key:   obj_class string, e.g. "UserRequest"
+# Value: raw fields dict from the describe_class REST response
+
+_schema_locks: dict[str, asyncio.Lock] = {}
+_schema_lock_guard = asyncio.Lock()
+
+
+async def get_class_schema(obj_class: str, client) -> dict:
+    """Return the full field schema for obj_class from company/describe_class.
+
+    On cache hit, returns the stored schema dict immediately.
+    On cache miss, acquires a per-class lock, calls company/describe_class,
+    validates the response, seeds the cache, and returns the schema.
+
+    The schema dict maps field name to a metadata dict containing at least
+    'type', and optionally 'allowed_values' and 'values_limited'.
+
+    Args:
+        obj_class: iTop class name, e.g. "UserRequest".
+        client:    ItopClient instance -- used only on cache miss.
+
+    Returns:
+        dict mapping field name -> field metadata dict.
+
+    Raises:
+        ValueError: if the iTop response is missing or malformed.
+    """
+    cached = class_cache.get_schema(obj_class)
+    if cached is not None:
+        return cached
+
+    async with _schema_lock_guard:
+        if obj_class not in _schema_locks:
+            _schema_locks[obj_class] = asyncio.Lock()
+        cls_lock = _schema_locks[obj_class]
+
+    async with cls_lock:
+        # Re-check after acquiring the per-class lock (another coroutine
+        # may have populated the cache while we were waiting).
+        cached = class_cache.get_schema(obj_class)
+        if cached is not None:
+            return cached
+
+        logger.debug(
+            "[class_schema] miss cls=%r -- calling company/describe_class", obj_class
+        )
+        response = await client.describe_class(obj_class)
+
+        # The REST envelope wraps the payload under 'result'; fall back to
+        # the top-level response dict for installations that differ.
+        payload = response.get("result") or response
+        schema = payload.get("fields") if isinstance(payload, dict) else None
+
+        if not isinstance(schema, dict) or not schema:
+            raise ValueError(
+                "describe_class returned no valid fields for " + obj_class
+                + " -- response: " + repr(response)
+            )
+
+        class_cache.seed_schema(obj_class, schema)
+        logger.debug(
+            "[class_schema] cached schema cls=%r fields=%d",
+            obj_class, len(schema),
+        )
+        return schema
