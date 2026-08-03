@@ -468,24 +468,22 @@ class ItopClient:
         })
 
     # ------------------------------------------------------------------
-    # core/enumerate_transitions
+    # company/enumerate_transitions
     # ------------------------------------------------------------------
 
     async def enumerate_transitions(self, cls: str) -> dict:
         """Fetch the full state machine and field map for an iTop class.
 
-        Calls core/enumerate_transitions and returns the parsed response.
-        The response contains two top-level keys:
-          - fields:      global field definitions (type, enum values)
-          - transitions: per-state map of required fields and reachable targets
-
-        The caller is responsible for caching the result.
+        Calls company/enumerate_transitions and returns the full iTop
+        response dict unchanged, consistent with all other client methods.
+        Callers are responsible for extracting the relevant payload from
+        response["result"] and for caching.
 
         Args:
             cls: iTop class name, e.g. 'UserRequest'.
 
         Returns:
-            dict with keys 'fields' and 'transitions'.
+            Full iTop response dict (code, message, result).
 
         Raises:
             ValueError: if the iTop response signals a non-zero error code.
@@ -494,7 +492,7 @@ class ItopClient:
             "operation": "company/enumerate_transitions",
             "class": cls,
         })
-        if response.get("code", 0) != 0:
+        if response.get("code", -1) != 0:
             raise ValueError(
                 "enumerate_transitions failed for " + cls + ": "
                 + response.get("message", "unknown error")
