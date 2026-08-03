@@ -86,7 +86,7 @@ def _build_hint(ftype: str, fvalues: dict) -> str:
     """Return a one-line human-readable hint for a field based on its type."""
     if ftype.startswith("Class:"):
         cls = ftype[len("Class:"):]
-        return "numeric ID -- use Load_object(obj_class=" + cls + ") to find the right ID"
+        return "ID -- load " + cls + " only if unknown"
     if ftype == "Value:HTML":
         return "HTML text -- e.g. <p>Your text here</p>"
     if ftype == "Value:TEXT":
