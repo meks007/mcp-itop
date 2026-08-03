@@ -48,7 +48,7 @@ import asyncio
 import time
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Generic, Iterator, TypeVar
+from typing import Any, Generic, TypeVar
 
 from config import RESOLVE_KEY_CACHE_TTL, TOKEN_CACHE_TTL
 
@@ -68,18 +68,15 @@ V = TypeVar("V")
 # Only these three option flags are meaningful for MCP field prompting.
 # Every other option (READONLY, HIDDEN, etc.) is stripped before caching
 # so downstream tools never need to filter them again.
+#
+# The REST API is the single authority on which transitions are exposed.
+# All transitions returned by REST are preserved in the cached schema
+# regardless of whether they are StimulusUserAction or StimulusInternal.
 REQUIRED_FIELD_OPTIONS: frozenset[str] = frozenset({
     "OPT_ATT_MANDATORY",
     "OPT_ATT_MUSTPROMPT",
     "OPT_ATT_MUSTCHANGE",
 })
-
-# Internal stimuli listed here are kept in the cached schema so the path
-# finder can traverse them and label them as system-driven steps.
-# All other StimulusInternal edges are removed.
-# Extend this set when selective internal stimuli are re-added to the
-# REST response (e.g. "ev_approve" to show approval flow continuations).
-EXPOSED_INTERNAL_STIMULI: frozenset[str] = frozenset()
 
 
 # ---------------------------------------------------------------------------
@@ -368,21 +365,16 @@ class TokenValidationCache(TTLCache[str, TokenEntry]):
           1. Fast path: non-expired entry found -- slide TTL, return valid.
           2. Slow path: acquire per-key lock, re-check, then call probe_fn.
         """
-        # Fast path -- no lock needed for a plain dict read.
-        # TTLCache.get() handles sliding reset and logs hit/miss + ttl_remaining.
         entry = self.get(token_hash)
         if entry is not None:
             return entry.valid
 
-        # Slow path: ensure per-key lock exists, then probe.
         async with self._lock_guard:
             if token_hash not in self._locks:
                 self._locks[token_hash] = asyncio.Lock()
             token_lock = self._locks[token_hash]
 
         async with token_lock:
-            # Re-check after acquiring the lock; another coroutine may have
-            # already completed the probe while we were waiting.
             entry = self.get(token_hash)
             if entry is not None:
                 return entry.valid
@@ -401,9 +393,6 @@ class TokenValidationCache(TTLCache[str, TokenEntry]):
 
     async def evict_by_token(self, token_hash: str) -> None:
         """Remove the cache entry and its lock for the given token hash.
-
-        token_hash must be the SHA-256 hex digest of the raw bearer token,
-        computed by auth.get_bearer_token_hash().
 
         Called by auth.evict_token() whenever iTop returns code==1 (UNAUTH).
         Safe to call when the hash is not cached (no-op).
@@ -445,9 +434,6 @@ token_cache = TokenValidationCache(ttl=TOKEN_CACHE_TTL, sliding=True)
 # ---------------------------------------------------------------------------
 # Backward-compatible aliases
 # ---------------------------------------------------------------------------
-# These names were the original public API of cache.py. Existing callers
-# continue to work without modification until they are updated to use the
-# class methods directly.
 
 def registry_add_entry(cls: str) -> ClassEntry:
     return class_cache.probe_entry(cls)
@@ -487,15 +473,14 @@ def cache_cleanup() -> None:
 # ---------------------------------------------------------------------------
 # Transition map cache
 # ---------------------------------------------------------------------------
-# Stores the normalised transition schema (fields + transitions) per iTop
-# class. The full iTop REST envelope (code, message, result) is NOT stored --
-# only the inner "result" dict is cached after normalisation.
+# Stores the normalised transition schema (fields + transitions) per iTop class.
 #
 # Normalisation (applied once on every cache miss):
 #   - Fields: only options in REQUIRED_FIELD_OPTIONS are retained per field.
-#             Fields with no remaining options are dropped entirely.
-#   - Targets: StimulusInternal edges are removed unless the stimulus name
-#              appears in EXPOSED_INTERNAL_STIMULI.
+#             Fields with no remaining required option are dropped entirely.
+#   - Targets: ALL transitions returned by REST are preserved. The REST API
+#              is the single authority on which stimuli are exposed. The MCP
+#              backend does not filter by StimulusUserAction or StimulusInternal.
 #
 # Key:   obj_class string, e.g. "UserRequest"
 # Value: normalised dict with keys "fields" and "transitions"
@@ -512,18 +497,13 @@ _transition_cache: TTLCache = TTLCache(
 def _normalise_transition_schema(schema: dict) -> dict:
     """Return a normalised copy of a raw enumerate_transitions schema.
 
-    Two passes:
+    Field normalisation (applied to top-level "fields" and per-state "fields"):
+      - Strip any option not in REQUIRED_FIELD_OPTIONS.
+      - Drop the field entirely when no required option remains.
 
-    1. Fields normalisation (applied to both top-level "fields" and per-state
-       "fields" entries):
-         - Strip any option not in REQUIRED_FIELD_OPTIONS.
-         - Drop the field entirely when no required option remains.
-
-    2. Targets normalisation (applied to every state's "targets" map):
-         - Keep StimulusUserAction edges unconditionally.
-         - Keep StimulusInternal edges only when the stimulus name is listed
-           in EXPOSED_INTERNAL_STIMULI.
-         - Remove all other edges.
+    Target normalisation:
+      - Preserve every valid target/stimulus entry returned by REST.
+      - No filtering by stimulus type; the REST API controls exposure.
 
     The input dict is not mutated; a new dict is returned.
     """
@@ -552,26 +532,13 @@ def _normalise_transition_schema(schema: dict) -> dict:
             return {}
         result = {}
         for next_state, stim_map in raw_targets.items():
-            if not isinstance(stim_map, dict):
+            if not isinstance(stim_map, dict) or not stim_map:
                 continue
-            kept_stims = {}
-            for stimulus, stim_info in stim_map.items():
-                stype = stim_info.get("type", "") if isinstance(stim_info, dict) else ""
-                if stype == "StimulusUserAction":
-                    kept_stims[stimulus] = stim_info
-                elif (
-                    stype == "StimulusInternal"
-                    and stimulus in EXPOSED_INTERNAL_STIMULI
-                ):
-                    kept_stims[stimulus] = stim_info
-            if kept_stims:
-                result[next_state] = kept_stims
+            result[next_state] = dict(stim_map)
         return result
 
-    # Normalise top-level fields map
     normalised_fields = _normalise_fields(schema.get("fields", {}))
 
-    # Normalise per-state fields and targets
     raw_transitions = schema.get("transitions", {})
     normalised_transitions = {}
     for state_name, state_map in raw_transitions.items():
@@ -594,10 +561,6 @@ async def get_transition_map(obj_class: str, client) -> dict:
     Fetches from iTop on cache miss, normalises the payload, then caches
     the result. Callers always receive the normalised schema dict (keys
     "fields" and "transitions") -- never the raw REST envelope.
-
-    Normalisation strips non-required field options and removes internal
-    stimulus edges that are not listed in EXPOSED_INTERNAL_STIMULI. See
-    _normalise_transition_schema() for full details.
 
     TTL is controlled by the TRANSITION_CACHE_TTL env var (default 3600 s).
     The cache is in-process only; restart the server to force a reload.
