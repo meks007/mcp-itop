@@ -46,6 +46,7 @@ Path modes (schema mode only)
 from __future__ import annotations
 
 import json as _json
+import re as _re
 
 from client import ItopClient
 from cache import get_transition_map
@@ -65,24 +66,31 @@ _ID_FIELDS_NOTE = "Note: for ID fields, load the referenced object only if the I
 # Values that iTop uses for unset/empty fields (foreign keys default to 0).
 _EMPTY_VALUES: frozenset[str] = frozenset({"", "0", "null", "None"})
 
+# Regex that matches "key = value" or "key: value" with optional whitespace.
+# Only the first delimiter occurrence is used; the value may contain
+# further '=' or ':' characters without being split.
+_KV_RE = _re.compile(r"^([^=:\n]+?)\s*[=:]\s*(.*)", _re.DOTALL)
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
 def _parse_field_lines(field_lines: str) -> dict[str, str]:
-    """Parse Key=Value lines into a plain dict.
+    """Parse Key=Value or Key: Value lines into a plain dict.
 
     Rules:
       - Blank lines are ignored.
       - Lines starting with '#' are treated as comments and ignored.
-      - Only the first '=' is used as the delimiter; values may contain '='.
-      - Whitespace around the key is stripped; value whitespace is preserved.
+      - Both '=' and ':' are accepted as key-value delimiters; only the
+        first occurrence is used so values may contain either character.
+      - Whitespace around key and delimiter is stripped; trailing whitespace
+        is stripped from the value.
 
     Fallback: if the input starts with '{' it is assumed to be a JSON object
-    and parsed directly. This handles agents that pass JSON instead of
-    Key=Value text despite the docstring instruction. Each value is cast to
-    str so the returned type is always dict[str, str].
+    and parsed directly. This handles agents that pass JSON despite the
+    docstring instruction. Each value is cast to str so the returned type is
+    always dict[str, str].
     """
     raw = (field_lines or "").strip()
 
@@ -99,10 +107,10 @@ def _parse_field_lines(field_lines: str) -> dict[str, str]:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        if "=" not in stripped:
+        m = _KV_RE.match(stripped)
+        if not m:
             continue
-        key, _, value = stripped.partition("=")
-        result[key.strip()] = value
+        result[m.group(1).strip()] = m.group(2).rstrip()
     return result
 
 
@@ -301,95 +309,78 @@ def _find_paths(
         path: list[tuple[str, str, str]],
         visited: set[str],
     ) -> None:
-        state_targets = transitions.get(current, {}).get("targets", {})
-        for next_state, stim_map in state_targets.items():
+        if current == target:
+            results.append(list(path))
+            return
+        state_map = transitions.get(current, {})
+        targets = state_map.get("targets", {})
+        if not isinstance(targets, dict):
+            return
+        for next_state, stim_map in targets.items():
             if next_state in visited:
                 continue
             if next_state not in reachable:
                 continue
-            if not isinstance(stim_map, dict) or not stim_map:
+            if not isinstance(stim_map, dict):
                 continue
-
-            stimulus = list(stim_map.keys())[0]
-            step = (current, stimulus, next_state)
-            next_path = path + [step]
-
-            if next_state == target:
-                results.append(next_path)
-            else:
-                dfs(next_state, next_path, visited | {next_state})
+            for stimulus in stim_map:
+                path.append((current, stimulus, next_state))
+                visited.add(next_state)
+                dfs(next_state, path, visited)
+                path.pop()
+                visited.discard(next_state)
 
     dfs(start, [], {start})
     return results
 
 
 # ---------------------------------------------------------------------------
-# Path selection and scoring
+# Path selection (usual mode)
 # ---------------------------------------------------------------------------
 
-def _external_signature(
-    path: list[tuple[str, str, str]],
-    transitions: dict,
-) -> tuple[str, ...]:
-    """Return the agent-visible (non-internal) stimulus sequence for a path.
+def _path_agent_key(path: list[tuple[str, str, str]], transitions: dict) -> tuple:
+    """Return a deduplication key based on the agent-visible stimulus sequence.
 
-    Used to deduplicate paths that share the same user-action sequence but
-    differ only in which internal edges are traversed along the way.
+    Internal steps are excluded so that paths that look identical to an agent
+    (same sequence of StimulusUserAction stimuli) collapse to a single entry.
     """
     return tuple(
-        stimulus
-        for from_state, stimulus, to_state in path
-        if not _is_internal(from_state, stimulus, to_state, transitions)
+        (f, s, t)
+        for f, s, t in path
+        if not _is_internal(f, s, t, transitions)
     )
 
 
-def _score_path(
-    path: list[tuple[str, str, str]],
-    transitions: dict,
-) -> tuple[int, int]:
-    """Return a sort key for a path. Lower is better.
-
-    Criteria:
-      1. Number of internal steps (prefer fewer).
-      2. Total path length (prefer shorter).
-    """
+def _path_score(path: list[tuple[str, str, str]], transitions: dict) -> tuple:
+    """Score a path for ranking. Shorter paths with fewer internal steps rank higher."""
     internal_count = sum(
-        1 for from_state, stimulus, to_state in path
-        if _is_internal(from_state, stimulus, to_state, transitions)
+        1 for f, s, t in path if _is_internal(f, s, t, transitions)
     )
-    return (internal_count, len(path))
+    return (len(path), internal_count)
 
 
 def _select_paths(
-    paths: list[tuple[str, list[tuple[str, str, str]]]],
+    all_paths: list[tuple[str, list[tuple[str, str, str]]]],
     transitions: dict,
     limit: int,
 ) -> list[tuple[str, list[tuple[str, str, str]]]]:
-    """Return at most limit deduplicated paths, best-scored first.
-
-    Deduplication key: (start_state, external_signature).
-    """
-    sorted_paths = sorted(
-        paths,
-        key=lambda item: _score_path(item[1], transitions),
-    )
-    selected: list[tuple[str, list[tuple[str, str, str]]]] = []
-    seen: set[tuple[str, ...]] = set()
-
-    for start, path in sorted_paths:
-        sig = (start,) + _external_signature(path, transitions)
-        if sig in seen:
+    """Return up to limit deduplicated paths, ranked by score."""
+    seen: set[tuple] = set()
+    ranked = sorted(all_paths, key=lambda item: _path_score(item[1], transitions))
+    result = []
+    for start, path in ranked:
+        key = (start,) + _path_agent_key(path, transitions)
+        if key in seen:
             continue
-        seen.add(sig)
-        selected.append((start, path))
-        if len(selected) >= limit:
+        seen.add(key)
+        result.append((start, path))
+        if len(result) >= limit:
             break
-
-    return selected
+    return result
 
 
 # ---------------------------------------------------------------------------
-# Shared path output builder
+# Output rendering
 # ---------------------------------------------------------------------------
 
 def _render_paths(
@@ -561,39 +552,23 @@ def register(mcp, client: ItopClient) -> None:
         field_lines: str = "",
         output_fields: str = "ref, friendlyname, status",
     ) -> str:
-        """Apply a lifecycle transition to an iTop object by specifying the
-        desired target_state. The correct stimulus is resolved automatically
-        from the current state of the object.
+        """Apply a lifecycle transition to an iTop object.
 
-        Only a single direct transition is supported. If target_state requires
-        multiple steps, use Describe_state_change to find the correct sequence
-        and apply each step individually.
+        The correct stimulus is resolved automatically from the current state.
+        Only a single direct transition is supported per call.
 
-        Parameters:
-          obj_class     - iTop class name, e.g. UserRequest
-          obj_id        - numeric object ID or ticket ref (e.g. R-001234)
-          target_state  - desired target state (e.g. assigned, waiting_for_approval)
-          field_lines   - required fields in Key=Value format, one per line.
-                          IMPORTANT: use plain Key=Value text, NOT JSON syntax.
-                          Example:
-                            approver_id=24
-                            approval_reason=Approval requested for R-000105.
-                          Do NOT pass JSON like {"approver_id": 24}.
-          output_fields - comma-separated fields to return on success
-                          (default: ref, friendlyname, status)
+        field_lines: required fields, one per line, key=value or key: value.
+        Both delimiters are accepted. Example:
+          approver_id=24
+          approval_reason=Approval requested.
 
-        The tool will:
-          1. Verify target_state is directly reachable via a user-action stimulus.
-          2. Reject the call when the stimulus is internal (system-driven).
-          3. Validate that all required fields satisfy their option constraints:
-               MANDATORY  -- non-empty on the object or provided in field_lines.
-               MUSTPROMPT -- must be explicitly provided in field_lines.
-               MUSTCHANGE -- must be provided in field_lines AND differ from
-                             the current value already set on the object.
-          4. Apply the stimulus via iTop core/apply_stimulus.
-          5. Return the updated object on success, or a descriptive error.
+        The tool validates all required field constraints before applying:
+          MANDATORY  -- non-empty on the object or provided in field_lines.
+          MUSTPROMPT -- must be explicitly provided in field_lines.
+          MUSTCHANGE -- must differ from the current object value.
 
-        Use Describe_state_change first if the required fields are unknown.
+        Use Describe_state_change first to see required fields.
+        Use Describe_state_change if target_state is not directly reachable.
         """
         schema = await get_transition_map(obj_class, client)
         transitions = schema.get("transitions", {})
