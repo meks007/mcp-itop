@@ -56,6 +56,8 @@ _REQUIRED_OPTIONS: frozenset[str] = frozenset({
     "OPT_ATT_MUSTCHANGE",
 })
 
+_ID_FIELDS_NOTE = "Note: for ID fields, load the referenced object only if the ID is not yet known."
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -86,7 +88,7 @@ def _build_hint(ftype: str, fvalues: dict) -> str:
     """Return a one-line human-readable hint for a field based on its type."""
     if ftype.startswith("Class:"):
         cls = ftype[len("Class:"):]
-        return "ID -- load " + cls + " only if unknown"
+        return "ID (" + cls + ")"
     if ftype == "Value:HTML":
         return "HTML text -- e.g. <p>Your text here</p>"
     if ftype == "Value:TEXT":
@@ -452,6 +454,7 @@ def register(mcp, client: ItopClient) -> None:
                 "Stimulus:    " + stimulus,
                 "",
                 "Required fields for target state '" + target_state + "':",
+                _ID_FIELDS_NOTE,
             ]
             lines += _format_state_fields(target_state, transitions, fields_def)
             lines += [
@@ -518,6 +521,7 @@ def register(mcp, client: ItopClient) -> None:
             "Paths to '" + target_state + "'"
             + (" from '" + current_state + "'" if current_state else "")
             + " (" + str(shown) + " of " + str(total) + " shown):",
+            _ID_FIELDS_NOTE,
             "",
         ]
 
