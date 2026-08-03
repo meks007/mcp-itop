@@ -441,39 +441,24 @@ def register(mcp, client: ItopClient) -> None:
     ) -> str:
         """Describe how to transition an iTop object to a given target state.
 
-        Two modes depending on whether obj_id is provided:
+        WITHOUT obj_id (schema mode): traverses the lifecycle graph from current_state
+        (or all states if omitted). Only paths reaching target_state are returned;
+        dead-end branches are pruned. Required fields are consolidated per path.
+        Internal (system-driven) steps are labelled [internal].
+        path_mode: "usual" (default, up to 10 deduplicated paths) or "all".
 
-        WITHOUT obj_id (schema mode):
-          Traverses the class lifecycle graph from current_state (or all
-          states when current_state is omitted). Only paths that can actually
-          reach target_state are returned; branches leading to unrelated
-          terminal states are pruned before traversal.
-          Each path is accompanied by its consolidated list of required
-          fields, merged from every state visited along that path.
-          Internal (system-driven) steps are shown with [internal] label.
-          path_mode controls the output volume:
-            "usual" (default) -- up to 10 deduplicated paths.
-            "all"             -- all paths, no limit.
-
-        WITH obj_id (object mode):
-          Reads the current state of the specific object and uses it as the
-          fixed starting point. Path finding then behaves identically to
-          schema mode with current_state set -- multi-step paths are shown
-          when target_state is not directly reachable from the live state.
-          path_mode is respected in this mode.
+        WITH obj_id (object mode): reads the live state and uses it as the fixed
+        start. Multi-step paths are shown when target_state is not directly reachable.
 
         Parameters:
-          obj_class     - iTop class name, e.g. UserRequest
-          target_state  - desired target state, e.g. resolved, assigned
+          obj_class     - iTop class, e.g. UserRequest
+          target_state  - desired state, e.g. resolved, assigned
           obj_id        - optional ticket ref or numeric ID (e.g. R-001234)
-          current_state - optional starting state for schema-mode search;
-                          ignored when obj_id is provided
+          current_state - optional start state for schema mode; ignored with obj_id
           path_mode     - "usual" (default) or "all"
 
-        Returns:
-          - Reachable paths with per-path required fields.
-          - [internal] label on system-driven edges.
-          - Hint to provide obj_id when the result list is capped.
+        Returns reachable paths with per-path required fields and [internal] labels.
+        Provide obj_id for the most accurate result.
         """
         if path_mode not in {"usual", "all"}:
             return "Error: path_mode must be \"usual\" or \"all\"."
