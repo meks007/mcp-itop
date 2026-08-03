@@ -62,6 +62,27 @@ K = TypeVar("K")
 V = TypeVar("V")
 
 # ---------------------------------------------------------------------------
+# Transition schema normalisation constants
+# ---------------------------------------------------------------------------
+
+# Only these three option flags are meaningful for MCP field prompting.
+# Every other option (READONLY, HIDDEN, etc.) is stripped before caching
+# so downstream tools never need to filter them again.
+REQUIRED_FIELD_OPTIONS: frozenset[str] = frozenset({
+    "OPT_ATT_MANDATORY",
+    "OPT_ATT_MUSTPROMPT",
+    "OPT_ATT_MUSTCHANGE",
+})
+
+# Internal stimuli listed here are kept in the cached schema so the path
+# finder can traverse them and label them as system-driven steps.
+# All other StimulusInternal edges are removed.
+# Extend this set when selective internal stimuli are re-added to the
+# REST response (e.g. "ev_approve" to show approval flow continuations).
+EXPOSED_INTERNAL_STIMULI: frozenset[str] = frozenset()
+
+
+# ---------------------------------------------------------------------------
 # Base class: Cache[K, V]
 # ---------------------------------------------------------------------------
 
@@ -466,13 +487,18 @@ def cache_cleanup() -> None:
 # ---------------------------------------------------------------------------
 # Transition map cache
 # ---------------------------------------------------------------------------
-# Stores the extracted transition schema (fields + transitions) per iTop class.
-# The full iTop REST envelope (code, message, result) is NOT stored -- only the
-# inner "result" dict is cached, consistent with how extract_objects() and other
-# helpers expose only the relevant payload to callers.
+# Stores the normalised transition schema (fields + transitions) per iTop
+# class. The full iTop REST envelope (code, message, result) is NOT stored --
+# only the inner "result" dict is cached after normalisation.
+#
+# Normalisation (applied once on every cache miss):
+#   - Fields: only options in REQUIRED_FIELD_OPTIONS are retained per field.
+#             Fields with no remaining options are dropped entirely.
+#   - Targets: StimulusInternal edges are removed unless the stimulus name
+#              appears in EXPOSED_INTERNAL_STIMULI.
 #
 # Key:   obj_class string, e.g. "UserRequest"
-# Value: dict with keys "fields" and "transitions" (i.e. response["result"])
+# Value: normalised dict with keys "fields" and "transitions"
 # TTL:   TRANSITION_CACHE_TTL env var, default 3600 s (1 h)
 
 import os as _os
@@ -483,13 +509,95 @@ _transition_cache: TTLCache = TTLCache(
 )
 
 
-async def get_transition_map(obj_class: str, client) -> dict:
-    """Return the transition schema for obj_class, fetching from iTop on cache miss.
+def _normalise_transition_schema(schema: dict) -> dict:
+    """Return a normalised copy of a raw enumerate_transitions schema.
 
-    Mirrors the pattern of extract_objects() and format_and_cache(): the client
-    method returns the full iTop response, and this helper unwraps and validates
-    the relevant payload before storing it. Callers receive only the schema dict
-    (keys "fields" and "transitions"), never the raw REST envelope.
+    Two passes:
+
+    1. Fields normalisation (applied to both top-level "fields" and per-state
+       "fields" entries):
+         - Strip any option not in REQUIRED_FIELD_OPTIONS.
+         - Drop the field entirely when no required option remains.
+
+    2. Targets normalisation (applied to every state's "targets" map):
+         - Keep StimulusUserAction edges unconditionally.
+         - Keep StimulusInternal edges only when the stimulus name is listed
+           in EXPOSED_INTERNAL_STIMULI.
+         - Remove all other edges.
+
+    The input dict is not mutated; a new dict is returned.
+    """
+
+    def _normalise_fields(raw_fields) -> dict:
+        if not isinstance(raw_fields, dict):
+            return {}
+        result = {}
+        for field_name, field_opts in raw_fields.items():
+            if not isinstance(field_opts, dict):
+                continue
+            raw_options = field_opts.get("options", [])
+            kept_options = [
+                opt for opt in raw_options
+                if opt in REQUIRED_FIELD_OPTIONS
+            ]
+            if not kept_options:
+                continue
+            normalised_opts = dict(field_opts)
+            normalised_opts["options"] = kept_options
+            result[field_name] = normalised_opts
+        return result
+
+    def _normalise_targets(raw_targets) -> dict:
+        if not isinstance(raw_targets, dict):
+            return {}
+        result = {}
+        for next_state, stim_map in raw_targets.items():
+            if not isinstance(stim_map, dict):
+                continue
+            kept_stims = {}
+            for stimulus, stim_info in stim_map.items():
+                stype = stim_info.get("type", "") if isinstance(stim_info, dict) else ""
+                if stype == "StimulusUserAction":
+                    kept_stims[stimulus] = stim_info
+                elif (
+                    stype == "StimulusInternal"
+                    and stimulus in EXPOSED_INTERNAL_STIMULI
+                ):
+                    kept_stims[stimulus] = stim_info
+            if kept_stims:
+                result[next_state] = kept_stims
+        return result
+
+    # Normalise top-level fields map
+    normalised_fields = _normalise_fields(schema.get("fields", {}))
+
+    # Normalise per-state fields and targets
+    raw_transitions = schema.get("transitions", {})
+    normalised_transitions = {}
+    for state_name, state_map in raw_transitions.items():
+        if not isinstance(state_map, dict):
+            continue
+        normalised_transitions[state_name] = {
+            "fields": _normalise_fields(state_map.get("fields", {})),
+            "targets": _normalise_targets(state_map.get("targets", {})),
+        }
+
+    return {
+        "fields": normalised_fields,
+        "transitions": normalised_transitions,
+    }
+
+
+async def get_transition_map(obj_class: str, client) -> dict:
+    """Return the normalised transition schema for obj_class.
+
+    Fetches from iTop on cache miss, normalises the payload, then caches
+    the result. Callers always receive the normalised schema dict (keys
+    "fields" and "transitions") -- never the raw REST envelope.
+
+    Normalisation strips non-required field options and removes internal
+    stimulus edges that are not listed in EXPOSED_INTERNAL_STIMULI. See
+    _normalise_transition_schema() for full details.
 
     TTL is controlled by the TRANSITION_CACHE_TTL env var (default 3600 s).
     The cache is in-process only; restart the server to force a reload.
@@ -499,7 +607,7 @@ async def get_transition_map(obj_class: str, client) -> dict:
         client:    ItopClient instance -- used only on cache miss.
 
     Returns:
-        dict with top-level keys "fields" and "transitions".
+        Normalised dict with top-level keys "fields" and "transitions".
 
     Raises:
         ValueError: if the iTop response is missing or has an unexpected structure.
@@ -511,9 +619,6 @@ async def get_transition_map(obj_class: str, client) -> dict:
 
     logger.debug("[transition_cache] miss for cls=%r -- fetching from iTop", obj_class)
 
-    # enumerate_transitions() raises ValueError on non-zero code; no need to
-    # re-check here. Unwrap response["result"] to get the schema dict, exactly
-    # as tools unwrap response["objects"] after a core/get call.
     response = await client.enumerate_transitions(obj_class)
     schema = response.get("result")
 
@@ -530,5 +635,13 @@ async def get_transition_map(obj_class: str, client) -> dict:
             "enumerate_transitions result missing fields map for " + obj_class
         )
 
-    _transition_cache.set(obj_class, schema)
-    return schema
+    normalised = _normalise_transition_schema(schema)
+    _transition_cache.set(obj_class, normalised)
+    logger.debug(
+        "[transition_cache] cached normalised schema for cls=%r "
+        "states=%d top_fields=%d",
+        obj_class,
+        len(normalised["transitions"]),
+        len(normalised["fields"]),
+    )
+    return normalised
