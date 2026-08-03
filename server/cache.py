@@ -28,127 +28,250 @@ key_cache.cleanup()                   -> int   # called by housekeeping loop
 
 # Token validation (TTL from TOKEN_CACHE_TTL env var, sliding window)
 # NOTE: callers are responsible for hashing the raw token before calling.
-token_cache.get(token_hash)           -> bool | None
-token_cache.set(token_hash, valid)    -> None
-token_cache.evict(token_hash)         -> None
+#       auth.get_bearer_token_hash() is the single place that does this.
+await token_cache.validate(token_hash, probe_fn)  -> bool
+await token_cache.evict_by_token(token_hash)      -> None
+await token_cache.evict_stale()                   -> int
 
-# Transition map (TTL: TRANSITION_CACHE_TTL seconds, default 3600)
-get_transition_map(cls, client)       -> dict   (async, caches per obj_class)
+Backward-compatible aliases keep existing callers working unchanged:
+  registry_add_entry, registry_get_meta, registry_set_meta,
+  registry_get_fields, seed_field_cache,
+  cache_get, cache_set, cache_cleanup
 """
 
 from __future__ import annotations
 
+import asyncio
 import time
-from abc import ABC, abstractmethod
+import logging
 from dataclasses import dataclass, field
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, Iterator, TypeVar
 
-from config import logger
+from config import RESOLVE_KEY_CACHE_TTL, TOKEN_CACHE_TTL
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Type variables
+# ---------------------------------------------------------------------------
 
 K = TypeVar("K")
 V = TypeVar("V")
 
+# ---------------------------------------------------------------------------
+# Base class: Cache[K, V]
+# ---------------------------------------------------------------------------
+
+
+class Cache(Generic[K, V]):
+    """Abstract base for all caches.
+
+    Concrete subclasses store entries in a plain dict and may add eviction.
+    """
+
+    def get(self, key: K) -> V | None:  # noqa: D401
+        """Return the cached value for key, or None on miss."""
+        raise NotImplementedError
+
+    def set(self, key: K, value: V) -> None:
+        """Store value under key."""
+        raise NotImplementedError
+
+    def evict(self, key: K) -> None:
+        """Remove the entry for key (no-op if not present)."""
+        raise NotImplementedError
+
 
 # ---------------------------------------------------------------------------
-# Generic cache base classes
+# Base class: TTLCache[K, V]
 # ---------------------------------------------------------------------------
-
-class Cache(ABC, Generic[K, V]):
-    """Abstract base: get / set / evict."""
-
-    @abstractmethod
-    def get(self, key: K) -> V | None: ...
-
-    @abstractmethod
-    def set(self, key: K, value: V) -> None: ...
-
-    @abstractmethod
-    def evict(self, key: K) -> None: ...
 
 
 @dataclass
 class _TTLEntry(Generic[V]):
     value: V
-    expires_at: float
+    ts: float  # time.monotonic() at insertion
 
 
 class TTLCache(Cache[K, V]):
-    """Cache with per-entry TTL and a sweep-based cleanup()."""
+    """Cache with time-to-live eviction.
 
-    def __init__(self, ttl: float, name: str = "") -> None:
+    Args:
+        ttl:     Seconds before an entry expires.  ttl <= 0 disables caching.
+        sliding: If True, every get() that hits an entry resets its clock.
+                 If False (default), TTL is measured from insertion only.
+        name:    Optional name used in debug log messages.
+    """
+
+    def __init__(self, ttl: float, sliding: bool = False, name: str = "cache") -> None:
         self._ttl = ttl
+        self._sliding = sliding
         self._name = name
-        self._store: dict[K, _TTLEntry[V]] = {}
+        self._store: dict[Any, _TTLEntry] = {}
+
+    # ------------------------------------------------------------------
 
     def get(self, key: K) -> V | None:
+        if self._ttl <= 0:
+            return None
         entry = self._store.get(key)
         if entry is None:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("[%s] miss key=%r", self._name, key)
             return None
-        if time.monotonic() > entry.expires_at:
+        now = time.monotonic()
+        age = now - entry.ts
+        if age > self._ttl:
             del self._store[key]
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("[%s] miss (expired) key=%r", self._name, key)
             return None
+        if self._sliding:
+            entry.ts = now
+            remaining = self._ttl
+        else:
+            remaining = self._ttl - age
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[%s] hit key=%r ttl_remaining=%.0fs",
+                self._name, key, remaining,
+            )
         return entry.value
 
     def set(self, key: K, value: V) -> None:
-        self._store[key] = _TTLEntry(value=value, expires_at=time.monotonic() + self._ttl)
+        if self._ttl <= 0:
+            return
+        self._store[key] = _TTLEntry(value=value, ts=time.monotonic())
 
     def evict(self, key: K) -> None:
         self._store.pop(key, None)
 
     def cleanup(self) -> int:
-        """Remove all expired entries. Returns the number of entries removed."""
+        """Evict all expired entries. Returns the count removed.
+
+        Called by housekeeping_loop() in background_tasks.py; must NOT be
+        called inline from resolve_key() or other hot paths.
+        """
+        if self._ttl <= 0:
+            return 0
         now = time.monotonic()
-        expired = [k for k, e in self._store.items() if now > e.expires_at]
+        expired = [k for k, e in self._store.items() if now - e.ts > self._ttl]
         for k in expired:
             del self._store[k]
         if expired:
-            logger.debug("[%s] cache cleanup: removed %d expired entries", self._name, len(expired))
+            logger.debug("[%s] cleanup: evicted %d expired entries", self._name, len(expired))
         return len(expired)
 
 
 # ---------------------------------------------------------------------------
-# Class metadata cache
+# ClassMetadataCache
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class ClassEntry:
-    """Mutable metadata record for a single iTop class."""
-    fields: frozenset[str] = field(default_factory=frozenset)
-    exists: bool | None = None
-    meta: dict[str, Any] = field(default_factory=dict)
+    exists: bool | None = None       # None = not yet probed
+    fields: frozenset = field(default_factory=frozenset)
+    meta: dict = field(default_factory=dict)
 
 
-class ClassMetadataCache:
-    """Persistent (no TTL) cache of iTop class field inventories and metadata."""
+class ClassMetadataCache(Cache[str, ClassEntry]):
+    """Stores per-iTop-class field inventories and arbitrary metadata.
+
+    No TTL -- iTop class schemas do not change at runtime. Entries are
+    created on first access and grow over the lifetime of the process.
+    """
 
     def __init__(self) -> None:
         self._store: dict[str, ClassEntry] = {}
 
+    # ------------------------------------------------------------------
+
+    def get(self, key: str) -> ClassEntry | None:
+        entry = self._store.get(key)
+        if logger.isEnabledFor(logging.DEBUG):
+            if entry is not None:
+                logger.debug(
+                    "[class_cache] hit cls=%r fields=%d exists=%s",
+                    key, len(entry.fields), entry.exists,
+                )
+            else:
+                logger.debug("[class_cache] miss cls=%r", key)
+        return entry
+
+    def set(self, key: str, value: ClassEntry) -> None:
+        self._store[key] = value
+
+    def evict(self, key: str) -> None:
+        self._store.pop(key, None)
+
+    # ------------------------------------------------------------------
+    # Domain helpers
+    # ------------------------------------------------------------------
+
     def probe_entry(self, cls: str) -> ClassEntry:
-        """Return the ClassEntry for cls, creating one if absent."""
+        """Get-or-create the ClassEntry for cls.
+
+        NOTE: must never call logger.debug() -- this method is invoked from
+        within logging formatter paths (via beartype hooks) and any log call
+        here causes infinite recursion.
+        """
         if cls not in self._store:
             self._store[cls] = ClassEntry()
         return self._store[cls]
 
-    def get_fields(self, cls: str) -> frozenset[str]:
-        return self._store.get(cls, ClassEntry()).fields
+    def get_fields(self, cls: str) -> frozenset:
+        """Return the known field set for cls (empty frozenset if not seeded)."""
+        entry = self._store.get(cls)
+        if logger.isEnabledFor(logging.DEBUG):
+            if entry is not None and entry.fields:
+                logger.debug(
+                    "[class_cache] get_fields hit cls=%r fields=%d",
+                    cls, len(entry.fields),
+                )
+            else:
+                logger.debug("[class_cache] get_fields miss cls=%r", cls)
+        return entry.fields if entry is not None else frozenset()
 
     def seed(self, cls: str, fields: dict) -> None:
-        """Populate the field inventory from a core/get response fields dict."""
+        """Grow the field set for cls from a live iTop response fields dict.
+
+        Always unions new fields with existing ones -- never removes any.
+        Sets exists=True as a side effect.
+
+        NOTE: must never call logger.debug() -- same recursion risk as probe_entry.
+        """
         entry = self.probe_entry(cls)
-        entry.fields = frozenset(fields.keys())
+        if not fields:
+            logger.warning("[class_cache] seed called for cls=%r with empty fields", cls)
+            return
+        incoming = frozenset(fields.keys())
+        before_set = entry.fields
+        new_fields = incoming - before_set
+        entry.fields = before_set | incoming
         entry.exists = True
+        if new_fields and logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[class_cache] seed cls=%r +%d new fields (total=%d)",
+                cls, len(new_fields), len(entry.fields),
+            )
 
     def get_meta(self, cls: str, key: str, default: Any = None) -> Any:
-        return self._store.get(cls, ClassEntry()).meta.get(key, default)
+        """Read arbitrary per-class metadata."""
+        return self.probe_entry(cls).meta.get(key, default)
 
     def set_meta(self, cls: str, key: str, value: Any) -> None:
+        """Write arbitrary per-class metadata."""
         self.probe_entry(cls).meta[key] = value
 
 
+# Singleton
+class_cache = ClassMetadataCache()
+
 # ---------------------------------------------------------------------------
-# Key resolution cache
+# KeyResolutionCache
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class ResolvedKey:
@@ -156,39 +279,155 @@ class ResolvedKey:
     resolved_id: int
 
 
-class KeyResolutionCache(TTLCache[tuple[str, str], ResolvedKey]):
-    """TTL cache mapping (obj_class, ref) -> ResolvedKey."""
+class KeyResolutionCache(TTLCache[tuple, ResolvedKey]):
+    """Maps (obj_class, ref) to (resolved_class, numeric_id).
 
+    TTL is read from RESOLVE_KEY_CACHE_TTL (env var, default 86400 s).
+    sliding=False: insertion time determines expiry, hits do not reset the clock.
 
-# ---------------------------------------------------------------------------
-# Token validation cache
-# ---------------------------------------------------------------------------
-
-class TokenValidationCache(TTLCache[str, bool]):
-    """Sliding-window TTL cache for bearer token validity.
-
-    set() always resets the TTL to the full window so that active tokens
-    are not evicted mid-session.
+    cleanup() is called exclusively by housekeeping_loop() -- never inline.
     """
 
+    pass
+
+
+# Singleton
+key_cache = KeyResolutionCache(ttl=RESOLVE_KEY_CACHE_TTL, sliding=False, name="key_cache")
 
 # ---------------------------------------------------------------------------
-# Singletons
+# TokenValidationCache
 # ---------------------------------------------------------------------------
 
-import os as _os
 
-_RESOLVE_KEY_CACHE_TTL = float(_os.environ.get("RESOLVE_KEY_CACHE_TTL", "300"))
-_TOKEN_CACHE_TTL       = float(_os.environ.get("TOKEN_CACHE_TTL",        "300"))
+@dataclass
+class TokenEntry:
+    valid: bool
+    last_seen: float
 
-class_cache  = ClassMetadataCache()
-key_cache    = KeyResolutionCache(ttl=_RESOLVE_KEY_CACHE_TTL,  name="key_cache")
-token_cache  = TokenValidationCache(ttl=_TOKEN_CACHE_TTL, name="token_cache")
 
+class TokenValidationCache(TTLCache[str, TokenEntry]):
+    """Caches bearer token validation results with a sliding TTL.
+
+    Key: pre-computed SHA-256 hex digest of the raw token. This class never
+    sees or hashes raw tokens -- that responsibility belongs to auth.py via
+    auth.get_bearer_token_hash().
+    Value: TokenEntry with valid flag and last_seen timestamp.
+
+    TTL is read from TOKEN_CACHE_TTL (env var, default 300 s).
+    sliding=True: every cache hit resets the expiry window so an
+    actively-used token is never re-validated until it goes idle for the
+    full TTL duration.
+
+    Per-key asyncio.Lock instances prevent duplicate iTop probe calls when
+    multiple coroutines race to validate the same token simultaneously.
+    """
+
+    def __init__(self, ttl: float, sliding: bool = True) -> None:
+        super().__init__(ttl=ttl, sliding=sliding, name="token_cache")
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._lock_guard = asyncio.Lock()
+
+    # ------------------------------------------------------------------
+
+    async def validate(self, token_hash: str, probe_fn) -> bool:
+        """Validate a token by its pre-computed hash, using the cache to skip
+        repeated probes.
+
+        token_hash must be the SHA-256 hex digest of the raw bearer token,
+        computed by auth.get_bearer_token_hash(). This method never hashes
+        or inspects the raw token.
+
+        probe_fn is an async callable with no arguments that returns bool.
+        auth.py passes a closure over the raw iTop list_operations call.
+
+        Flow:
+          1. Fast path: non-expired entry found -- slide TTL, return valid.
+          2. Slow path: acquire per-key lock, re-check, then call probe_fn.
+        """
+        # Fast path -- no lock needed for a plain dict read.
+        # TTLCache.get() handles sliding reset and logs hit/miss + ttl_remaining.
+        entry = self.get(token_hash)
+        if entry is not None:
+            return entry.valid
+
+        # Slow path: ensure per-key lock exists, then probe.
+        async with self._lock_guard:
+            if token_hash not in self._locks:
+                self._locks[token_hash] = asyncio.Lock()
+            token_lock = self._locks[token_hash]
+
+        async with token_lock:
+            # Re-check after acquiring the lock; another coroutine may have
+            # already completed the probe while we were waiting.
+            entry = self.get(token_hash)
+            if entry is not None:
+                return entry.valid
+
+            try:
+                valid = await probe_fn()
+            except Exception:
+                valid = False
+
+            self.set(token_hash, TokenEntry(valid=valid, last_seen=time.monotonic()))
+            logger.debug(
+                "[token_cache] validated: valid=%s hash_prefix=%s ttl=%.0fs",
+                valid, token_hash[:8], self._ttl,
+            )
+            return valid
+
+    async def evict_by_token(self, token_hash: str) -> None:
+        """Remove the cache entry and its lock for the given token hash.
+
+        token_hash must be the SHA-256 hex digest of the raw bearer token,
+        computed by auth.get_bearer_token_hash().
+
+        Called by auth.evict_token() whenever iTop returns code==1 (UNAUTH).
+        Safe to call when the hash is not cached (no-op).
+        """
+        async with self._lock_guard:
+            removed = self._store.pop(token_hash, None)
+            self._locks.pop(token_hash, None)
+        if removed is not None:
+            logger.warning(
+                "[token_cache] evicted (UNAUTH): hash_prefix=%s", token_hash[:8]
+            )
+
+    async def evict_stale(self) -> int:
+        """Remove all token entries past their TTL. Returns count removed.
+
+        Called periodically by housekeeping_loop() in background_tasks.py.
+        """
+        if self._ttl <= 0:
+            return 0
+        now = time.monotonic()
+        async with self._lock_guard:
+            stale = [
+                h for h, e in self._store.items()
+                if now - e.ts > self._ttl
+            ]
+            for h in stale:
+                self._store.pop(h, None)
+                self._locks.pop(h, None)
+        if stale:
+            logger.debug(
+                "[token_cache] evict_stale: removed %d stale entries", len(stale)
+            )
+        return len(stale)
+
+
+# Singleton -- TTL read from config (env var TOKEN_CACHE_TTL, default 300 s)
+token_cache = TokenValidationCache(ttl=TOKEN_CACHE_TTL, sliding=True)
 
 # ---------------------------------------------------------------------------
-# Convenience wrappers used by helpers and tools
+# Backward-compatible aliases
 # ---------------------------------------------------------------------------
+# These names were the original public API of cache.py. Existing callers
+# continue to work without modification until they are updated to use the
+# class methods directly.
+
+def registry_add_entry(cls: str) -> ClassEntry:
+    return class_cache.probe_entry(cls)
+
 
 def registry_get_meta(cls: str, key: str, default: Any = None) -> Any:
     return class_cache.get_meta(cls, key, default)
@@ -219,43 +458,3 @@ def cache_set(obj_class: str, ref: str, resolved_class: str, resolved_id: int) -
 
 def cache_cleanup() -> None:
     key_cache.cleanup()
-
-
-# ---------------------------------------------------------------------------
-# Transition map cache
-# ---------------------------------------------------------------------------
-#
-# Stores the full enumerate_transitions schema per iTop class.
-# TTL defaults to 3600 s (1 h) -- workflows change rarely.
-# Key:   obj_class string, e.g. "UserRequest"
-# Value: dict with keys "fields" and "transitions"
-
-_TRANSITION_CACHE_TTL = float(_os.environ.get("TRANSITION_CACHE_TTL", "3600"))
-_transition_cache: TTLCache[str, dict] = TTLCache(
-    ttl=_TRANSITION_CACHE_TTL, name="transition_cache"
-)
-
-
-async def get_transition_map(obj_class: str, client) -> dict:
-    """Return the cached transition map for obj_class, fetching on cache miss.
-
-    The schema is fetched via client.enumerate_transitions() and cached for
-    TRANSITION_CACHE_TTL seconds (default 3600). Subsequent calls within the
-    TTL window return the cached dict without an iTop round-trip.
-
-    Args:
-        obj_class: iTop class name, e.g. "UserRequest".
-        client:    ItopClient instance -- used only on cache miss.
-
-    Returns:
-        dict with top-level keys "fields" and "transitions".
-    """
-    cached = _transition_cache.get(obj_class)
-    if cached is not None:
-        logger.debug("[transition_cache] hit for cls=%r", obj_class)
-        return cached
-
-    logger.debug("[transition_cache] miss for cls=%r -- fetching from iTop", obj_class)
-    data = await client.enumerate_transitions(obj_class)
-    _transition_cache.set(obj_class, data)
-    return data
