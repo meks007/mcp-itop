@@ -15,12 +15,16 @@ parameter through ItopClient or any caller.
 
 ItopClient.get_raw          -- thin core/get wrapper, returns the raw iTop dict.
 ItopClient.get              -- same as get_raw but applies _LEAN_STRIP when full=False.
-ItopClient.get_class_fields -- field discovery for a class, stripped by _LEAN_STRIP.
+ItopClient.get_class_fields -- field name set for a class; derived from describe_class
+                               schema on first call, falls back to core/get sampling
+                               when describe_class is unavailable.
+ItopClient.describe_class   -- full field schema from company/describe_class.
 
 Use get_raw when you need the unfiltered response (e.g. internal resolvers,
 attachment queries). Use get everywhere else so that privacy-sensitive fields
-are stripped consistently. Use get_class_fields for any field inventory lookup
-that will be surfaced to callers or used to build output_fields lists.
+are stripped consistently. Use describe_class / get_class_fields for any
+field inventory lookup that will be surfaced to callers or used to build
+output_fields lists.
 """
 
 from __future__ import annotations
@@ -358,14 +362,47 @@ class ItopClient:
         return result
 
     # ------------------------------------------------------------------
+    # company/describe_class
+    # ------------------------------------------------------------------
+
+    async def describe_class(self, cls: str) -> dict:
+        """Fetch the full field schema for an iTop class via company/describe_class.
+
+        Returns the raw iTop response dict (code, message, and the payload).
+        Callers should use cache.get_class_schema() which wraps this method
+        with caching and per-class locking.
+
+        Args:
+            cls: iTop class name, e.g. 'UserRequest'.
+
+        Returns:
+            Full iTop response dict.
+
+        Raises:
+            ValueError: if the iTop response signals a non-zero error code.
+        """
+        response = await self.request({
+            "operation": "company/describe_class",
+            "class": cls,
+        })
+        if response.get("code", -1) != 0:
+            raise ValueError(
+                "describe_class failed for " + cls + ": "
+                + response.get("message", "unknown error")
+            )
+        return response
+
+    # ------------------------------------------------------------------
     # get_class_fields
     # ------------------------------------------------------------------
 
     async def get_class_fields(self, cls: str) -> set[str]:
         """Return the set of field names available on a given iTop class.
 
-        Samples a single existing object to discover the field schema.
-        Returns an empty set when no objects exist or the class is unknown.
+        Preferred path: derive the field set from the cached describe_class
+        schema (company/describe_class).  Falls back to sampling a single
+        existing object via core/get when describe_class is unavailable or
+        returns an error, to retain compatibility with non-standard installs.
 
         The result is stripped by _LEAN_STRIP so that privacy-sensitive
         fields are excluded from discovery just as they are from get().
@@ -373,6 +410,19 @@ class ItopClient:
         Args:
             cls: iTop class name, e.g. 'UserRequest'.
         """
+        # Preferred path: describe_class schema (authoritative, no object needed).
+        try:
+            from cache import get_class_schema  # noqa: PLC0415
+            schema = await get_class_schema(cls, self)
+            if schema:
+                return set(schema.keys()) - _LEAN_STRIP
+        except Exception as exc:
+            logger.debug(
+                "[get_class_fields] describe_class unavailable for cls=%r, "
+                "falling back to core/get sampling: %s", cls, exc,
+            )
+
+        # Fallback: sample a single existing object (original behaviour).
         result = await self.get(cls, "SELECT " + cls, fields="*", limit=1)
         objects = result.get("objects") or {}
         if not objects:
