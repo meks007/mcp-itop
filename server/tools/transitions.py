@@ -19,9 +19,11 @@ Both tools share a common lookup pattern:
 Describe_state_change behaviour:
   - obj_id provided: reads current_state from iTop, validates reachability,
     returns the single matching path.
-  - obj_id omitted:  schema-only mode. Finds all paths from any current_state
-    to the given target_state via DFS, marks internal stimuli, and returns
-    the full path list without an iTop round-trip.
+  - obj_id omitted, path_mode="usual" (default): returns up to 10 prioritised
+    operational paths. SLA escalation variants and redundant system-driven
+    duplicates are suppressed.
+  - obj_id omitted, path_mode="all": returns every non-cyclic path including
+    SLA timeout, autoresolve, and approval variants.
 
 Field types are resolved from schema["fields"] and surfaced as human-readable
 hints so the calling agent knows whether to provide a numeric ID, plain text,
@@ -33,6 +35,14 @@ from __future__ import annotations
 from client import ItopClient
 from cache import get_transition_map
 from helpers import resolve_key, format_and_cache, ensure_ref_field
+
+
+MAX_USUAL_PATHS = 10
+
+# Stimuli that indicate an exceptional or system-driven transition.
+# Paths containing these are penalised in "usual" mode.
+_TIMEOUT_STIMULI = {"ev_timeout"}
+_LOW_PRIORITY_STIMULI = {"ev_autoresolve", "ev_approve", "ev_reject", "ev_reopen"}
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +168,91 @@ def _format_path(path: list[tuple[str, str, str]], transitions: dict) -> str:
     return " | ".join(parts)
 
 
+def _is_internal(from_state: str, stimulus: str, to_state: str, transitions: dict) -> bool:
+    """Return True when the stimulus is system-driven (StimulusInternal)."""
+    stim_entry = transitions.get(from_state, {}).get("targets", {}).get(to_state, {})
+    return stim_entry.get(stimulus, {}).get("type", "") == "StimulusInternal"
+
+
+def _external_signature(
+    path: list[tuple[str, str, str]],
+    transitions: dict,
+) -> tuple[str, ...]:
+    """Return the sequence of agent-visible (non-internal) stimuli for a path.
+
+    Used to deduplicate paths that differ only in system-driven side steps
+    such as ev_timeout or ev_autoresolve.
+    """
+    sig = []
+    for from_state, stimulus, to_state in path:
+        if not _is_internal(from_state, stimulus, to_state, transitions):
+            sig.append(stimulus)
+    return tuple(sig)
+
+
+def _score_path(
+    path: list[tuple[str, str, str]],
+    transitions: dict,
+) -> tuple[int, int, int, int]:
+    """Return a sort key for a path. Lower is better.
+
+    Criteria (in priority order):
+      1. Number of ev_timeout steps (SLA escalation -- penalise heavily).
+      2. Number of other low-priority stimuli (autoresolve, approve, reject, reopen).
+      3. Number of internal (system-driven) steps in total.
+      4. Total path length (prefer shorter paths).
+    """
+    timeout_count = 0
+    low_count = 0
+    internal_count = 0
+
+    for from_state, stimulus, to_state in path:
+        if stimulus in _TIMEOUT_STIMULI:
+            timeout_count += 1
+        if stimulus in _LOW_PRIORITY_STIMULI:
+            low_count += 1
+        if _is_internal(from_state, stimulus, to_state, transitions):
+            internal_count += 1
+
+    return (timeout_count, low_count, internal_count, len(path))
+
+
+def _select_usual_paths(
+    all_paths: list[tuple[str, list[tuple[str, str, str]]]],
+    transitions: dict,
+    limit: int = MAX_USUAL_PATHS,
+) -> list[tuple[str, list[tuple[str, str, str]]]]:
+    """Return a compact, diverse set of operational paths.
+
+    Steps:
+      1. Prefer paths without any ev_timeout step when alternatives exist.
+      2. Sort remaining candidates by _score_path (lower is better).
+      3. Deduplicate by (start_state, external_signature); keep the best-scored
+         representative for each unique agent-visible route.
+      4. Return at most `limit` paths.
+    """
+    non_timeout = [
+        item for item in all_paths
+        if not any(stim in _TIMEOUT_STIMULI for _, stim, _ in item[1])
+    ]
+    candidates = non_timeout if non_timeout else all_paths
+    candidates = sorted(candidates, key=lambda item: _score_path(item[1], transitions))
+
+    selected: list[tuple[str, list[tuple[str, str, str]]]] = []
+    seen: set[tuple[str, ...]] = set()
+
+    for start, path in candidates:
+        sig = (start,) + _external_signature(path, transitions)
+        if sig in seen:
+            continue
+        seen.add(sig)
+        selected.append((start, path))
+        if len(selected) >= limit:
+            break
+
+    return selected
+
+
 # ---------------------------------------------------------------------------
 # Tool registration
 # ---------------------------------------------------------------------------
@@ -175,35 +270,45 @@ def register(mcp, client: ItopClient) -> None:
         target_state: str,
         obj_id: str = "",
         current_state: str = "",
+        path_mode: str = "usual",
     ) -> str:
         """Describe how to transition an iTop object to a given target state.
 
         Two modes depending on whether obj_id is provided:
 
         WITHOUT obj_id (schema mode):
-          Finds all paths from any state (or from current_state if given) to
+          Finds paths from any state (or from current_state if given) to
           target_state using the class state machine. No iTop call is made.
           Useful for questions like "how do I get from new to resolved?".
-          current_state is optional -- when omitted, all paths to target_state
-          are shown regardless of starting state.
+          current_state is optional -- when omitted, all starting states are searched.
+          path_mode controls the output:
+            "usual" (default) -- up to 10 prioritised operational paths;
+                                 SLA escalation variants and redundant
+                                 system-driven duplicates are suppressed.
+            "all"             -- every non-cyclic path, including SLA timeout,
+                                 autoresolve, and approval variants.
 
         WITH obj_id (object mode):
           Reads the current state of the specific object, verifies that
           target_state is reachable, and returns the single matching path
-          plus the required fields.
+          plus the required fields. path_mode is ignored in this mode.
 
         Parameters:
-          obj_class    - iTop class name, e.g. UserRequest
-          target_state - desired target state, e.g. resolved, assigned
-          obj_id       - optional ticket ref or numeric ID (e.g. R-001234)
+          obj_class     - iTop class name, e.g. UserRequest
+          target_state  - desired target state, e.g. resolved, assigned
+          obj_id        - optional ticket ref or numeric ID (e.g. R-001234)
           current_state - optional starting state for schema-mode path search
+          path_mode     - "usual" (default) or "all"; ignored when obj_id is set
 
         Returns:
-          - All reachable paths from current to target state
+          - Reachable paths from current to target state
           - The stimulus for each step (internal stimuli are marked)
           - Required fields for the target state with type hints
           - A ready-to-use example for Apply_stimulus_to_object (object mode only)
         """
+        if path_mode not in {"usual", "all"}:
+            return "Error: path_mode must be \"usual\" or \"all\"."
+
         # 1. Fetch schema (cached per class)
         schema = await get_transition_map(obj_class, client)
         transitions = schema.get("transitions", {})
@@ -264,7 +369,6 @@ def register(mcp, client: ItopClient) -> None:
         # ----------------------------------------------------------------
         all_states = list(transitions.keys())
 
-        # Determine which starting states to search from
         if current_state and current_state.strip():
             if current_state not in transitions:
                 return (
@@ -281,7 +385,6 @@ def register(mcp, client: ItopClient) -> None:
                 "Known states: " + ", ".join(all_states)
             )
 
-        # Collect all paths
         all_paths: list[tuple[str, list[tuple[str, str, str]]]] = []
         for start in start_states:
             if start == target_state:
@@ -296,19 +399,35 @@ def register(mcp, client: ItopClient) -> None:
                 + "."
             )
 
+        if path_mode == "all":
+            shown_paths = all_paths
+        else:
+            shown_paths = _select_usual_paths(all_paths, transitions, limit=MAX_USUAL_PATHS)
+
+        total = len(all_paths)
+        shown = len(shown_paths)
+
         lines = [
             "Paths to '" + target_state + "'"
             + (" from '" + current_state + "'" if current_state else "")
-            + " (" + str(len(all_paths)) + " found):",
+            + " (" + str(shown) + " of " + str(total) + " shown):",
             "",
         ]
-        for i, (start, path) in enumerate(all_paths, 1):
+        for i, (start, path) in enumerate(shown_paths, 1):
             lines.append("Path " + str(i) + ": " + _format_path(path, transitions))
         lines += [
             "",
             "Required fields for target state '" + target_state + "':",
         ]
         lines += _format_target_fields(target_state, transitions, fields_def)
+
+        if path_mode == "usual" and shown < total:
+            lines += [
+                "",
+                "Showing " + str(shown) + " representative paths out of " + str(total)
+                + " found. Strongly recommended: provide obj_id for the valid next"
+                + " transition and required fields.",
+            ]
 
         return "\n".join(lines)
 
