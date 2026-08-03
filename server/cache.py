@@ -34,6 +34,11 @@ token_cache.evict(token_hash)         -> None
 
 # Transition map (TTL: TRANSITION_CACHE_TTL seconds, default 3600)
 get_transition_map(cls, client)       -> dict   (async, caches per obj_class)
+
+Backward-compatible aliases keep existing callers working unchanged:
+  registry_add_entry, registry_get_meta, registry_set_meta,
+  registry_get_fields, seed_field_cache,
+  cache_get, cache_set, cache_cleanup
 """
 
 from __future__ import annotations
@@ -146,6 +151,10 @@ class ClassMetadataCache:
         self.probe_entry(cls).meta[key] = value
 
 
+# Singleton
+class_cache = ClassMetadataCache()
+
+
 # ---------------------------------------------------------------------------
 # Key resolution cache
 # ---------------------------------------------------------------------------
@@ -165,11 +174,7 @@ class KeyResolutionCache(TTLCache[tuple[str, str], ResolvedKey]):
 # ---------------------------------------------------------------------------
 
 class TokenValidationCache(TTLCache[str, bool]):
-    """Sliding-window TTL cache for bearer token validity.
-
-    set() always resets the TTL to the full window so that active tokens
-    are not evicted mid-session.
-    """
+    """Sliding-window TTL cache for bearer token validity."""
 
 
 # ---------------------------------------------------------------------------
@@ -181,14 +186,17 @@ import os as _os
 _RESOLVE_KEY_CACHE_TTL = float(_os.environ.get("RESOLVE_KEY_CACHE_TTL", "300"))
 _TOKEN_CACHE_TTL       = float(_os.environ.get("TOKEN_CACHE_TTL",        "300"))
 
-class_cache  = ClassMetadataCache()
-key_cache    = KeyResolutionCache(ttl=_RESOLVE_KEY_CACHE_TTL,  name="key_cache")
-token_cache  = TokenValidationCache(ttl=_TOKEN_CACHE_TTL, name="token_cache")
+key_cache   = KeyResolutionCache(ttl=_RESOLVE_KEY_CACHE_TTL, name="key_cache")
+token_cache = TokenValidationCache(ttl=_TOKEN_CACHE_TTL,     name="token_cache")
 
 
 # ---------------------------------------------------------------------------
-# Convenience wrappers used by helpers and tools
+# Backward-compatible aliases (used by helpers/resolvers.py and others)
 # ---------------------------------------------------------------------------
+
+def registry_add_entry(cls: str) -> ClassEntry:
+    return class_cache.probe_entry(cls)
+
 
 def registry_get_meta(cls: str, key: str, default: Any = None) -> Any:
     return class_cache.get_meta(cls, key, default)
