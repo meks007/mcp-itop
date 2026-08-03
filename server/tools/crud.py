@@ -1,6 +1,8 @@
 """
-CRUD and utility tools: get, create, update, delete, apply_stimulus,
+CRUD and utility tools: get, create, update, delete,
 get_related, list_operations, describe_class.
+
+Note: Apply_stimulus_to_object has been moved to tools/transitions.py.
 """
 
 from __future__ import annotations
@@ -115,11 +117,6 @@ def register(mcp, client: ItopClient):
 
         # Build per-object image annotations before formatting so they can be
         # interleaved with each object's field block by format_and_cache.
-        # fetch_image_counts reads the inline ref cache populated by
-        # parse_objects inside format_and_cache -- but we need the cache warm
-        # before the count call. parse_objects is pure and cheap so we run it
-        # once here to seed the cache, then format_and_cache runs it again
-        # (idempotent). Callers outside CLASSES_WITH_REF skip this entirely.
         annotations: dict[str, str] = {}
         if obj_class in CLASSES_WITH_REF:
             from attachment_store import write_inline_image_refs
@@ -141,8 +138,6 @@ def register(mcp, client: ItopClient):
                     parts.append(str(att_count) + " attachment(s)")
                 if ii_count:
                     parts.append(str(ii_count) + " inline image(s)")
-                # ii_count == 0: confirmed no inline images, nothing to show.
-                # ii_count is None: cannot happen -- cache was seeded above.
                 if parts:
                     annotations[oid] = (
                         "[images] "
@@ -198,12 +193,7 @@ def register(mcp, client: ItopClient):
         if isinstance(parsed, dict) and "status" in parsed:
             return (
                 "Error: 'status' cannot be set via Update_object. "
-                "Use Apply_stimulus_to_object with the appropriate stimulus instead:\n"
-                "  ev_assign   - assign ticket\n"
-                "  ev_resolve  - resolve ticket (include solution in fields)\n"
-                "  ev_reopen   - reopen ticket\n"
-                "  ev_propose  - propose solution\n"
-                "  ev_pending  - put ticket on hold"
+                "Use Apply_stimulus_to_object with the appropriate target_state instead."
             )
 
         obj_class, resolved = await resolve_key(obj_class, coerce_ref(ticket_ref, key))
@@ -238,45 +228,6 @@ def register(mcp, client: ItopClient):
             resolved,
             comment=comment or DEFAULT_COMMENT,
             simulate=simulate,
-        )
-        return format_and_cache(result)
-
-    @mcp.tool(
-        name="Apply_stimulus_to_object"
-    )
-    async def itop_apply_stimulus(
-        obj_class: str,
-        stimulus: str,
-        ticket_ref: str = "",
-        key: Union[str, int] = "",
-        fields: str = "{}",
-        output_fields: str = "ref, friendlyname, status",
-        comment: str = "",
-    ) -> str:
-        """Apply a ticket lifecycle transition such as assignment, resolution, reopening,
-        or pending status. Use this tool -- not Update_object -- for status changes.
-        Resolve tickets with ev_resolve and include a solution in fields; never use
-        ev_close. Prefer ticket_ref; bare ticket numbers are resolved automatically."""
-        parsed = parse_json_arg(fields, "fields")
-        if isinstance(parsed, str):
-            return parsed
-
-        if stimulus == "ev_close":
-            return (
-                "Error: ev_close is not permitted in this workflow. "
-                "To close a ticket, use ev_resolve with a solution in fields, "
-                'e.g. fields={"solution": "..."}. Resolving is the final step.'
-            )
-
-        obj_class, resolved = await resolve_key(obj_class, coerce_ref(ticket_ref, key))
-
-        result = await client.apply_stimulus(
-            obj_class,
-            resolved,
-            stimulus,
-            fields=parsed,
-            output_fields=ensure_ref_field(obj_class, output_fields),
-            comment=comment or DEFAULT_COMMENT,
         )
         return format_and_cache(result)
 
