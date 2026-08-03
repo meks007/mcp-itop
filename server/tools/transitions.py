@@ -24,9 +24,11 @@ Both tools share a common lookup pattern:
      just the target state. Fields from each state are merged; duplicate
      field names accumulate their option flags.
 
-  5. In object mode (obj_id provided), read the current state, verify that
-     target_state is directly reachable via a user-action stimulus, and
-     return only the fields required for that single immediate transition.
+  5. In object mode (obj_id provided), the current state is read from iTop
+     and used as the fixed starting point. Path finding then behaves
+     identically to schema mode with current_state set. This means multi-
+     step paths are shown when target_state is not directly reachable.
+     Apply_stimulus_to_object still only accepts a single direct transition.
 
 Stimulus classification
 -----------------------
@@ -353,6 +355,47 @@ def _select_paths(
 
 
 # ---------------------------------------------------------------------------
+# Shared path output builder
+# ---------------------------------------------------------------------------
+
+def _render_paths(
+    shown_paths: list[tuple[str, list[tuple[str, str, str]]]],
+    all_paths: list[tuple[str, list[tuple[str, str, str]]]],
+    target_state: str,
+    start_label: str,
+    transitions: dict,
+    fields_def: dict,
+    path_mode: str,
+) -> str:
+    """Render the standard multi-path output block used by both modes."""
+    total = len(all_paths)
+    shown = len(shown_paths)
+
+    lines = [
+        "Paths to '" + target_state + "'"
+        + (" from '" + start_label + "'" if start_label else "")
+        + " (" + str(shown) + " of " + str(total) + " shown):",
+        _ID_FIELDS_NOTE,
+        "",
+    ]
+
+    for i, (start, path) in enumerate(shown_paths, 1):
+        lines.append("Path " + str(i) + ": " + _format_path(path, transitions))
+        lines.append("Required fields along this path:")
+        lines += _format_path_fields(start, path, transitions, fields_def)
+        lines.append("")
+
+    if path_mode == "usual" and shown < total:
+        lines.append(
+            "Showing " + str(shown) + " representative paths out of "
+            + str(total) + " found. Strongly recommended: provide obj_id "
+            "for the valid next transition and required fields."
+        )
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Tool registration
 # ---------------------------------------------------------------------------
 
@@ -388,21 +431,22 @@ def register(mcp, client: ItopClient) -> None:
             "all"             -- all paths, no limit.
 
         WITH obj_id (object mode):
-          Reads the current state of the specific object, verifies that
-          target_state is directly reachable via a user-action stimulus, and
-          returns the single immediate transition with its required fields.
-          path_mode is ignored in this mode.
+          Reads the current state of the specific object and uses it as the
+          fixed starting point. Path finding then behaves identically to
+          schema mode with current_state set -- multi-step paths are shown
+          when target_state is not directly reachable from the live state.
+          path_mode is respected in this mode.
 
         Parameters:
           obj_class     - iTop class name, e.g. UserRequest
           target_state  - desired target state, e.g. resolved, assigned
           obj_id        - optional ticket ref or numeric ID (e.g. R-001234)
-          current_state - optional starting state for schema-mode search
-          path_mode     - "usual" (default) or "all"; ignored when obj_id set
+          current_state - optional starting state for schema-mode search;
+                          ignored when obj_id is provided
+          path_mode     - "usual" (default) or "all"
 
         Returns:
-          - Reachable paths with per-path required fields (schema mode), or
-            single direct transition with required fields (object mode).
+          - Reachable paths with per-path required fields.
           - [internal] label on system-driven edges.
           - Hint to provide obj_id when the result list is capped.
         """
@@ -413,81 +457,7 @@ def register(mcp, client: ItopClient) -> None:
         transitions = schema.get("transitions", {})
         fields_def = schema.get("fields", {})
 
-        # ----------------------------------------------------------------
-        # Object mode: obj_id provided
-        # ----------------------------------------------------------------
-        if obj_id and obj_id.strip():
-            resolved_class, resolved = await resolve_key(obj_class, obj_id)
-            result = await client.get(resolved_class, resolved, fields="status")
-            cur = _get_current_state(result, obj_id)
-            if not cur:
-                return "Error: object " + obj_id + " not found or status field unavailable."
-
-            current_map = transitions.get(cur, {})
-            reachable = current_map.get("targets", {})
-
-            if target_state not in reachable:
-                valid = ", ".join(reachable.keys()) if reachable else "none"
-                return (
-                    "Error: target_state '" + target_state + "' is not directly reachable "
-                    "from current state '" + cur + "' via an exposed transition.\n"
-                    "Directly reachable states from '" + cur + "': " + valid
-                )
-
-            stim_map = reachable[target_state]
-            stimulus = list(stim_map.keys())[0]
-            stype = (
-                stim_map[stimulus].get("type", "")
-                if isinstance(stim_map[stimulus], dict)
-                else ""
-            )
-
-            if stype != "StimulusUserAction":
-                return (
-                    "Error: transition to '" + target_state + "' uses an internal stimulus '"
-                    + stimulus + "' and cannot be applied by this tool. "
-                    "iTop triggers it automatically."
-                )
-
-            lines = [
-                "Transition:  " + cur + " -> " + target_state,
-                "Stimulus:    " + stimulus,
-                "",
-                "Required fields for target state '" + target_state + "':",
-                _ID_FIELDS_NOTE,
-            ]
-            lines += _format_state_fields(target_state, transitions, fields_def)
-            lines += [
-                "",
-                "Call Apply_stimulus_to_object with:",
-                "  obj_class    = " + resolved_class,
-                "  obj_id       = " + obj_id,
-                "  target_state = " + target_state,
-                "  field_lines  =",
-            ]
-            state_fields = transitions.get(target_state, {}).get("fields", {})
-            if isinstance(state_fields, dict):
-                for field_name, field_opts in state_fields.items():
-                    opts = field_opts.get("options", []) if isinstance(field_opts, dict) else []
-                    if set(opts) & _REQUIRED_OPTIONS:
-                        lines.append("    " + field_name + "=<value>")
-
-            return "\n".join(lines)
-
-        # ----------------------------------------------------------------
-        # Schema mode: no obj_id
-        # ----------------------------------------------------------------
         all_states = list(transitions.keys())
-
-        if current_state and current_state.strip():
-            if current_state not in transitions:
-                return (
-                    "Error: current_state '" + current_state + "' not found in schema.\n"
-                    "Known states: " + ", ".join(all_states)
-                )
-            start_states = [current_state]
-        else:
-            start_states = all_states
 
         if target_state not in transitions:
             return (
@@ -495,6 +465,32 @@ def register(mcp, client: ItopClient) -> None:
                 "Known states: " + ", ".join(all_states)
             )
 
+        # ----------------------------------------------------------------
+        # Resolve starting state
+        # ----------------------------------------------------------------
+        if obj_id and obj_id.strip():
+            resolved_class, resolved = await resolve_key(obj_class, obj_id)
+            result = await client.get(resolved_class, resolved, fields="status")
+            cur = _get_current_state(result, obj_id)
+            if not cur:
+                return "Error: object " + obj_id + " not found or status field unavailable."
+            start_states = [cur]
+            start_label = cur
+        elif current_state and current_state.strip():
+            if current_state not in transitions:
+                return (
+                    "Error: current_state '" + current_state + "' not found in schema.\n"
+                    "Known states: " + ", ".join(all_states)
+                )
+            start_states = [current_state]
+            start_label = current_state
+        else:
+            start_states = all_states
+            start_label = ""
+
+        # ----------------------------------------------------------------
+        # Path finding (identical for both modes)
+        # ----------------------------------------------------------------
         all_paths: list[tuple[str, list[tuple[str, str, str]]]] = []
         for start in start_states:
             if start == target_state:
@@ -505,7 +501,7 @@ def register(mcp, client: ItopClient) -> None:
         if not all_paths:
             return (
                 "No paths found to target_state '" + target_state + "'"
-                + (" from '" + current_state + "'" if current_state else "")
+                + (" from '" + start_label + "'" if start_label else "")
                 + "."
             )
 
@@ -514,31 +510,10 @@ def register(mcp, client: ItopClient) -> None:
         else:
             shown_paths = _select_paths(all_paths, transitions, MAX_USUAL_PATHS)
 
-        total = len(all_paths)
-        shown = len(shown_paths)
-
-        lines = [
-            "Paths to '" + target_state + "'"
-            + (" from '" + current_state + "'" if current_state else "")
-            + " (" + str(shown) + " of " + str(total) + " shown):",
-            _ID_FIELDS_NOTE,
-            "",
-        ]
-
-        for i, (start, path) in enumerate(shown_paths, 1):
-            lines.append("Path " + str(i) + ": " + _format_path(path, transitions))
-            lines.append("Required fields along this path:")
-            lines += _format_path_fields(start, path, transitions, fields_def)
-            lines.append("")
-
-        if path_mode == "usual" and shown < total:
-            lines.append(
-                "Showing " + str(shown) + " representative paths out of "
-                + str(total) + " found. Strongly recommended: provide obj_id "
-                "for the valid next transition and required fields."
-            )
-
-        return "\n".join(lines)
+        return _render_paths(
+            shown_paths, all_paths, target_state, start_label,
+            transitions, fields_def, path_mode,
+        )
 
     # ------------------------------------------------------------------ #
     #  TOOL 2: Apply_stimulus_to_object                                    #
@@ -555,6 +530,10 @@ def register(mcp, client: ItopClient) -> None:
         """Apply a lifecycle transition to an iTop object by specifying the
         desired target_state. The correct stimulus is resolved automatically
         from the current state of the object.
+
+        Only a single direct transition is supported. If target_state requires
+        multiple steps, use Describe_state_change to find the correct sequence
+        and apply each step individually.
 
         Parameters:
           obj_class     - iTop class name, e.g. UserRequest
@@ -591,9 +570,11 @@ def register(mcp, client: ItopClient) -> None:
         if target_state not in reachable:
             valid = ", ".join(reachable.keys()) if reachable else "none"
             return (
-                "Error: target_state '" + target_state + "' is not reachable from "
-                "current state '" + current_state + "'.\n"
-                "Reachable states: " + valid
+                "Error: target_state '" + target_state + "' is not directly reachable from "
+                "current state '" + current_state + "'. Only a single direct transition is "
+                "supported here.\n"
+                "Directly reachable states: " + valid + "\n"
+                "Use Describe_state_change to find the full path to '" + target_state + "'."
             )
 
         stim_map = reachable[target_state]
