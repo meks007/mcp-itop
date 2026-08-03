@@ -476,11 +476,13 @@ def cache_cleanup() -> None:
 # Stores the normalised transition schema (fields + transitions) per iTop class.
 #
 # Normalisation (applied once on every cache miss):
-#   - Fields: only options in REQUIRED_FIELD_OPTIONS are retained per field.
-#             Fields with no remaining required option are dropped entirely.
+#   - Top-level fields: preserved as-is from REST (type, values, etc.).
+#     These are field metadata used for hints -- they carry no option flags
+#     and must not be filtered by _normalise_fields().
+#   - Per-state fields in transitions: only options in REQUIRED_FIELD_OPTIONS
+#     are retained. Fields with no remaining required option are dropped.
 #   - Targets: ALL transitions returned by REST are preserved. The REST API
-#              is the single authority on which stimuli are exposed. The MCP
-#              backend does not filter by StimulusUserAction or StimulusInternal.
+#     is the single authority on which stimuli are exposed.
 #
 # Key:   obj_class string, e.g. "UserRequest"
 # Value: normalised dict with keys "fields" and "transitions"
@@ -497,9 +499,9 @@ _transition_cache: TTLCache = TTLCache(
 def _normalise_transition_schema(schema: dict) -> dict:
     """Return a normalised copy of a raw enumerate_transitions schema.
 
-    Field normalisation (applied to top-level "fields" and per-state "fields"):
-      - Strip any option not in REQUIRED_FIELD_OPTIONS.
-      - Drop the field entirely when no required option remains.
+    Top-level field metadata (type, values, etc.) is preserved verbatim.
+    Per-state field options are filtered to REQUIRED_FIELD_OPTIONS only;
+    state fields with no remaining required option are dropped entirely.
 
     Target normalisation:
       - Preserve every valid target/stimulus entry returned by REST.
@@ -508,7 +510,9 @@ def _normalise_transition_schema(schema: dict) -> dict:
     The input dict is not mutated; a new dict is returned.
     """
 
-    def _normalise_fields(raw_fields) -> dict:
+    def _normalise_state_fields(raw_fields) -> dict:
+        # Filters per-state field entries: keeps only required option flags,
+        # drops fields that carry none of them.
         if not isinstance(raw_fields, dict):
             return {}
         result = {}
@@ -537,7 +541,11 @@ def _normalise_transition_schema(schema: dict) -> dict:
             result[next_state] = dict(stim_map)
         return result
 
-    normalised_fields = _normalise_fields(schema.get("fields", {}))
+    # Top-level fields are field metadata (type, values) used for hint
+    # generation. They must be preserved verbatim -- not filtered as if
+    # they were per-state option lists.
+    raw_top_fields = schema.get("fields", {})
+    normalised_fields = dict(raw_top_fields) if isinstance(raw_top_fields, dict) else {}
 
     raw_transitions = schema.get("transitions", {})
     normalised_transitions = {}
@@ -545,7 +553,7 @@ def _normalise_transition_schema(schema: dict) -> dict:
         if not isinstance(state_map, dict):
             continue
         normalised_transitions[state_name] = {
-            "fields": _normalise_fields(state_map.get("fields", {})),
+            "fields": _normalise_state_fields(state_map.get("fields", {})),
             "targets": _normalise_targets(state_map.get("targets", {})),
         }
 
