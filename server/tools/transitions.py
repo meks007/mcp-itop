@@ -441,24 +441,39 @@ def register(mcp, client: ItopClient) -> None:
     ) -> str:
         """Describe how to transition an iTop object to a given target state.
 
-        WITHOUT obj_id (schema mode): traverses the lifecycle graph from current_state
-        (or all states if omitted). Only paths reaching target_state are returned;
-        dead-end branches are pruned. Required fields are consolidated per path.
-        Internal (system-driven) steps are labelled [internal].
-        path_mode: "usual" (default, up to 10 deduplicated paths) or "all".
+        Two modes depending on whether obj_id is provided:
 
-        WITH obj_id (object mode): reads the live state and uses it as the fixed
-        start. Multi-step paths are shown when target_state is not directly reachable.
+        WITHOUT obj_id (schema mode):
+          Traverses the class lifecycle graph from current_state (or all
+          states when current_state is omitted). Only paths that can actually
+          reach target_state are returned; branches leading to unrelated
+          terminal states are pruned before traversal.
+          Each path is accompanied by its consolidated list of required
+          fields, merged from every state visited along that path.
+          Internal (system-driven) steps are shown with [internal] label.
+          path_mode controls the output volume:
+            "usual" (default) -- up to 10 deduplicated paths.
+            "all"             -- all paths, no limit.
+
+        WITH obj_id (object mode):
+          Reads the current state of the specific object and uses it as the
+          fixed starting point. Path finding then behaves identically to
+          schema mode with current_state set -- multi-step paths are shown
+          when target_state is not directly reachable from the live state.
+          path_mode is respected in this mode.
 
         Parameters:
-          obj_class     - iTop class, e.g. UserRequest
-          target_state  - desired state, e.g. resolved, assigned
+          obj_class     - iTop class name, e.g. UserRequest
+          target_state  - desired target state, e.g. resolved, assigned
           obj_id        - optional ticket ref or numeric ID (e.g. R-001234)
-          current_state - optional start state for schema mode; ignored with obj_id
+          current_state - optional starting state for schema-mode search;
+                          ignored when obj_id is provided
           path_mode     - "usual" (default) or "all"
 
-        Returns reachable paths with per-path required fields and [internal] labels.
-        Provide obj_id for the most accurate result.
+        Returns:
+          - Reachable paths with per-path required fields.
+          - [internal] label on system-driven edges.
+          - Hint to provide obj_id when the result list is capped.
         """
         if path_mode not in {"usual", "all"}:
             return "Error: path_mode must be \"usual\" or \"all\"."
@@ -542,15 +557,15 @@ def register(mcp, client: ItopClient) -> None:
         The correct stimulus is resolved automatically from the current state.
         Only a single direct transition is supported per call.
 
-        field_lines: required fields, one per line, key=value or key: value.
+        field_lines: optional fields, one per line, key=value or key: value.
         Both delimiters are accepted. Example:
           approver_id=24
           approval_reason=Approval requested.
 
-        The tool validates all required field constraints before applying:
-          MANDATORY  -- non-empty on the object or provided in field_lines.
-          MUSTPROMPT -- must be explicitly provided in field_lines.
-          MUSTCHANGE -- must differ from the current object value.
+        The tool validates field constraints before applying:
+          MANDATORY  -- value must be non-empty on the object or in field_lines.
+          MUSTPROMPT -- suggested as input; optional, does not block transition.
+          MUSTCHANGE -- must be explicitly provided and differ from current value.
 
         Use Describe_state_change first to see required fields.
         Use Describe_state_change if target_state is not directly reachable.
@@ -607,8 +622,9 @@ def register(mcp, client: ItopClient) -> None:
         #
         #   MUSTCHANGE  -- must be provided AND differ from the current value.
         #                  Takes priority over MUSTPROMPT/MANDATORY when combined.
-        #   MUSTPROMPT  -- must be explicitly provided in field_lines even when
-        #                  the field already has a value on the object.
+        #   MUSTPROMPT  -- suggested as input but not enforced here; the field
+        #                  is shown in Describe_state_change output so the caller
+        #                  is aware, but omitting it does NOT block the transition.
         #   MANDATORY   -- value must be non-empty either on the object already
         #                  or in field_lines. Already-set fields satisfy this.
         # ----------------------------------------------------------------
@@ -633,14 +649,12 @@ def register(mcp, client: ItopClient) -> None:
                         field_name + " (MUSTCHANGE: provide a new value different from '"
                         + current_val + "')"
                     )
-            elif "OPT_ATT_MUSTPROMPT" in options:
-                # Must be explicitly provided, even if already set on the object.
-                if not provided_val:
-                    missing.append(field_name + " (MUSTPROMPT: must be explicitly provided)")
             elif "OPT_ATT_MANDATORY" in options:
                 # Satisfied by either a provided value or an existing non-empty value.
                 if provided_val in _EMPTY_VALUES and current_val in _EMPTY_VALUES:
                     missing.append(field_name)
+            # OPT_ATT_MUSTPROMPT: shown in Describe_state_change as a prompt
+            # suggestion only; never blocks the transition here.
 
         if missing:
             return (
