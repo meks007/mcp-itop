@@ -49,12 +49,7 @@ def _is_empty(fv) -> bool:
     return False
 
 
-def _format_objects(
-    result: dict,
-    *,
-    strip_empty: bool = True,
-    annotations: dict[str, str] | None = None,
-) -> tuple[str, dict[str, list[dict]]]:
+def _format_objects(result: dict, *, strip_empty: bool = True, annotations: dict[str, str] | None = None, requested_class: str = "") -> tuple[str, dict[str, list[dict]]]:
     """Format iTop response objects into a readable string and extract inline image refs.
 
     Internal implementation -- call format_and_cache() from tool code instead.
@@ -80,6 +75,13 @@ def _format_objects(
     pre-formatted annotation line. When provided, each object's annotation is
     appended directly after that object's field block, keeping multi-object
     responses readable.
+
+    requested_class: when set and different from the actual class returned by
+    iTop (obj_data["class"]), a warning is emitted at the top of each object
+    block instructing the agent to use the concrete class for all further calls.
+    obj_data["class"] is always present in the REST response regardless of
+    output_fields, so the warning is reliable even when finalclass is not
+    included in the requested fields.
 
     Seeds the field registry from every response so resolve_output_fields
     hits the warm-cache path on subsequent calls for the same class.
@@ -113,6 +115,14 @@ def _format_objects(
                 "  link: " + ITOP_URL
                 + "/pages/UI.php?operation=details&class=" + cls + "&id=" + oid
             )
+        # Emit finalclass warning when the agent used an abstract base class.
+        # obj_data["class"] is always set by iTop regardless of output_fields.
+        if requested_class and cls != requested_class:
+            lines.append(
+                "  [!] This object has a finalclass of \"" + cls + "\". "
+                "Do not use class \"" + requested_class + "\". "
+                "Use \"" + cls + "\" for all further operations on this object."
+            )
         synthetic = {}
         for fn, fv in fields.items():
             if fn.startswith("_"):
@@ -138,22 +148,12 @@ def _format_objects(
     return "\n".join(lines), refs
 
 
-def format_objects(
-    result: dict,
-    *,
-    strip_empty: bool = True,
-    annotations: dict[str, str] | None = None,
-) -> tuple[str, dict[str, list[dict]]]:
+def format_objects(result: dict, *, strip_empty: bool = True, annotations: dict[str, str] | None = None, requested_class: str = "") -> tuple[str, dict[str, list[dict]]]:
     """Public alias for _format_objects. Kept for external callers."""
-    return _format_objects(result, strip_empty=strip_empty, annotations=annotations)
+    return _format_objects(result, strip_empty=strip_empty, annotations=annotations, requested_class=requested_class)
 
 
-def format_and_cache(
-    result: dict,
-    *,
-    strip_empty: bool = True,
-    annotations: dict[str, str] | None = None,
-) -> str:
+def format_and_cache(result: dict, *, strip_empty: bool = True, annotations: dict[str, str] | None = None, requested_class: str = "") -> str:
     """Format iTop response and persist inline image refs to SQLite.
 
     Calls _format_objects() to get the formatted text and the inline image
@@ -167,13 +167,16 @@ def format_and_cache(
     annotations is an optional dict mapping numeric object id (as str) to a
     pre-formatted annotation line appended after each object's field block.
 
+    requested_class: forwarded to _format_objects to enable the finalclass
+    mismatch warning. Leave empty (default) for all callers except Load_object.
+
     The deferred import of attachment_store avoids a circular import:
       helpers -> attachment_store -> config  (safe)
       attachment_store must NOT import helpers at module level.
     """
     from attachment_store import write_inline_image_refs
 
-    text, refs = _format_objects(result, strip_empty=strip_empty, annotations=annotations)
+    text, refs = _format_objects(result, strip_empty=strip_empty, annotations=annotations, requested_class=requested_class)
 
     for ticket_key, img_refs in refs.items():
         try:
