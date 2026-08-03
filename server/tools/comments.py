@@ -31,7 +31,8 @@ def register(mcp, client: ItopClient):
 
         Public comments are portal-visible; use private comments only when explicitly
         required. Prefer ticket_ref; bare ticket IDs are resolved automatically.
-        Use format='html' for HTML-formatted messages, format='text' (default) for plain text.
+        Use format='html' for HTML-formatted messages, format='text' for plain text.
+        Per default, create entries as HTML unless otherwise stated.
         To read existing comments, use Load_object with full=True."""
         if not ticket_ref and not ticket_id:
             return "Error: supply ticket_ref (e.g. 'R-016271') or ticket_id."
