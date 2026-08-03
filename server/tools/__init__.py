@@ -1,17 +1,5 @@
 """
-tools/__init__.py - registers all tool sub-modules with the mcp instance.
+tools/__init__.py - Tool sub-package marker.
 
-Import this module after creating the mcp instance to attach all tools.
+Tools are imported and registered directly in server.py.
 """
-
-from tools import analytics, attachments, comments, crud, kb, transitions
-
-
-def register_all(mcp, client):
-    """Register every tool module with the given mcp instance."""
-    crud.register(mcp, client)
-    transitions.register(mcp, client)
-    analytics.register(mcp, client)
-    attachments.register(mcp, client)
-    comments.register(mcp, client)
-    kb.register(mcp, client)
