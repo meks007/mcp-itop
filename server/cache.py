@@ -33,6 +33,9 @@ await token_cache.validate(token_hash, probe_fn)  -> bool
 await token_cache.evict_by_token(token_hash)      -> None
 await token_cache.evict_stale()                   -> int
 
+# Transition map (TTL from TRANSITION_CACHE_TTL env var, default 3600 s)
+await get_transition_map(obj_class, client)       -> dict
+
 Backward-compatible aliases keep existing callers working unchanged:
   registry_add_entry, registry_get_meta, registry_set_meta,
   registry_get_fields, seed_field_cache,
@@ -458,3 +461,44 @@ def cache_set(obj_class: str, ref: str, resolved_class: str, resolved_id: int) -
 
 def cache_cleanup() -> None:
     key_cache.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# Transition map cache
+# ---------------------------------------------------------------------------
+# Stores the full enumerate_transitions schema per iTop class.
+# Key:   obj_class string, e.g. "UserRequest"
+# Value: dict with keys "fields" and "transitions"
+# TTL:   TRANSITION_CACHE_TTL env var, default 3600 s (1 h)
+
+import os as _os
+
+_TRANSITION_CACHE_TTL = float(_os.environ.get("TRANSITION_CACHE_TTL", "3600"))
+_transition_cache: TTLCache = TTLCache(
+    ttl=_TRANSITION_CACHE_TTL, sliding=False, name="transition_cache"
+)
+
+
+async def get_transition_map(obj_class: str, client) -> dict:
+    """Return the cached transition map for obj_class, fetching on cache miss.
+
+    The schema is fetched via client.enumerate_transitions() and cached for
+    TRANSITION_CACHE_TTL seconds (default 3600). Subsequent calls within the
+    TTL window return the cached dict without an iTop round-trip.
+
+    Args:
+        obj_class: iTop class name, e.g. "UserRequest".
+        client:    ItopClient instance -- used only on cache miss.
+
+    Returns:
+        dict with top-level keys "fields" and "transitions".
+    """
+    cached = _transition_cache.get(obj_class)
+    if cached is not None:
+        logger.debug("[transition_cache] hit for cls=%r", obj_class)
+        return cached
+
+    logger.debug("[transition_cache] miss for cls=%r -- fetching from iTop", obj_class)
+    data = await client.enumerate_transitions(obj_class)
+    _transition_cache.set(obj_class, data)
+    return data
