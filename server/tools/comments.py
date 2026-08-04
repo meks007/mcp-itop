@@ -19,7 +19,7 @@ def register(mcp, client: ItopClient):
     """Register all comment tools on the given mcp instance."""
 
     @mcp.tool(
-        name="itop_add_comment"
+        name="Add_comment_to_ticket"
     )
     async def itop_add_comment(
         ticket_class: str,
