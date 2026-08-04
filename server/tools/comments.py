@@ -7,10 +7,12 @@ included in the full record, so a separate log-fetch call is never needed.
 
 from __future__ import annotations
 
-from typing import Optional, Union
+from typing import Literal, Optional, Union
 
 from client import ItopClient
 from helpers import coerce_ref, format_and_cache, resolve_key
+
+_VALID_LOG_FIELDS = {"public_log", "private_log", "private_log_ai"}
 
 
 def register(mcp, client: ItopClient):
@@ -24,20 +26,21 @@ def register(mcp, client: ItopClient):
         text: str,
         ticket_ref: Optional[str] = None,
         ticket_id: Optional[Union[int, str]] = None,
-        is_public: bool = True,
+        log_field: Literal["public_log", "private_log", "private_log_ai"] = "public_log",
         format: str = "text",
     ) -> str:
-        """Add a public or private log entry to an iTop ticket.
+        """Add a log entry to an iTop ticket.
 
-        Public comments are portal-visible; use private comments only when explicitly
-        required. Prefer ticket_ref; bare ticket IDs are resolved automatically.
+        Use log_field='public_log' to write a portal-visible comment (default).
+        Prefer ticket_ref; bare ticket IDs are resolved automatically.
         Use format='html' for HTML-formatted messages, format='text' for plain text.
         Per default, create entries as HTML unless otherwise stated.
         To read existing comments, use Load_object with full=True."""
         if not ticket_ref and not ticket_id:
             return "Error: supply ticket_ref (e.g. 'R-016271') or ticket_id."
 
-        log_field = "public_log" if is_public else "private_log"
+        if log_field not in _VALID_LOG_FIELDS:
+            return "Error: log_field must be one of " + ", ".join(sorted(_VALID_LOG_FIELDS)) + "."
 
         ticket_class, key = await resolve_key(
             ticket_class, coerce_ref(ticket_ref or "", ticket_id or "")
@@ -55,6 +58,6 @@ def register(mcp, client: ItopClient):
                 }
             },
             output_fields="id, ref, friendlyname",
-            comment="MCP: added " + ("public" if is_public else "private") + " comment",
+            comment="MCP: added comment to " + log_field,
         )
         return format_and_cache(result)
