@@ -19,7 +19,7 @@ def register(mcp, client: ItopClient):
     """Register all comment tools on the given mcp instance."""
 
     @mcp.tool(
-        name="Add_comment_to_ticket"
+        name="itop_add_comment"
     )
     async def itop_add_comment(
         ticket_class: str,
@@ -27,14 +27,13 @@ def register(mcp, client: ItopClient):
         ticket_ref: Optional[str] = None,
         ticket_id: Optional[Union[int, str]] = None,
         log_field: Literal["public_log", "private_log", "private_log_ai"] = "public_log",
-        format: str = "text",
+        format: Literal["html", "text"] = "html",
     ) -> str:
         """Add a log entry to an iTop ticket.
 
         Use log_field='public_log' to write a portal-visible comment or interim report (default).
         Prefer ticket_ref; bare ticket IDs are resolved automatically.
-        Use format='html' for HTML-formatted messages, format='text' for plain text.
-        Always create entries as HTML, unless otherwise stated.
+        Messages are posted as HTML by default. Pass format='text' for plain text only.
         To read existing comments, use Load_object with full=True."""
         if not ticket_ref and not ticket_id:
             return "Error: supply ticket_ref (e.g. 'R-016271') or ticket_id."
