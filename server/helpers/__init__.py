@@ -69,6 +69,13 @@ from helpers.formatters import (
     format_duration,
 )
 
+from helpers.mentions import (
+    get_mention_config,
+    resolve_mentions_in_text,
+    is_caselog_attribute,
+    MENTION_CONFIG_TTL_SECONDS,
+)
+
 # Class metadata cache helpers imported by some tool modules via "from helpers import ..."
 from cache import (
     registry_get_fields,
@@ -95,6 +102,9 @@ __all__ = [
     # formatters
     "extract_objects", "_format_objects", "format_objects",
     "format_and_cache", "format_table", "format_duration",
+    # mentions
+    "get_mention_config", "resolve_mentions_in_text",
+    "is_caselog_attribute", "MENTION_CONFIG_TTL_SECONDS",
     # class metadata cache pass-throughs
     "registry_get_fields", "registry_get_meta", "registry_set_meta",
     "seed_field_cache", "registry_add_entry",
