@@ -3,6 +3,18 @@ CRUD and utility tools: get, create, update, delete,
 get_related, list_operations, describe_class.
 
 Note: Apply_stimulus_to_object has been moved to tools/transitions.py.
+
+Mention resolution
+------------------
+Create_object and Update_object automatically resolve mention tokens in any
+field that is written and that Describe_class reports as Value:HTML, and in
+the message of any Case Log add_item payload (public_log, private_log,
+private_log_ai).
+
+The resolution is performed via helpers.mentions.resolve_mentions_in_text
+which calls company/describe_mentions (cached) and company/resolve_mentions.
+Tokens that cannot be resolved are left as plain text; the write operation
+is never blocked by a failed mention lookup.
 """
 
 from __future__ import annotations
@@ -23,6 +35,7 @@ from helpers import (
     _SYNTHETIC_FIELDS,
 )
 from helpers.stripping import _LEAN_STRIP
+from helpers.mentions import resolve_mentions_in_text, is_caselog_attribute
 from config import DEFAULT_COMMENT
 from cache import get_class_schema, find_lifecycle_state_attribute
 
@@ -142,6 +155,87 @@ async def _fetch_and_cache_ticket(
     return format_and_cache(result)
 
 
+# ---------------------------------------------------------------------------
+# Mention resolution helpers for field payloads
+# ---------------------------------------------------------------------------
+
+async def _resolve_mentions_in_fields(
+    fields: dict,
+    obj_class: str,
+    schema: dict | None,
+    client: ItopClient,
+) -> dict:
+    """Return a copy of *fields* with mention tokens resolved in HTML attributes.
+
+    Iterates over every key in *fields* and:
+      - If the key is a Case Log attribute (public_log / private_log /
+        private_log_ai) containing an add_item.message string, resolves
+        mention tokens in that message string.
+      - If the key is a plain Value:HTML field according to *schema*, resolves
+        mention tokens in the field value string.
+      - All other fields are left unchanged.
+
+    A separate company/resolve_mentions call is made per attribute so that
+    iTop can generate a context-correct href for each target attribute.
+
+    Args:
+        fields:     Parsed fields dict as supplied to core/create or core/update.
+        obj_class:  Concrete iTop class being written, e.g. "UserRequest".
+        schema:     Class schema from get_class_schema, or None when unavailable.
+                    When None, only Case Log attributes are processed.
+        client:     Active ItopClient instance.
+
+    Returns:
+        New dict equal to *fields* but with mention tokens replaced by <a>
+        elements wherever applicable.
+    """
+    if not isinstance(fields, dict):
+        return fields
+
+    # Build a set of known HTML field names from the schema.
+    html_fields: set[str] = set()
+    if schema:
+        for name, meta in schema.items():
+            if _field_kind(meta.get("type", "")) == "html":
+                html_fields.add(name)
+
+    result: dict = {}
+    for attr, value in fields.items():
+        # --- Case Log attribute (add_item payload) ---
+        if is_caselog_attribute(attr):
+            if (
+                isinstance(value, dict)
+                and isinstance(value.get("add_item"), dict)
+                and isinstance(value["add_item"].get("message"), str)
+            ):
+                msg = value["add_item"]["message"]
+                resolved_msg = await resolve_mentions_in_text(
+                    msg, obj_class, attr, client
+                )
+                new_add_item = dict(value["add_item"])
+                new_add_item["message"] = resolved_msg
+                result[attr] = dict(value)
+                result[attr]["add_item"] = new_add_item
+            else:
+                result[attr] = value
+            continue
+
+        # --- Plain Value:HTML field ---
+        if attr in html_fields and isinstance(value, str):
+            result[attr] = await resolve_mentions_in_text(
+                value, obj_class, attr, client
+            )
+            continue
+
+        result[attr] = value
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Tool registration
+# ---------------------------------------------------------------------------
+
 def register(mcp, client: ItopClient):
     """Register all CRUD tools on the given mcp instance."""
 
@@ -248,10 +342,29 @@ def register(mcp, client: ItopClient):
         output_fields: str = "id, friendlyname",
         comment: str = "",
     ) -> str:
-        """Create an iTop object. Use Describe_class first if the required fields are unknown."""
+        """Create an iTop object. Use Describe_class first if the required fields are unknown.
+
+        Mention tokens in Value:HTML fields and Case Log add_item messages are
+        resolved automatically before the object is created:
+          @<id>     Person by numeric id (resolve Person first, then use @<id>)
+          ?<id>     FAQ article by numeric id (resolve FAQ first, then use ?<id>)
+          R-<ref>   UserRequest reference -- resolved automatically
+          I-<ref>   Incident reference -- resolved automatically
+          C-<ref>   Change reference -- resolved automatically
+        Unresolvable tokens are stored as plain text without blocking the create.
+        """
         parsed = parse_json_arg(fields, "fields")
         if isinstance(parsed, str):
             return parsed
+
+        # Load schema to identify Value:HTML fields. Failure is non-fatal;
+        # only Case Log attributes will be processed when schema is unavailable.
+        try:
+            schema = await get_class_schema(obj_class, client)
+        except Exception:
+            schema = None
+
+        parsed = await _resolve_mentions_in_fields(parsed, obj_class, schema, client)
 
         result = await client.create(
             obj_class,
@@ -283,6 +396,15 @@ def register(mcp, client: ItopClient):
 
         Any other field named 'status' that is not the lifecycle state attribute
         of the concrete class can be updated normally through this tool.
+
+        Mention tokens in Value:HTML fields and Case Log add_item messages are
+        resolved automatically before the update is written:
+          @<id>     Person by numeric id (resolve Person first, then use @<id>)
+          ?<id>     FAQ article by numeric id (resolve FAQ first, then use ?<id>)
+          R-<ref>   UserRequest reference -- resolved automatically
+          I-<ref>   Incident reference -- resolved automatically
+          C-<ref>   Change reference -- resolved automatically
+        Unresolvable tokens are stored as plain text without blocking the update.
         """
         parsed = parse_json_arg(fields, "fields")
         if isinstance(parsed, str):
@@ -306,6 +428,7 @@ def register(mcp, client: ItopClient):
             # describe_class unavailable -- cannot determine lifecycle attribute.
             # Allow the update to proceed; iTop will reject protected fields itself.
             lifecycle_attribute = None
+            schema = None
 
         if lifecycle_attribute and isinstance(parsed, dict) and lifecycle_attribute in parsed:
             return (
@@ -314,6 +437,8 @@ def register(mcp, client: ItopClient):
                 + "' and cannot be set via Update_object. "
                 "Use Apply_stimulus_to_object with the appropriate target_state instead."
             )
+
+        parsed = await _resolve_mentions_in_fields(parsed, obj_class, schema, client)
 
         result = await client.update(
             obj_class,
