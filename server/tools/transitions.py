@@ -10,21 +10,26 @@ Both tools share a common lookup pattern:
      The schema contains every transition returned by the REST API and only
      fields with a required option (MANDATORY, MUSTPROMPT, MUSTCHANGE).
 
-  2. Optionally read the current status of the ticket via a core/get call
-     (only when obj_id is provided -- object mode).
+  2. Resolve the lifecycle state attribute via find_lifecycle_state_attribute()
+     applied to the top-level 'fields' dict of the schema. The attribute name
+     is whatever field carries is_lifecycle_state=true in the REST response --
+     it is NOT assumed to be 'status'.
 
-  3. In schema mode (no obj_id), first compute which states can reach the
+  3. Optionally read the current lifecycle state of the object via a core/get
+     call (only when obj_id is provided -- object mode).
+
+  4. In schema mode (no obj_id), first compute which states can reach the
      requested target_state via reverse-reachability (BFS from target
      walking edges backwards). Then run a forward DFS restricted to that
      reachable set, so the path finder never wanders into branches that
      cannot lead to target_state (e.g. it will not follow resolved->closed
      when searching for approved).
 
-  4. Consolidate required fields PER PATH from every visited state, not
+  5. Consolidate required fields PER PATH from every visited state, not
      just the target state. Fields from each state are merged; duplicate
      field names accumulate their option flags.
 
-  5. In object mode (obj_id provided), the current state is read from iTop
+  6. In object mode (obj_id provided), the current state is read from iTop
      and used as the fixed starting point. Path finding then behaves
      identically to schema mode with current_state set. This means multi-
      step paths are shown when target_state is not directly reachable.
@@ -49,7 +54,7 @@ import json as _json
 import re as _re
 
 from client import ItopClient
-from cache import get_transition_map
+from cache import get_transition_map, find_lifecycle_state_attribute
 from helpers import resolve_key, format_and_cache, ensure_ref_field
 
 
@@ -129,13 +134,16 @@ def _build_hint(ftype: str, fvalues: dict) -> str:
     return "string value"
 
 
-def _get_current_state(result: dict, obj_id: str) -> str | None:
-    """Extract the status field from a core/get result dict."""
+def _get_current_lifecycle_state(result: dict, lifecycle_attribute: str) -> "str | None":
+    """Extract the lifecycle state value from a core/get result dict.
+
+    Uses the schema-derived attribute name rather than assuming 'status'.
+    """
     objects = result.get("objects") or {}
     if not objects:
         return None
     obj_data = next(iter(objects.values()))
-    return obj_data.get("fields", {}).get("status") or None
+    return obj_data.get("fields", {}).get(lifecycle_attribute) or None
 
 
 def _get_current_fields(result: dict) -> dict[str, str]:
@@ -456,11 +464,11 @@ def register(mcp, client: ItopClient) -> None:
             "all"             -- all paths, no limit.
 
         WITH obj_id (object mode):
-          Reads the current state of the specific object and uses it as the
-          fixed starting point. Path finding then behaves identically to
-          schema mode with current_state set -- multi-step paths are shown
-          when target_state is not directly reachable from the live state.
-          path_mode is respected in this mode.
+          Reads the current lifecycle state of the specific object and uses
+          it as the fixed starting point. Path finding then behaves
+          identically to schema mode with current_state set -- multi-step
+          paths are shown when target_state is not directly reachable from
+          the live state. path_mode is respected in this mode.
 
         Parameters:
           obj_class     - iTop class name, e.g. UserRequest
@@ -482,6 +490,19 @@ def register(mcp, client: ItopClient) -> None:
         transitions = schema.get("transitions", {})
         fields_def = schema.get("fields", {})
 
+        # Determine the lifecycle state attribute from the schema.
+        try:
+            lifecycle_attribute = find_lifecycle_state_attribute(fields_def)
+        except ValueError as exc:
+            return "Error: " + str(exc)
+
+        if lifecycle_attribute is None:
+            return (
+                "Error: class '" + obj_class
+                + "' has no lifecycle state machine (no field marked "
+                "is_lifecycle_state=true in the transition schema)."
+            )
+
         all_states = list(transitions.keys())
 
         if target_state not in transitions:
@@ -495,10 +516,16 @@ def register(mcp, client: ItopClient) -> None:
         # ----------------------------------------------------------------
         if obj_id and obj_id.strip():
             resolved_class, resolved = await resolve_key(obj_class, obj_id)
-            result = await client.get(resolved_class, resolved, fields="status")
-            cur = _get_current_state(result, obj_id)
+            result = await client.get(
+                resolved_class, resolved, fields=lifecycle_attribute
+            )
+            cur = _get_current_lifecycle_state(result, lifecycle_attribute)
             if not cur:
-                return "Error: object " + obj_id + " not found or status field unavailable."
+                return (
+                    "Error: object " + obj_id
+                    + " not found or lifecycle state field '"
+                    + lifecycle_attribute + "' unavailable."
+                )
             start_states = [cur]
             start_label = cur
         elif current_state and current_state.strip():
@@ -550,12 +577,15 @@ def register(mcp, client: ItopClient) -> None:
         obj_id: str,
         target_state: str,
         field_lines: str = "",
-        output_fields: str = "ref, friendlyname, status",
+        output_fields: str = "id, friendlyname",
     ) -> str:
         """Apply a lifecycle transition to an iTop object.
 
         The correct stimulus is resolved automatically from the current state.
         Only a single direct transition is supported per call.
+
+        The lifecycle state attribute (the field that drives workflow transitions)
+        is determined from the class schema and is not assumed to be 'status'.
 
         field_lines: optional fields, one per line, key=value or key: value.
         Both delimiters are accepted. Example:
@@ -572,14 +602,32 @@ def register(mcp, client: ItopClient) -> None:
         """
         schema = await get_transition_map(obj_class, client)
         transitions = schema.get("transitions", {})
+        fields_def = schema.get("fields", {})
+
+        # Determine the lifecycle state attribute from the schema.
+        try:
+            lifecycle_attribute = find_lifecycle_state_attribute(fields_def)
+        except ValueError as exc:
+            return "Error: " + str(exc)
+
+        if lifecycle_attribute is None:
+            return (
+                "Error: class '" + obj_class
+                + "' has no lifecycle state machine (no field marked "
+                "is_lifecycle_state=true in the transition schema)."
+            )
 
         obj_class, resolved = await resolve_key(obj_class, obj_id)
 
-        # Single fetch: status + all fields for validation in one round-trip.
+        # Single fetch: lifecycle state + all fields for validation in one round-trip.
         result = await client.get(obj_class, resolved, fields="*")
-        current_state = _get_current_state(result, obj_id)
+        current_state = _get_current_lifecycle_state(result, lifecycle_attribute)
         if not current_state:
-            return "Error: object " + obj_id + " not found or status field unavailable."
+            return (
+                "Error: object " + obj_id
+                + " not found or lifecycle state field '"
+                + lifecycle_attribute + "' unavailable."
+            )
 
         current_fields = _get_current_fields(result)
 
@@ -664,11 +712,18 @@ def register(mcp, client: ItopClient) -> None:
                 + "\n\nCall Describe_state_change to see all required fields."
             )
 
+        # Append the lifecycle state attribute to output_fields so the caller
+        # always receives the new lifecycle state in the response, regardless
+        # of what the attribute is named on this class.
+        effective_output = output_fields
+        if lifecycle_attribute not in effective_output:
+            effective_output = effective_output.rstrip(", ") + ", " + lifecycle_attribute
+
         apply_result = await client.apply_stimulus(
             obj_class,
             resolved,
             stimulus,
             fields=provided,
-            output_fields=ensure_ref_field(obj_class, output_fields),
+            output_fields=ensure_ref_field(obj_class, effective_output),
         )
         return format_and_cache(apply_result)
