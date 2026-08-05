@@ -447,41 +447,24 @@ def register(mcp, client: ItopClient) -> None:
         current_state: str = "",
         path_mode: str = "usual",
     ) -> str:
-        """Describe how to transition an iTop object to a given target state.
+        """Show lifecycle paths that can transition an iTop object to target_state.
 
-        Two modes depending on whether obj_id is provided:
+        Without obj_id (schema mode), searches from current_state or all states.
+        Returns only paths that can reach target_state, with required fields
+        collected across each path. System-driven edges are marked [internal].
 
-        WITHOUT obj_id (schema mode):
-          Traverses the class lifecycle graph from current_state (or all
-          states when current_state is omitted). Only paths that can actually
-          reach target_state are returned; branches leading to unrelated
-          terminal states are pruned before traversal.
-          Each path is accompanied by its consolidated list of required
-          fields, merged from every state visited along that path.
-          Internal (system-driven) steps are shown with [internal] label.
-          path_mode controls the output volume:
-            "usual" (default) -- up to 10 deduplicated paths.
-            "all"             -- all paths, no limit.
-
-        WITH obj_id (object mode):
-          Reads the current lifecycle state of the specific object and uses
-          it as the fixed starting point. Path finding then behaves
-          identically to schema mode with current_state set -- multi-step
-          paths are shown when target_state is not directly reachable from
-          the live state. path_mode is respected in this mode.
+        With obj_id (object mode), reads the object's current lifecycle state and
+        searches from that fixed state. Multi-step paths may be returned, but
+        Apply_stimulus_to_object can perform only one direct transition per call.
 
         Parameters:
-          obj_class     - iTop class name, e.g. UserRequest
-          target_state  - desired target state, e.g. resolved, assigned
-          obj_id        - optional ticket ref or numeric ID (e.g. R-001234)
-          current_state - optional starting state for schema-mode search;
-                          ignored when obj_id is provided
-          path_mode     - "usual" (default) or "all"
+          obj_class: iTop class, e.g. UserRequest
+          target_state: desired state, e.g. resolved
+          obj_id: optional object reference or numeric ID
+          current_state: optional start state; ignored when obj_id is supplied
+          path_mode: "usual" (up to 10 representative paths) or "all"
 
-        Returns:
-          - Reachable paths with per-path required fields.
-          - [internal] label on system-driven edges.
-          - Hint to provide obj_id when the result list is capped.
+        Provide obj_id when a specific object's next valid transition is needed.
         """
         if path_mode not in {"usual", "all"}:
             return "Error: path_mode must be \"usual\" or \"all\"."
@@ -579,26 +562,26 @@ def register(mcp, client: ItopClient) -> None:
         field_lines: str = "",
         output_fields: str = "id, friendlyname",
     ) -> str:
-        """Apply a lifecycle transition to an iTop object.
+        """Apply one direct, user-action lifecycle transition to an iTop object.
 
-        The correct stimulus is resolved automatically from the current state.
-        Only a single direct transition is supported per call.
+        The tool resolves the required stimulus from the object's current state.
+        If the target state is not directly reachable, use Describe_state_change
+        to find the full path. Internal system-driven transitions cannot be applied.
 
-        The lifecycle state attribute (the field that drives workflow transitions)
-        is determined from the class schema and is not assumed to be 'status'.
+        The lifecycle state attribute is determined from the class schema via the
+        REST API flag is_lifecycle_state=true; it is not assumed to be "status".
 
-        field_lines: optional fields, one per line, key=value or key: value.
-        Both delimiters are accepted. Example:
+        field_lines accepts optional input fields, one per line, key=value or
+        key: value. Example:
           approver_id=24
           approval_reason=Approval requested.
 
-        The tool validates field constraints before applying:
-          MANDATORY  -- value must be non-empty on the object or in field_lines.
-          MUSTPROMPT -- suggested as input; optional, does not block transition.
-          MUSTCHANGE -- must be explicitly provided and differ from current value.
+        Validation rules:
+          MANDATORY: value must already exist on the object or be supplied.
+          MUSTPROMPT: suggested input; does not block the transition.
+          MUSTCHANGE: supply a new value different from the current value.
 
-        Use Describe_state_change first to see required fields.
-        Use Describe_state_change if target_state is not directly reachable.
+        Use Describe_state_change first to identify paths and required fields.
         """
         schema = await get_transition_map(obj_class, client)
         transitions = schema.get("transitions", {})
