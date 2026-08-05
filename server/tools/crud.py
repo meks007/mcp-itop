@@ -24,7 +24,7 @@ from helpers import (
 )
 from helpers.stripping import _LEAN_STRIP
 from config import DEFAULT_COMMENT
-from cache import get_class_schema
+from cache import get_class_schema, find_lifecycle_state_attribute
 
 
 # ---------------------------------------------------------------------------
@@ -103,12 +103,17 @@ def _format_field_entry(name: str, meta: dict) -> str:
     elif kind == "text":
         lines.append("    format: text")
 
+    # Mark the lifecycle state attribute explicitly so the model knows
+    # this field cannot be updated directly via Update_object.
+    if meta.get("is_lifecycle_state") is True:
+        lines.append("    lifecycle state: yes -- use Apply_stimulus_to_object")
+
     return "\n".join(lines)
 
 
 async def _fetch_and_cache_ticket(
     obj_class: str,
-    obj_id: str | int,
+    obj_id: "str | int",
     client: ItopClient,
     *,
     full: bool = False,
@@ -264,25 +269,51 @@ def register(mcp, client: ItopClient):
         fields: str,
         ticket_ref: str = "",
         key: Union[str, int] = "",
-        output_fields: str = "ref, friendlyname, status",
+        output_fields: str = "id, friendlyname",
         comment: str = "",
     ) -> str:
         """Update fields on an existing iTop object.
 
         For tickets, prefer ticket_ref; bare ticket numbers are resolved automatically.
-        Do not update status with this tool -- use Apply_stimulus_to_object for lifecycle
-        transitions such as assignment, resolution, reopening, proposing or pending status."""
+
+        The lifecycle state attribute of a class (the field that drives workflow
+        transitions, e.g. 'status' on UserRequest) cannot be set via this tool.
+        Use Apply_stimulus_to_object for any lifecycle transition such as
+        assignment, resolution, reopening, proposing or pending status.
+
+        Any other field named 'status' that is not the lifecycle state attribute
+        of the concrete class can be updated normally through this tool.
+        """
         parsed = parse_json_arg(fields, "fields")
         if isinstance(parsed, str):
             return parsed
 
-        if isinstance(parsed, dict) and "status" in parsed:
+        # Resolve the concrete class before doing any schema lookup.
+        # A generic parent class or ticket ref may resolve to a concrete child
+        # class with its own lifecycle definition.
+        obj_class, resolved = await resolve_key(obj_class, coerce_ref(ticket_ref, key))
+
+        # Identify the lifecycle state attribute for this concrete class.
+        # get_class_schema is cached for the process lifetime, so this is a
+        # fast in-memory lookup after the first call.
+        try:
+            schema = await get_class_schema(obj_class, client)
+            lifecycle_attribute = find_lifecycle_state_attribute(schema)
+        except ValueError as exc:
+            # More than one field marked is_lifecycle_state=true -- broken schema.
+            return "Error: " + str(exc)
+        except Exception:
+            # describe_class unavailable -- cannot determine lifecycle attribute.
+            # Allow the update to proceed; iTop will reject protected fields itself.
+            lifecycle_attribute = None
+
+        if lifecycle_attribute and isinstance(parsed, dict) and lifecycle_attribute in parsed:
             return (
-                "Error: 'status' cannot be set via Update_object. "
+                "Error: '" + lifecycle_attribute
+                + "' is the lifecycle state attribute for class '" + obj_class
+                + "' and cannot be set via Update_object. "
                 "Use Apply_stimulus_to_object with the appropriate target_state instead."
             )
-
-        obj_class, resolved = await resolve_key(obj_class, coerce_ref(ticket_ref, key))
 
         result = await client.update(
             obj_class,
@@ -371,7 +402,8 @@ def register(mcp, client: ItopClient):
         """Describe the field schema of an iTop class.
 
         Uses company/describe_class to return authoritative field metadata
-        including field type, format (text/html), and allowed enum values.
+        including field type, format (text/html), allowed enum values, and
+        whether a field is the lifecycle state attribute of the class.
         Works for classes with zero instances. Results are cached for the
         lifetime of the server process.
         """
