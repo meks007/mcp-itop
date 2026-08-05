@@ -46,10 +46,11 @@ HTML generation
 ---------------
 Every resolved token is replaced by:
 
-  <a href="{href}" data-object-class="{class}" data-object-key="{id}">{label}</a>
+  <a href="{href}" data-role="object-mention"
+     data-object-class="{class}" data-object-key="{id}">{label}</a>
 
-All attribute values are HTML-escaped. The href delivered by iTop is used
-verbatim (after escaping); it is never constructed by this module.
+All attribute values are HTML-escaped. The href delivered by iTop is
+used verbatim (after escaping); it is never constructed by this module.
 
 Replacement is performed on plain-text token boundaries so that existing
 HTML markup, attribute values and already-linked text are not modified.
@@ -57,8 +58,8 @@ HTML markup, attribute values and already-linked text are not modified.
 Caching
 -------
 The describe_mentions configuration is cached in-process for
-MENTION_CONFIG_TTL_SECONDS (default 300). The cache is shared across all
-concurrent requests.
+MENTION_CONFIG_TTL_SECONDS (default 300). The cache is shared across
+all concurrent requests.
 """
 
 from __future__ import annotations
@@ -101,6 +102,9 @@ async def get_mention_config(client: "ItopClient") -> dict:
             ...
         }
 
+    PackAsRestResult() wraps the extension payload under "result".
+    We read response["result"] and fall back to an empty dict on any error.
+
     Args:
         client: Active ItopClient instance.
 
@@ -129,7 +133,8 @@ async def get_mention_config(client: "ItopClient") -> dict:
             response = await client.request({"operation": "company/describe_mentions"})
             if response.get("code", -1) != 0:
                 return _mention_config_cache or {}
-            config = response.get("mentions") or response
+            # PackAsRestResult wraps data under "result".
+            config = response.get("result") or {}
             if not isinstance(config, dict):
                 return _mention_config_cache or {}
             _mention_config_cache = config
@@ -216,6 +221,9 @@ async def _call_resolve_mentions(
 ) -> dict[str, dict]:
     """Call company/resolve_mentions and return a dict keyed by input token.
 
+    PackAsRestResult() wraps extension data under "result". We read
+    response["result"]["resolved"] accordingly.
+
     Args:
         tokens:     List of canonical mention tokens, e.g. ["R-000084", "@24"].
         obj_class:  Concrete iTop class of the object being written.
@@ -242,7 +250,8 @@ async def _call_resolve_mentions(
     if response.get("code", -1) != 0:
         return {}
 
-    resolved_list = response.get("resolved") or []
+    # PackAsRestResult wraps data under "result"; resolved list is nested.
+    resolved_list = (response.get("result") or {}).get("resolved") or []
     return {
         item["input"]: item
         for item in resolved_list
@@ -260,6 +269,12 @@ def _build_anchor(resolved: dict) -> str:
     All values are HTML-escaped.  The href delivered by iTop is used
     verbatim after escaping; it is never constructed here.
 
+    Required attributes per iTop Core mention detection:
+      href              - detail page URL
+      data-role         - must be "object-mention"
+      data-object-class - resolved iTop class
+      data-object-key   - resolved iTop object id
+
     Args:
         resolved: Single entry from the "resolved" array of
                   company/resolve_mentions.
@@ -273,6 +288,7 @@ def _build_anchor(resolved: dict) -> str:
     label = html.escape(str(resolved.get("label", "")))
     return (
         '<a href="' + href + '"'
+        + ' data-role="object-mention"'
         + ' data-object-class="' + obj_class + '"'
         + ' data-object-key="' + obj_id + '">'
         + label
