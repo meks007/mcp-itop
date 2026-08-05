@@ -250,24 +250,19 @@ def register(mcp, client: ItopClient):
         page: int = 0,
         full: bool = False,
     ):
-        """Retrieve iTop objects by class and key.
+        """Retrieve iTop objects by class and key, reference, numeric ID, or OQL.
 
-        key_or_ref identifies the object.
-        You always have to submit one of:
-          "R-016292"  ticket ref (preferred)
-          "16292"     bare number, resolved automatically
-          "15525"     numeric DB id
-          SELECT ...  OQL string
-        You CANNOT leave key_or_ref empty.
-        You CANNOT leave output_fields empty. If in doubt, use Describe_class or *
-        Batch same-class lookups with OQL instead of one call per object.
-        Use obj_class="Ticket" when the concrete class is unknown.
-        Set full=True only when private_log is explicitly asked for by the user.
-        output_fields is always honoured as-is; use output_fields=* together with
-        full=True to fetch all fields including private ones.
-        public_log is always included without full=True.
-        Do not disclose private_log unless explicitly requested by the user.
-        Redact or prohibit mentioning anything that could be a password or otherwise sensitive.
+        key_or_ref is required. Use a ticket reference such as "R-016292" when
+        available; bare numbers and numeric database IDs are resolved automatically.
+        For multi-object lookups, use an OQL query rather than one call per object.
+        Use obj_class="Ticket" when the concrete ticket class is unknown.
+
+        output_fields is required. Use Describe_class when field names are unknown;
+        use "*" to retrieve standard fields. public_log is included by default.
+        Set full=True only when the user explicitly requests private_log. Do not
+        disclose private_log otherwise, and redact passwords or other sensitive data.
+
+        Batch lookups of the same class with OQL when possible.
         """
 
         if not output_fields or not output_fields.strip():
@@ -388,23 +383,18 @@ def register(mcp, client: ItopClient):
         """Update fields on an existing iTop object.
 
         For tickets, prefer ticket_ref; bare ticket numbers are resolved automatically.
-
-        The lifecycle state attribute of a class (the field that drives workflow
-        transitions, e.g. 'status' on UserRequest) cannot be set via this tool.
-        Use Apply_stimulus_to_object for any lifecycle transition such as
-        assignment, resolution, reopening, proposing or pending status.
-
-        Any other field named 'status' that is not the lifecycle state attribute
-        of the concrete class can be updated normally through this tool.
+        Before updating a workflow-managed object, use Describe_class when needed to
+        identify its lifecycle state attribute. Describe_class derives this from the
+        REST API schema flag is_lifecycle_state=true. Do not include the lifecycle
+        state attribute in fields. Use Apply_stimulus_to_object when the object's
+        lifecycle state must change. All other fields can be updated normally.
 
         Mention tokens in Value:HTML fields and Case Log add_item messages are
-        resolved automatically before the update is written:
+        resolved automatically before the update:
           @<id>     Person by numeric id (resolve Person first, then use @<id>)
           ?<id>     FAQ article by numeric id (resolve FAQ first, then use ?<id>)
-          R-<ref>   UserRequest reference -- resolved automatically
-          I-<ref>   Incident reference -- resolved automatically
-          C-<ref>   Change reference -- resolved automatically
-        Unresolvable tokens are stored as plain text without blocking the update.
+          R-<ref>, I-<ref>, C-<ref>  ticket references, resolved automatically
+        Unresolvable tokens remain plain text and do not block the update.
         """
         parsed = parse_json_arg(fields, "fields")
         if isinstance(parsed, str):
