@@ -1,5 +1,5 @@
 """
-Comment tools: add ticket log entries.
+Comment tools: add ticket log entries, describe mention configuration.
 
 Mention tokens in the comment text are automatically resolved via
 company/resolve_mentions before the log entry is written to iTop.
@@ -21,14 +21,20 @@ The agent must resolve Person and FAQ objects via Load_object before writing
 the comment and use the confirmed numeric id in the token. Ticket references
 (R-, I-, C-) are resolved automatically from the text without a prior lookup.
 IDs and references must never be invented.
+
+Call Describe_mentions to obtain the currently configured tags and their target
+classes dynamically. This is the authoritative source; do not rely solely on
+the examples above.
 """
 
 from __future__ import annotations
 
+import json
 from typing import Literal, Optional, Union
 
 from client import ItopClient
 from helpers import coerce_ref, format_and_cache, resolve_key, resolve_mentions_in_text
+from helpers.mentions import get_mention_config
 
 _VALID_LOG_FIELDS = {"public_log", "private_log", "private_log_ai"}
 
@@ -60,6 +66,7 @@ def register(mcp, client: ItopClient):
           I-<ref>   Incident reference -- resolved automatically
           C-<ref>   Change reference -- resolved automatically
         Unresolvable tokens are stored as plain text without blocking the comment.
+        Call Describe_mentions for the authoritative and up-to-date tag list.
         """
         if not ticket_ref and not ticket_id:
             return "Error: supply ticket_ref (e.g. 'R-016271') or ticket_id."
@@ -93,3 +100,33 @@ def register(mcp, client: ItopClient):
             comment="MCP: added comment to " + log_field,
         )
         return format_and_cache(result)
+
+    @mcp.tool(
+        name="Describe_mentions"
+    )
+    async def itop_describe_mentions() -> str:
+        """Return the currently configured mention tags and their iTop target classes.
+
+        Call this tool before writing a mention to confirm the valid token syntax.
+        Use it:
+          - at the start of any task that requires an intentional Person or FAQ mention;
+          - when you need to verify currently valid tag characters and target classes;
+          - whenever the configuration may have changed (e.g. a new tag was added).
+
+        Returns a JSON object keyed by tag character, e.g.:
+          {
+            "@": {"class": "Person", "lookup_attribute": "id"},
+            "?": {"class": "FAQ", "lookup_attribute": "id"},
+            "R": {"class": "UserRequest", "lookup_attribute": "ref"},
+            "I": {"class": "Incident", "lookup_attribute": "ref"},
+            "C": {"class": "Change", "lookup_attribute": "ref"}
+          }
+
+        lookup_attribute "id":  strip the tag character, use the remaining digits as the object id.
+                                You must look up the object first and use the confirmed numeric id.
+        lookup_attribute "ref": use the full token as-is (e.g. R-000084). Resolved automatically.
+        """
+        config = await get_mention_config(client)
+        if not config:
+            return "Describe_mentions: no mention configuration returned by iTop (company/describe_mentions)."
+        return json.dumps(config, ensure_ascii=False)
