@@ -41,6 +41,9 @@ await get_transition_map(obj_class, client)       -> dict
 # Class schema (company/describe_class result, lifetime of process)
 await get_class_schema(obj_class, client)         -> dict
 
+# Lifecycle state attribute discovery
+find_lifecycle_state_attribute(fields)            -> str | None
+
 Backward-compatible aliases keep existing callers working unchanged:
   registry_add_entry, registry_get_meta, registry_set_meta,
   registry_get_fields, seed_field_cache,
@@ -85,6 +88,42 @@ REQUIRED_FIELD_OPTIONS: frozenset[str] = frozenset({
 
 
 # ---------------------------------------------------------------------------
+# Lifecycle state attribute discovery
+# ---------------------------------------------------------------------------
+
+def find_lifecycle_state_attribute(fields: dict) -> "str | None":
+    """Return the name of the field marked is_lifecycle_state=true, or None.
+
+    Both company/describe_class and company/enumerate_transitions return a
+    top-level 'fields' dict. When a class has a lifecycle state machine,
+    exactly one field in that dict carries is_lifecycle_state=true. All
+    other fields omit the property entirely.
+
+    Returns:
+        The field name (e.g. 'status', 'lifecycle_phase') when exactly one
+        field is marked, or None when no field is marked (no lifecycle).
+
+    Raises:
+        ValueError: when more than one field carries the marker. This
+            indicates a broken class definition and must not be guessed
+            around silently.
+    """
+    matches = [
+        field_name
+        for field_name, metadata in fields.items()
+        if isinstance(metadata, dict) and metadata.get("is_lifecycle_state") is True
+    ]
+
+    if len(matches) > 1:
+        raise ValueError(
+            "Invalid class schema: multiple fields are marked "
+            "is_lifecycle_state=true: " + ", ".join(sorted(matches))
+        )
+
+    return matches[0] if matches else None
+
+
+# ---------------------------------------------------------------------------
 # Base class: Cache[K, V]
 # ---------------------------------------------------------------------------
 
@@ -95,7 +134,7 @@ class Cache(Generic[K, V]):
     Concrete subclasses store entries in a plain dict and may add eviction.
     """
 
-    def get(self, key: K) -> V | None:  # noqa: D401
+    def get(self, key: K) -> "V | None":  # noqa: D401
         """Return the cached value for key, or None on miss."""
         raise NotImplementedError
 
@@ -137,7 +176,7 @@ class TTLCache(Cache[K, V]):
 
     # ------------------------------------------------------------------
 
-    def get(self, key: K) -> V | None:
+    def get(self, key: K) -> "V | None":
         if self._ttl <= 0:
             return None
         entry = self._store.get(key)
@@ -214,7 +253,7 @@ class ClassMetadataCache(Cache[str, ClassEntry]):
 
     # ------------------------------------------------------------------
 
-    def get(self, key: str) -> ClassEntry | None:
+    def get(self, key: str) -> "ClassEntry | None":
         entry = self._store.get(key)
         if logger.isEnabledFor(logging.DEBUG):
             if entry is not None:
@@ -307,7 +346,7 @@ class ClassMetadataCache(Cache[str, ClassEntry]):
                 cls, len(entry.fields),
             )
 
-    def get_schema(self, cls: str) -> dict | None:
+    def get_schema(self, cls: str) -> "dict | None":
         """Return the cached describe_class schema for cls, or None if not seeded."""
         entry = self._store.get(cls)
         if entry is None or not entry.schema:
@@ -499,7 +538,7 @@ def seed_field_cache(cls: str, fields: dict) -> None:
     class_cache.seed(cls, fields)
 
 
-def cache_get(obj_class: str, ref: str) -> tuple[str, int] | None:
+def cache_get(obj_class: str, ref: str) -> "tuple[str, int] | None":
     result = key_cache.get((obj_class, ref))
     if result is None:
         return None
@@ -520,9 +559,9 @@ def cache_cleanup() -> None:
 # Stores the normalised transition schema (fields + transitions) per iTop class.
 #
 # Normalisation (applied once on every cache miss):
-#   - Top-level fields: preserved as-is from REST (type, values, etc.).
-#     These are field metadata used for hints -- they carry no option flags
-#     and must not be filtered by _normalise_fields().
+#   - Top-level fields: preserved as-is from REST (type, values,
+#     is_lifecycle_state, etc.). These are field metadata used for hints and
+#     lifecycle state discovery -- they must not be filtered.
 #   - Per-state fields in transitions: only options in REQUIRED_FIELD_OPTIONS
 #     are retained. Fields with no remaining required option are dropped.
 #   - Targets: ALL transitions returned by REST are preserved. The REST API
@@ -543,9 +582,10 @@ _transition_cache: TTLCache = TTLCache(
 def _normalise_transition_schema(schema: dict) -> dict:
     """Return a normalised copy of a raw enumerate_transitions schema.
 
-    Top-level field metadata (type, values, etc.) is preserved verbatim.
-    Per-state field options are filtered to REQUIRED_FIELD_OPTIONS only;
-    state fields with no remaining required option are dropped entirely.
+    Top-level field metadata (type, values, is_lifecycle_state, etc.) is
+    preserved verbatim. Per-state field options are filtered to
+    REQUIRED_FIELD_OPTIONS only; state fields with no remaining required
+    option are dropped entirely.
 
     Target normalisation:
       - Preserve every valid target/stimulus entry returned by REST.
@@ -585,9 +625,9 @@ def _normalise_transition_schema(schema: dict) -> dict:
             result[next_state] = dict(stim_map)
         return result
 
-    # Top-level fields are field metadata (type, values) used for hint
-    # generation. They must be preserved verbatim -- not filtered as if
-    # they were per-state option lists.
+    # Top-level fields are field metadata (type, values, is_lifecycle_state)
+    # used for hint generation and lifecycle state attribute discovery.
+    # They must be preserved verbatim.
     raw_top_fields = schema.get("fields", {})
     normalised_fields = dict(raw_top_fields) if isinstance(raw_top_fields, dict) else {}
 
@@ -684,7 +724,8 @@ async def get_class_schema(obj_class: str, client) -> dict:
     validates the response, seeds the cache, and returns the schema.
 
     The schema dict maps field name to a metadata dict containing at least
-    'type', and optionally 'allowed_values' and 'values_limited'.
+    'type', and optionally 'allowed_values', 'values_limited', and
+    'is_lifecycle_state'.
 
     Args:
         obj_class: iTop class name, e.g. "UserRequest".
