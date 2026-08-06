@@ -253,13 +253,6 @@ def register(mcp, client: ItopClient):
         when field names are unknown. public_log is included by default.
         Set full=True only when the user explicitly requests private_log.
         Do not disclose private_log otherwise.
-
-        Output rendering:
-          Single object:   present as a two-column table with columns
-                           "Field" and "Value". Do not paraphrase fields
-                           in prose.
-          Multiple objects: present as a table with one row per object and
-                            one column per field.
         """
         if not output_fields or not output_fields.strip():
             visible = sorted(
@@ -406,10 +399,11 @@ def register(mcp, client: ItopClient):
         comment: str = "",
         simulate: bool = True,
     ) -> str:
-        """Deletion is disabled by policy. Do not use this tool to remove iTop objects.
+        """Deletion is disabled by policy. Do not use to remove iTop objects.
+        Runs in simulation mode only. Retained for controlled dry-run checks.
 
-        It runs in simulation mode by default and is retained only for controlled
-        dry-run checks."""
+        obj_id must be the confirmed integer database ID.
+        """
         result = await client.delete(
             obj_class,
             obj_id,
@@ -421,17 +415,20 @@ def register(mcp, client: ItopClient):
     @mcp.tool(name="Get_object_relations")
     async def itop_get_related(
         obj_class: str,
-        key: str,
+        obj_id: int,
         relation: str = "impacts",
         depth: int = 4,
         direction: str = "down",
         redundancy: bool = True,
     ) -> str:
-        """Find CIs related to a given object via impact or dependency relations."""
-        from helpers.utils import parse_key
+        """Find CIs related to a given object via impact or dependency relations.
+
+        obj_id must be the confirmed integer database ID. Use Resolve_object
+        first if you only have a ref.
+        """
         result = await client.get_related(
             obj_class,
-            parse_key(key),
+            obj_id,
             relation=relation,
             depth=depth,
             direction=direction,
@@ -439,75 +436,93 @@ def register(mcp, client: ItopClient):
         )
         output = format_and_cache(result)
         relations = result.get("relations")
-        if not relations:
-            return output
-        counts = []
-        for rel_type, rel_data in relations.items():
-            if isinstance(rel_data, dict):
-                counts.append(rel_type + ": " + str(len(rel_data)) + " object(s)")
-        if counts:
-            output = output + "\nRelation summary: " + ", ".join(counts)
+        if relations:
+            output += "\n\n--- Relations ---"
+            for origin, targets in relations.items():
+                for target in targets:
+                    output += "\n  " + origin + " -> " + str_or(target, "key", "?")
         return output
 
-    @mcp.tool(name="List_operations")
+    @mcp.tool(name="List_object_operations")
     async def itop_list_operations() -> str:
         """List all available REST/JSON operations on the iTop server."""
-        result = await client.list_operations()
+        result = await client.operations()
         if result.get("code", -1) != 0:
             return "Error: " + str_or(result, "message", "Unknown error")
         ops = result.get("operations", [])
-        if not ops:
-            return "No operations returned."
-        lines = ["Available iTop REST/JSON operations:", ""]
+        lines = ["Available operations (" + str(len(ops)) + "):"]
         for op in ops:
-            name = op.get("verb") or op.get("name") or str(op)
-            desc = op.get("description", "")
-            lines.append("  " + name + (": " + desc if desc else ""))
+            lines.append(
+                "  - " + str_or(op, "verb", "?") + ": "
+                + str_or(op, "description", "") + " ["
+                + str_or(op, "extension", "") + "]"
+            )
         return "\n".join(lines)
 
     @mcp.tool(name="Describe_class")
     async def itop_describe_class(obj_class: str) -> str:
         """Describe the field schema of an iTop class.
 
-        Uses company/describe_class to return authoritative field metadata
-        including field type, format (text/html), allowed enum values, and
-        whether a field is the lifecycle state attribute of the class.
+        Returns field metadata including type, format (text/html), allowed
+        enum values, and whether a field is the lifecycle state attribute.
         Works for classes with zero instances. Results are cached for the
         lifetime of the server process.
         """
         try:
             schema = await get_class_schema(obj_class, client)
         except ValueError as exc:
-            return "Error: " + str(exc)
+            return (
+                "Error fetching schema for '" + obj_class + "': " + str(exc)
+            )
+        except Exception as exc:
+            return (
+                "Unexpected error fetching schema for '" + obj_class + "': " + str(exc)
+            )
 
         if not schema:
-            return "No fields returned for class '" + obj_class + "'."
+            return "Class '" + obj_class + "' returned an empty schema."
 
-        writable: list[str] = []
-        derived: list[str] = []
-        linked: list[str] = []
+        enums = {}
+        refs = {}
+        links = {}
+        html_text = {}
+        derived = {}
+        plain = {}
 
-        for name, meta in sorted(schema.items()):
+        for name, meta in schema.items():
+            if name in _LEAN_STRIP:
+                continue
             kind = _field_kind(meta.get("type", ""))
-            entry = _format_field_entry(name, meta)
-            if kind == "derived":
-                derived.append(entry)
+            if kind == "enum":
+                enums[name] = meta
+            elif kind == "ref":
+                refs[name] = meta
             elif kind == "link":
-                linked.append(entry)
+                links[name] = meta
+            elif kind in ("html", "text"):
+                html_text[name] = meta
+            elif kind == "derived":
+                derived[name] = meta
             else:
-                writable.append(entry)
+                plain[name] = meta
 
-        sections: list[str] = ["Class: " + obj_class, ""]
-        if writable:
-            sections.append("Writable / queryable fields:")
-            sections.extend(writable)
-        if linked:
-            sections.append("")
-            sections.append("Linked sets (read-only, use separate OQL to query):")
-            sections.extend(linked)
-        if derived:
-            sections.append("")
-            sections.append("Derived / read-only fields:")
-            sections.extend(derived)
+        lines = [
+            "Class " + obj_class + " -- " + str(len(schema)) + " fields"
+            + " (" + str(len(_LEAN_STRIP & schema.keys())) + " private, hidden)",
+        ]
 
-        return "\n".join(sections)
+        def _section(title: str, fields: dict) -> None:
+            if not fields:
+                return
+            lines.append("\n" + title + " (" + str(len(fields)) + "):")
+            for name in sorted(fields):
+                lines.append(_format_field_entry(name, fields[name]))
+
+        _section("Enum fields", enums)
+        _section("Object reference fields (ExternalKey)", refs)
+        _section("Relation / link-set fields", links)
+        _section("HTML and text fields", html_text)
+        _section("Simple value fields", plain)
+        _section("Derived, system and read-only fields", derived)
+
+        return "\n".join(lines)
