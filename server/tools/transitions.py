@@ -423,13 +423,11 @@ def register(mcp, client: ItopClient) -> None:
         """Show lifecycle paths that can transition an iTop object to target_state.
 
         Without obj_id: searches from current_state or all states (schema mode).
-        With obj_id: reads the object's current lifecycle state and searches
-        from that fixed state. obj_id must be the confirmed integer database ID
-        -- use Resolve_object first if you only have a ref.
+        With obj_id: reads the object's current state as fixed start point.
+        obj_id must be a confirmed numeric ID; use Resolve_object first for a ref.
 
-        Apply_stimulus_to_object can perform only one direct transition per call.
+        Apply_stimulus_to_object performs only one direct transition per call.
         System-driven edges are marked [internal].
-
         path_mode: "usual" (default, up to 10 paths) or "all".
         """
         if path_mode not in {"usual", "all"}:
@@ -535,18 +533,12 @@ def register(mcp, client: ItopClient) -> None:
     ) -> str:
         """Apply one direct lifecycle transition to an iTop object.
 
-        obj_id must be the confirmed integer database ID. Use Resolve_object
-        first if you only have a ref.
+        obj_id must be a confirmed numeric ID; use Resolve_object first for a ref.
+        The tool determines the required user-action stimulus from the object's
+        current state. Internal transitions cannot be applied manually.
 
-        The required stimulus is resolved automatically from the object's
-        current state. Only StimulusUserAction transitions can be applied;
-        internal transitions are triggered by iTop automatically.
-
-        Use Describe_state_change first to identify paths and required fields.
-
-        field_lines: optional key=value or key: value pairs, one per line.
-        Validation: MANDATORY (must exist), MUSTCHANGE (must differ from
-        current), MUSTPROMPT (suggested, never blocks the transition).
+        Use Describe_state_change first to identify valid target states and required
+        fields. field_lines accepts optional key=value or key: value entries.
         """
         schema = await get_transition_map(obj_class, client)
         transitions = schema.get("transitions", {})
