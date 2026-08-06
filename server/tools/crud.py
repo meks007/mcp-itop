@@ -216,19 +216,14 @@ def register(mcp, client: ItopClient):
         obj_class: str,
         key_or_ref: str,
     ) -> str:
-        """Main entry point. Resolves any identifier to a confirmed integer ID.
+        """Resolve an identifier to a confirmed iTop database ID.
 
-        Call this first whenever you have a ticket ref (R-016516), a bare
-        number supplied by the user, or any other ambiguous identifier.
-        Returns the confirmed class, database ID, ref, and friendlyname in
-        one lightweight iTop call.
+        Use this first for ticket refs, bare user-supplied numbers, OQL queries, or
+        other ambiguous identifiers. Returns the confirmed class, numeric ID, ref,
+        and friendly name.
 
-        All other tools require a strict integer obj_id -- use the ID
-        returned here for all subsequent calls.
-
-        Accepts: ticket ref (R-016516), bare number (16505), OQL query, or
-        any string key. Use obj_class=Ticket when the concrete class is
-        unknown.
+        Use the returned numeric ID with all other object tools. Use
+        obj_class=Ticket when the concrete ticket class is unknown.
         """
         resolved_class, resolved_key = await resolve_key(obj_class, key_or_ref)
         fields = ensure_ref_field(resolved_class, "id, friendlyname")
@@ -244,20 +239,11 @@ def register(mcp, client: ItopClient):
         page: int = 0,
         full: bool = False,
     ):
-        """Retrieve iTop objects by confirmed integer database ID.
+        """Retrieve an iTop object by confirmed numeric ID.
 
-        obj_id must be a confirmed integer ID -- use Resolve_object first if
-        you only have a ref or user-supplied number.
-
-        output_fields: use "*" for all standard fields. Use Describe_class
-        when field names are unknown. public_log is included by default.
-        Set full=True only when the user explicitly requests private_log.
-        Do not disclose private_log otherwise.
-
-        Output rendering:
-          Single object:    present as a two-column Field | Value table.
-          Multiple objects: present as a row-per-object table, one column per field.
-          Do not paraphrase fields in prose.
+        Use Resolve_object first when you have a ticket ref or ambiguous identifier.
+        Set output_fields to "*" for standard fields, or use Describe_class to find
+        specific field names. public_log is included by default.
         """
         if not output_fields or not output_fields.strip():
             visible = sorted(
