@@ -6,6 +6,10 @@ ID-only contract
 Get_KB_article requires a confirmed integer database ID (article_id: int).
 Use Resolve_object first if you only have a ref or user-supplied number.
 
+The IDs returned by Search_KB_articles and List_KB_categories are confirmed
+integer database IDs. Pass them directly to Get_KB_article or Load_object
+without calling Resolve_object first.
+
 Auto-detection
 --------------
 All three tools auto-detect the installed KB class at runtime by probing
@@ -158,6 +162,10 @@ def register(mcp, client: ItopClient):
         logic, which yields far better results than passing full phrases or
         sentences. Automatically detects the available KB class and body field.
 
+        The ID column in the result contains confirmed integer database IDs.
+        Pass them directly to Get_KB_article or Load_object without calling
+        Resolve_object first.
+
         Note: iTop KB articles are typically created with status=production and
         visibility=internal. Search results include all status values; filter
         with additional OQL via Load_object if needed.
@@ -230,6 +238,8 @@ def register(mcp, client: ItopClient):
 
         Auto-detects KBEntry vs FAQ. article_id must be a confirmed integer
         database ID -- use Resolve_object first if you only have a ref.
+        IDs returned by Search_KB_articles are already confirmed and can be
+        passed directly without calling Resolve_object.
         """
         kb_cls, _ = await _kb_meta()
         if not kb_cls:
@@ -252,7 +262,12 @@ def register(mcp, client: ItopClient):
 
     @mcp.tool(name="List_KB_categories")
     async def itop_list_kb_categories(limit: int = 100) -> str:
-        """List all knowledge-base categories. Auto-detects KBCategory vs FAQCategory."""
+        """List all knowledge-base categories. Auto-detects KBCategory vs FAQCategory.
+
+        The ID column in the result contains confirmed integer database IDs.
+        Pass them directly to Load_object or other tools without calling
+        Resolve_object first.
+        """
         kb_cls, _ = await _kb_meta()
         if not kb_cls:
             return "No KB module installed."
