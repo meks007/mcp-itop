@@ -48,7 +48,7 @@ def register(mcp, client: ItopClient):
 
     @mcp.tool(name="Add_comment_to_ticket")
     async def itop_add_comment(
-        ticket_class: str,
+        obj_class: str,
         obj_id: int,
         text: str,
         log_field: Literal["public_log", "private_log", "private_log_ai"] = "public_log",
@@ -71,11 +71,11 @@ def register(mcp, client: ItopClient):
             return "Error: log_field must be one of " + ", ".join(sorted(_VALID_LOG_FIELDS)) + "."
 
         resolved_text = await resolve_mentions_in_text(
-            text, ticket_class, log_field, client
+            text, obj_class, log_field, client
         )
 
         result = await client.update(
-            ticket_class,
+            obj_class,
             obj_id,
             {
                 log_field: {
