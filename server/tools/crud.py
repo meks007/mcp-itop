@@ -1,8 +1,14 @@
 """
-CRUD and utility tools: get, create, update, delete,
+CRUD and utility tools: resolve, get, create, update, delete,
 get_related, list_operations, describe_class.
 
 Note: Apply_stimulus_to_object has been moved to tools/transitions.py.
+
+ID-only contract
+----------------
+All tools except Resolve_object require a confirmed integer database ID
+(obj_id: int). Use Resolve_object first when you only have a ref, a bare
+number supplied by the user, or any other ambiguous identifier.
 
 Mention resolution
 ------------------
@@ -19,16 +25,12 @@ is never blocked by a failed mention lookup.
 
 from __future__ import annotations
 
-from typing import Union
-
 from client import ItopClient
 from helpers import (
-    coerce_ref,
     ensure_ref_field,
     fetch_image_counts,
     format_and_cache,
     parse_json_arg,
-    parse_key,
     resolve_key,
     str_or,
     CLASSES_WITH_REF,
@@ -44,9 +46,6 @@ from cache import get_class_schema, find_lifecycle_state_attribute
 # Type taxonomy helpers
 # ---------------------------------------------------------------------------
 
-# iTop type prefixes that identify derived / read-only / relational fields.
-# These are not writable via core/create or core/update and are grouped
-# separately in the Describe_class output.
 _DERIVED_TYPE_PREFIXES = (
     "AttributeExternalField",
     "AttributeFriendlyName",
@@ -116,8 +115,6 @@ def _format_field_entry(name: str, meta: dict) -> str:
     elif kind == "text":
         lines.append("    format: text")
 
-    # Mark the lifecycle state attribute explicitly so the model knows
-    # this field cannot be updated directly via Update_object.
     if meta.get("is_lifecycle_state") is True:
         lines.append("    lifecycle state: yes -- use Apply_stimulus_to_object")
 
@@ -135,10 +132,6 @@ async def _fetch_and_cache_ticket(
 
     Used by Load_object and the attachments cache-miss path. The format_and_cache
     call writes inline image refs to the SQLite cache as a side effect.
-
-    Stripping follows the same rules as client.get: _LEAN_STRIP is applied
-    unless full=True. Content stripped for privacy must not reach the image
-    cache either, so full=False is the correct default.
 
     Args:
         obj_class: iTop class name (concrete class preferred).
@@ -165,34 +158,15 @@ async def _resolve_mentions_in_fields(
     schema: dict | None,
     client: ItopClient,
 ) -> dict:
-    """Return a copy of *fields* with mention tokens resolved in HTML attributes.
+    """Return a copy of fields with mention tokens resolved in HTML attributes.
 
-    Iterates over every key in *fields* and:
-      - If the key is a Case Log attribute (public_log / private_log /
-        private_log_ai) containing an add_item.message string, resolves
-        mention tokens in that message string.
-      - If the key is a plain Value:HTML field according to *schema*, resolves
-        mention tokens in the field value string.
-      - All other fields are left unchanged.
-
-    A separate company/resolve_mentions call is made per attribute so that
-    iTop can generate a context-correct href for each target attribute.
-
-    Args:
-        fields:     Parsed fields dict as supplied to core/create or core/update.
-        obj_class:  Concrete iTop class being written, e.g. "UserRequest".
-        schema:     Class schema from get_class_schema, or None when unavailable.
-                    When None, only Case Log attributes are processed.
-        client:     Active ItopClient instance.
-
-    Returns:
-        New dict equal to *fields* but with mention tokens replaced by <a>
-        elements wherever applicable.
+    Processes Case Log add_item.message strings and plain Value:HTML fields.
+    All other fields are left unchanged. Unresolvable tokens are kept as
+    plain text and never block the write operation.
     """
     if not isinstance(fields, dict):
         return fields
 
-    # Build a set of known HTML field names from the schema.
     html_fields: set[str] = set()
     if schema:
         for name, meta in schema.items():
@@ -201,7 +175,6 @@ async def _resolve_mentions_in_fields(
 
     result: dict = {}
     for attr, value in fields.items():
-        # --- Case Log attribute (add_item payload) ---
         if is_caselog_attribute(attr):
             if (
                 isinstance(value, dict)
@@ -220,7 +193,6 @@ async def _resolve_mentions_in_fields(
                 result[attr] = value
             continue
 
-        # --- Plain Value:HTML field ---
         if attr in html_fields and isinstance(value, str):
             result[attr] = await resolve_mentions_in_text(
                 value, obj_class, attr, client
@@ -239,64 +211,72 @@ async def _resolve_mentions_in_fields(
 def register(mcp, client: ItopClient):
     """Register all CRUD tools on the given mcp instance."""
 
-    @mcp.tool(
-        name="Load_object"
-    )
-    async def itop_get(
+    @mcp.tool(name="Resolve_object")
+    async def itop_resolve(
         obj_class: str,
         key_or_ref: str,
+    ) -> str:
+        """Main entry point. Resolves any identifier to a confirmed integer ID.
+
+        Call this first whenever you have a ticket ref (R-016516), a bare
+        number supplied by the user, or any other ambiguous identifier.
+        Returns the confirmed class, database ID, ref, and friendlyname in
+        one lightweight iTop call.
+
+        All other tools require a strict integer obj_id -- use the ID
+        returned here for all subsequent calls.
+
+        Accepts: ticket ref (R-016516), bare number (16505), OQL query, or
+        any string key. Use obj_class=Ticket when the concrete class is
+        unknown.
+        """
+        resolved_class, resolved_key = await resolve_key(obj_class, key_or_ref)
+        fields = ensure_ref_field(resolved_class, "id, friendlyname")
+        result = await client.get(resolved_class, resolved_key, fields=fields)
+        return format_and_cache(result, requested_class=obj_class)
+
+    @mcp.tool(name="Load_object")
+    async def itop_get(
+        obj_class: str,
+        obj_id: int,
         output_fields: str = "*",
         limit: int = 25,
         page: int = 0,
         full: bool = False,
     ):
-        """Retrieve iTop objects by class and key, reference, numeric ID, or OQL.
+        """Retrieve iTop objects by confirmed integer database ID.
 
-        key_or_ref is required. Use a ticket reference such as "R-016292" when
-        available; bare numbers and numeric database IDs are resolved automatically.
-        For multi-object lookups, use an OQL query rather than one call per object.
-        Use obj_class="Ticket" when the concrete ticket class is unknown.
+        obj_id must be a confirmed integer ID -- use Resolve_object first if
+        you only have a ref or user-supplied number.
 
-        output_fields is required. Use Describe_class when field names are unknown;
-        use "*" to retrieve standard fields. public_log is included by default.
-        Set full=True only when the user explicitly requests private_log. Do not
-        disclose private_log otherwise, and redact passwords or other sensitive data.
-
-        Batch lookups of the same class with OQL when possible.
+        output_fields: use "*" for all standard fields. Use Describe_class
+        when field names are unknown. public_log is included by default.
+        Set full=True only when the user explicitly requests private_log.
+        Do not disclose private_log otherwise.
         """
-
         if not output_fields or not output_fields.strip():
             visible = sorted(
                 await client.get_class_fields(obj_class) - _SYNTHETIC_FIELDS
             )
             if not visible:
                 return (
-                    "You need to query with key AND output_fields. "
+                    "You need to query with obj_id AND output_fields. "
                     "No instances of this class found. Available fields are *."
                 )
             return (
-                "You need to query with key AND output_fields. "
+                "You need to query with obj_id AND output_fields. "
                 "Available fields are * or: " + ", ".join(visible)
             )
 
-        # Preserve the originally requested class before resolve_key overwrites
-        # obj_class with the concrete resolved class. The original value is
-        # passed to format_and_cache so it can warn the agent when the returned
-        # finalclass differs (e.g. agent passed "Ticket", iTop returned "UserRequest").
-        requested_class = obj_class
-        obj_class, resolved_key = await resolve_key(obj_class, key_or_ref)
-
         result = await client.get(
             obj_class,
-            resolved_key,
+            obj_id,
             fields=ensure_ref_field(obj_class, output_fields),
             limit=limit if limit > 0 else None,
             page=page if page > 0 else None,
             full=full,
         )
 
-        # Build per-object image annotations before formatting so they can be
-        # interleaved with each object's field block by format_and_cache.
         annotations: dict[str, str] = {}
         if obj_class in CLASSES_WITH_REF:
             from attachment_store import write_inline_image_refs
@@ -326,34 +306,28 @@ def register(mcp, client: ItopClient):
                         + " These images are an inherent part of the ticket."
                     )
 
-        return format_and_cache(result, annotations=annotations or None, requested_class=requested_class)
+        return format_and_cache(result, annotations=annotations or None)
 
-    @mcp.tool(
-        name="Create_object"
-    )
+    @mcp.tool(name="Create_object")
     async def itop_create(
         obj_class: str,
         fields: str,
         output_fields: str = "id, friendlyname",
         comment: str = "",
     ) -> str:
-        """Create an iTop object. Use Describe_class first if the required fields are unknown.
+        """Create an iTop object. Use Describe_class first if field names are unknown.
 
         Mention tokens in Value:HTML fields and Case Log add_item messages are
         resolved automatically before the object is created:
-          @<id>     Person by numeric id (resolve Person first, then use @<id>)
-          ?<id>     FAQ article by numeric id (resolve FAQ first, then use ?<id>)
-          R-<ref>   UserRequest reference -- resolved automatically
-          I-<ref>   Incident reference -- resolved automatically
-          C-<ref>   Change reference -- resolved automatically
+          @<id>   Person by numeric id
+          ?<id>   FAQ article by numeric id
+          R-<ref>, I-<ref>, C-<ref>  ticket references
         Unresolvable tokens are stored as plain text without blocking the create.
         """
         parsed = parse_json_arg(fields, "fields")
         if isinstance(parsed, str):
             return parsed
 
-        # Load schema to identify Value:HTML fields. Failure is non-fatal;
-        # only Case Log attributes will be processed when schema is unavailable.
         try:
             schema = await get_class_schema(obj_class, client)
         except Exception:
@@ -369,54 +343,33 @@ def register(mcp, client: ItopClient):
         )
         return format_and_cache(result)
 
-    @mcp.tool(
-        name="Update_object"
-    )
+    @mcp.tool(name="Update_object")
     async def itop_update(
         obj_class: str,
+        obj_id: int,
         fields: str,
-        ticket_ref: str = "",
-        key: Union[str, int] = "",
         output_fields: str = "id, friendlyname",
         comment: str = "",
     ) -> str:
         """Update fields on an existing iTop object.
 
-        For tickets, prefer ticket_ref; bare ticket numbers are resolved automatically.
-        Before updating a workflow-managed object, use Describe_class when needed to
-        identify its lifecycle state attribute. Describe_class derives this from the
-        REST API schema flag is_lifecycle_state=true. Do not include the lifecycle
-        state attribute in fields. Use Apply_stimulus_to_object when the object's
-        lifecycle state must change. All other fields can be updated normally.
+        obj_id must be the confirmed integer database ID. Use Resolve_object
+        first if you only have a ref. Do not include the lifecycle state
+        attribute in fields; use Apply_stimulus_to_object instead.
 
         Mention tokens in Value:HTML fields and Case Log add_item messages are
-        resolved automatically before the update:
-          @<id>     Person by numeric id (resolve Person first, then use @<id>)
-          ?<id>     FAQ article by numeric id (resolve FAQ first, then use ?<id>)
-          R-<ref>, I-<ref>, C-<ref>  ticket references, resolved automatically
-        Unresolvable tokens remain plain text and do not block the update.
+        resolved automatically (@<id>, ?<id>, R-<ref>, I-<ref>, C-<ref>).
         """
         parsed = parse_json_arg(fields, "fields")
         if isinstance(parsed, str):
             return parsed
 
-        # Resolve the concrete class before doing any schema lookup.
-        # A generic parent class or ticket ref may resolve to a concrete child
-        # class with its own lifecycle definition.
-        obj_class, resolved = await resolve_key(obj_class, coerce_ref(ticket_ref, key))
-
-        # Identify the lifecycle state attribute for this concrete class.
-        # get_class_schema is cached for the process lifetime, so this is a
-        # fast in-memory lookup after the first call.
         try:
             schema = await get_class_schema(obj_class, client)
             lifecycle_attribute = find_lifecycle_state_attribute(schema)
         except ValueError as exc:
-            # More than one field marked is_lifecycle_state=true -- broken schema.
             return "Error: " + str(exc)
         except Exception:
-            # describe_class unavailable -- cannot determine lifecycle attribute.
-            # Allow the update to proceed; iTop will reject protected fields itself.
             lifecycle_attribute = None
             schema = None
 
@@ -432,52 +385,50 @@ def register(mcp, client: ItopClient):
 
         result = await client.update(
             obj_class,
-            resolved,
+            obj_id,
             parsed,
             output_fields=ensure_ref_field(obj_class, output_fields),
             comment=comment or DEFAULT_COMMENT,
         )
         return format_and_cache(result)
 
-    @mcp.tool(
-        name="Delete_object"
-    )
+    @mcp.tool(name="Delete_object")
     async def itop_delete(
         obj_class: str,
-        ticket_ref: str = "",
-        key: Union[str, int] = "",
+        obj_id: int,
         comment: str = "",
         simulate: bool = True,
     ) -> str:
-        """Deletion is disabled by policy. Do not use this tool to remove iTop objects.
+        """Deletion is disabled by policy. Do not use to remove iTop objects.
+        Runs in simulation mode only. Retained for controlled dry-run checks.
 
-        It runs in simulation mode by default and is retained only for controlled
-        dry-run checks."""
-        obj_class, resolved = await resolve_key(obj_class, coerce_ref(ticket_ref, key))
-
+        obj_id must be the confirmed integer database ID.
+        """
         result = await client.delete(
             obj_class,
-            resolved,
+            obj_id,
             comment=comment or DEFAULT_COMMENT,
             simulate=simulate,
         )
         return format_and_cache(result)
 
-    @mcp.tool(
-        name="Get_object_relations"
-    )
+    @mcp.tool(name="Get_object_relations")
     async def itop_get_related(
         obj_class: str,
-        key: str,
+        obj_id: int,
         relation: str = "impacts",
         depth: int = 4,
         direction: str = "down",
         redundancy: bool = True,
     ) -> str:
-        """Find CIs related to a given object via impact or dependency relations."""
+        """Find CIs related to a given object via impact or dependency relations.
+
+        obj_id must be the confirmed integer database ID. Use Resolve_object
+        first if you only have a ref.
+        """
         result = await client.get_related(
             obj_class,
-            parse_key(key),
+            obj_id,
             relation=relation,
             depth=depth,
             direction=direction,
@@ -492,9 +443,7 @@ def register(mcp, client: ItopClient):
                     output += "\n  " + origin + " -> " + str_or(target, "key", "?")
         return output
 
-    @mcp.tool(
-        name="List_object_operations"
-    )
+    @mcp.tool(name="List_object_operations")
     async def itop_list_operations() -> str:
         """List all available REST/JSON operations on the iTop server."""
         result = await client.operations()
@@ -510,15 +459,12 @@ def register(mcp, client: ItopClient):
             )
         return "\n".join(lines)
 
-    @mcp.tool(
-        name="Describe_class"
-    )
+    @mcp.tool(name="Describe_class")
     async def itop_describe_class(obj_class: str) -> str:
         """Describe the field schema of an iTop class.
 
-        Uses company/describe_class to return authoritative field metadata
-        including field type, format (text/html), allowed enum values, and
-        whether a field is the lifecycle state attribute of the class.
+        Returns field metadata including type, format (text/html), allowed
+        enum values, and whether a field is the lifecycle state attribute.
         Works for classes with zero instances. Results are cached for the
         lifetime of the server process.
         """
@@ -536,9 +482,6 @@ def register(mcp, client: ItopClient):
         if not schema:
             return "Class '" + obj_class + "' returned an empty schema."
 
-        # Split fields into groups for readability.
-        # Fields in _LEAN_STRIP (e.g. private_log) are excluded from output
-        # to stay consistent with the stripping policy applied to object data.
         enums = {}
         refs = {}
         links = {}
