@@ -49,7 +49,13 @@ def _is_empty(fv) -> bool:
     return False
 
 
-def _format_objects(result: dict, *, strip_empty: bool = True, annotations: dict[str, str] | None = None, requested_class: str = "") -> tuple[str, dict[str, list[dict]]]:
+def _format_objects(
+    result: dict,
+    *,
+    strip_empty: bool = True,
+    annotations: dict[str, str] | None = None,
+    requested_class: str = "",
+) -> tuple[str, dict[str, list[dict]]]:
     """Format iTop response objects into a readable string and extract inline image refs.
 
     Internal implementation -- call format_and_cache() from tool code instead.
@@ -86,6 +92,12 @@ def _format_objects(result: dict, *, strip_empty: bool = True, annotations: dict
     Seeds the field registry from every response so resolve_output_fields
     hits the warm-cache path on subsequent calls for the same class.
     Fields starting with '_' are rendered as bracketed synthetic annotations.
+
+    Section header format:
+      Ticket classes (have ref):   --- UserRequest::R-016516 (ID: 16505) ---
+      Non-ticket classes (no ref): --- Person::John Doe (ID: 42) ---
+    The numeric database ID is always shown so callers can use it directly
+    with ID-only tools without a separate Resolve_object call.
     """
     if result.get("code", -1) != 0:
         return (
@@ -109,7 +121,10 @@ def _format_objects(result: dict, *, strip_empty: bool = True, annotations: dict
         seed_field_cache(cls, fields)
         ref = fields.get("ref")
         label = ref if ref else oid
-        lines.append("\n--- " + cls + "::" + label + " ---")
+        # Always append the numeric database ID so ID-only tools can be called
+        # directly without a Resolve_object round-trip.
+        id_suffix = " (ID: " + oid + ")" if ref else ""
+        lines.append("\n--- " + cls + "::" + label + id_suffix + " ---")
         if ITOP_URL and oid:
             lines.append(
                 "  link: " + ITOP_URL
@@ -148,12 +163,29 @@ def _format_objects(result: dict, *, strip_empty: bool = True, annotations: dict
     return "\n".join(lines), refs
 
 
-def format_objects(result: dict, *, strip_empty: bool = True, annotations: dict[str, str] | None = None, requested_class: str = "") -> tuple[str, dict[str, list[dict]]]:
+def format_objects(
+    result: dict,
+    *,
+    strip_empty: bool = True,
+    annotations: dict[str, str] | None = None,
+    requested_class: str = "",
+) -> tuple[str, dict[str, list[dict]]]:
     """Public alias for _format_objects. Kept for external callers."""
-    return _format_objects(result, strip_empty=strip_empty, annotations=annotations, requested_class=requested_class)
+    return _format_objects(
+        result,
+        strip_empty=strip_empty,
+        annotations=annotations,
+        requested_class=requested_class,
+    )
 
 
-def format_and_cache(result: dict, *, strip_empty: bool = True, annotations: dict[str, str] | None = None, requested_class: str = "") -> str:
+def format_and_cache(
+    result: dict,
+    *,
+    strip_empty: bool = True,
+    annotations: dict[str, str] | None = None,
+    requested_class: str = "",
+) -> str:
     """Format iTop response and persist inline image refs to SQLite.
 
     Calls _format_objects() to get the formatted text and the inline image
@@ -176,7 +208,12 @@ def format_and_cache(result: dict, *, strip_empty: bool = True, annotations: dic
     """
     from attachment_store import write_inline_image_refs
 
-    text, refs = _format_objects(result, strip_empty=strip_empty, annotations=annotations, requested_class=requested_class)
+    text, refs = _format_objects(
+        result,
+        strip_empty=strip_empty,
+        annotations=annotations,
+        requested_class=requested_class,
+    )
 
     for ticket_key, img_refs in refs.items():
         try:
