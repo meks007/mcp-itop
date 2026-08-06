@@ -92,17 +92,13 @@ def register(mcp, client: ItopClient):
 
     @mcp.tool(name="Describe_mentions")
     async def itop_describe_mentions() -> str:
-        """Return the currently configured mention tags and their iTop target classes.
+        """Show configured mention tags and their iTop target classes.
 
-        Call this before writing a mention to confirm the valid token syntax.
-        Use it at the start of any task that requires a Person or FAQ mention,
-        or whenever the configuration may have changed.
+        Call before writing Person or FAQ mentions, or whenever mention settings may
+        have changed. Returns tag characters, target classes, and lookup attributes.
 
-        Returns a JSON object keyed by tag character, e.g.:
-          {"@": {"class": "Person", "lookup_attribute": "id"}, ...}
-
-        lookup_attribute "id":  resolve the object first, use its numeric id.
-        lookup_attribute "ref": use the full token as-is (e.g. R-000084).
+        For lookup_attribute="id", resolve the object first and use its numeric ID.
+        For "ref", use the complete ticket reference token, such as R-000084.
         """
         config = await get_mention_config(client)
         if not config:
