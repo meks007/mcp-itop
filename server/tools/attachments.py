@@ -1,13 +1,19 @@
 """
 Attachment tools: fetch image metadata and download attachments as files.
 
+ID-only contract
+----------------
+List_ticket_images and List_ticket_attachments both require a confirmed
+integer database ID (obj_id: int). Use Resolve_object first if you only
+have a ref or user-supplied number.
+
 Public API
 ----------
 register(mcp, client)
     Registers the following MCP tools and resources:
 
     Tools:
-        List_ticket_images(obj_class, ticket_ref, key)
+        List_ticket_images(obj_class, obj_id)
             Fetches image attachments for a ticket, stores them in the
             SQLite attachment store, and returns the image count plus
             the static MCP resource URI _STATIC_RESOURCE_URI.
@@ -28,7 +34,7 @@ register(mcp, client)
                              then read the cache. If still empty the ticket
                              has no inline images.
 
-        List_ticket_attachments(obj_class, ticket_ref, key)
+        List_ticket_attachments(obj_class, obj_id)
             List all non-image file attachments for a ticket.
             Returns metadata and browser download links only.
 
@@ -69,7 +75,6 @@ from attachment_store import (
 from auth import get_bearer_token
 from client import ItopClient
 from config import ITOP_TIMEOUT, ITOP_URL, ITOP_VERIFY_SSL, MCP_DEBUG, logger
-from helpers import coerce_ref, resolve_key
 from tools.crud import _fetch_and_cache_ticket
 
 _IMAGE_PREFIXES = ("image/",)
@@ -82,7 +87,7 @@ def _is_image(mimetype: str) -> bool:
     return any(ct.startswith(p) for p in _IMAGE_PREFIXES)
 
 
-def _attachment_url(attachment_id: str | int) -> str:
+def _attachment_url(attachment_id: "str | int") -> str:
     return (
         ITOP_URL + "/webservices/ajax.document.php"
         "?operation=download_document&class=Attachment&field=contents&id="
@@ -90,7 +95,7 @@ def _attachment_url(attachment_id: str | int) -> str:
     )
 
 
-def _inline_image_url(img_id: str | int, secret: str) -> str:
+def _inline_image_url(img_id: "str | int", secret: str) -> str:
     return (
         ITOP_URL + "/webservices/ajax.document.php"
         "?operation=download_inlineimage&id=" + str(img_id) + "&s=" + secret
@@ -108,7 +113,7 @@ def _unpack_contents(contents: object) -> tuple:
     return "", "", ""
 
 
-async def _download_binary(url: str) -> tuple[bytes, str]:
+async def _download_binary(url: str) -> "tuple[bytes, str]":
     """Download binary content from url. Returns (content_bytes, mimetype)."""
     logger.debug("[attachments] _download_binary: GET %s", url)
     async with httpx.AsyncClient(verify=ITOP_VERIFY_SSL, timeout=ITOP_TIMEOUT) as http:
@@ -143,45 +148,35 @@ def register(mcp, client: ItopClient):
     # Tool: List_ticket_images
     # ------------------------------------------------------------------
 
-    @mcp.tool(
-        name="List_ticket_images"
-    )
+    @mcp.tool(name="List_ticket_images")
     async def itop_get_ticket_images(
         obj_class: str,
-        ticket_ref: str = "",
-        key: str = "",
+        obj_id: int,
     ):
-        """Fetch and store all image attachments for an iTop ticket (file attachments
-        and inline images). Downloads binaries, deduplicates by content hash, and
-        writes them to the session image store. Returns the image count N.
-        After this tool returns, you MAY read the resource Download ticket images
-        up to N times to retrieve images one by one. Each resource call serves the
-        next image in sequence; you do not have to read all N images.
-        Prefer ticket_ref; use key for a numeric ID or OQL query."""
+        """Fetch and store all image attachments for an iTop ticket.
+
+        Downloads binaries, deduplicates by content hash, writes to the
+        session image store. Returns the image count N.
+
+        obj_id must be the confirmed integer database ID. Use Resolve_object
+        first if you only have a ref.
+
+        After this returns, read the resource "Download ticket image" up to
+        N times to retrieve images one by one.
+        """
         logger.debug(
-            "[attachments] itop_get_ticket_images: called obj_class=%s ticket_ref=%r key=%r",
-            obj_class, ticket_ref, key,
+            "[attachments] itop_get_ticket_images: called obj_class=%s obj_id=%r",
+            obj_class, obj_id,
         )
 
-        ref = coerce_ref(ticket_ref, key)
-        obj_class, resolved = await resolve_key(obj_class, ref)
-        logger.debug(
-            "[attachments] itop_get_ticket_images: resolved class=%r key=%r",
-            obj_class, resolved,
-        )
-
-        if resolved is None:
-            return "Error: provide either ticket_ref or key to identify the ticket."
-
-        obj_id = str(resolved)
+        obj_id_str = str(obj_id)
         images = []
 
         # -- Attachment (image types only) --
-        # Use get: we need the full contents blob including base64 data.
         att_oql = (
             "SELECT Attachment"
             " WHERE item_class = '" + obj_class + "'"
-            " AND item_id = " + obj_id
+            " AND item_id = " + obj_id_str
         )
         att_result = await client.get("Attachment", att_oql, fields="contents")
         att_objects = att_result.get("objects") or {}
@@ -230,28 +225,28 @@ def register(mcp, client: ItopClient):
             )
 
         # -- InlineImage via HTML-parsed refs cache --
-        inline_refs = read_inline_image_refs(obj_class, obj_id)
+        inline_refs = read_inline_image_refs(obj_class, obj_id_str)
         logger.debug(
             "[attachments] itop_get_ticket_images: inline_image_refs cache %s for cls=%r id=%r",
             "hit" if inline_refs is not None else "miss",
-            obj_class, obj_id,
+            obj_class, obj_id_str,
         )
 
         if inline_refs is None:
             logger.debug(
                 "[attachments] itop_get_ticket_images: fetching ticket cls=%r id=%r"
                 " to populate inline image ref cache",
-                obj_class, obj_id,
+                obj_class, obj_id_str,
             )
-            await _fetch_and_cache_ticket(obj_class, obj_id, client)
-            inline_refs = read_inline_image_refs(obj_class, obj_id)
+            await _fetch_and_cache_ticket(obj_class, obj_id_str, client)
+            inline_refs = read_inline_image_refs(obj_class, obj_id_str)
             if inline_refs is None:
                 inline_refs = []
-                write_inline_image_refs(obj_class, obj_id, [])
+                write_inline_image_refs(obj_class, obj_id_str, [])
 
         logger.debug(
             "[attachments] itop_get_ticket_images: %d inline image ref(s) for cls=%r id=%r",
-            len(inline_refs), obj_class, obj_id,
+            len(inline_refs), obj_class, obj_id_str,
         )
 
         for ref_entry in inline_refs:
@@ -349,7 +344,7 @@ def register(mcp, client: ItopClient):
         if not images:
             return (
                 "No image attachments found for "
-                + obj_class + " " + (ticket_ref or key) + "."
+                + obj_class + " " + obj_id_str + "."
             )
 
         store_entries = [
@@ -382,7 +377,6 @@ def register(mcp, client: ItopClient):
                 exc,
             )
 
-        label = ticket_ref or key or str(resolved)
         dedup_note = (
             " (" + str(duplicates_removed) + " duplicate(s) removed)"
             if duplicates_removed
@@ -390,7 +384,7 @@ def register(mcp, client: ItopClient):
         )
         return (
             str(len(images)) + " image attachment(s) found for "
-            + obj_class + " " + label + dedup_note + ".\n"
+            + obj_class + " " + obj_id_str + dedup_note + ".\n"
             + "Read the MCP resource " + _STATIC_RESOURCE_URI
             + " once per image (up to " + str(len(images)) + " time(s)) to retrieve them."
         )
@@ -399,28 +393,25 @@ def register(mcp, client: ItopClient):
     # Tool: List_ticket_attachments
     # ------------------------------------------------------------------
 
-    @mcp.tool(
-        name="List_ticket_attachments"
-    )
+    @mcp.tool(name="List_ticket_attachments")
     async def itop_get_ticket_attachments(
         obj_class: str,
-        ticket_ref: str = "",
-        key: str = "",
+        obj_id: int,
     ) -> str:
-        """List non-image file attachments for an iTop ticket, including MIME type and browser
-        download link. Use List_ticket_images for images. Returns metadata and links only,
-        no file binaries. Prefer ticket_ref; use key for a numeric ID or OQL query."""
-        ref = coerce_ref(ticket_ref, key)
-        obj_class, resolved = await resolve_key(obj_class, ref)
-        if resolved is None:
-            return "Error: provide either ticket_ref or key to identify the ticket."
+        """List non-image file attachments for an iTop ticket.
 
+        Returns metadata and browser download links only -- no file binaries.
+        Use List_ticket_images for image attachments.
+
+        obj_id must be the confirmed integer database ID. Use Resolve_object
+        first if you only have a ref.
+        """
+        obj_id_str = str(obj_id)
         att_oql = (
             "SELECT Attachment"
             " WHERE item_class = '" + obj_class + "'"
-            " AND item_id = " + str(resolved)
+            " AND item_id = " + obj_id_str
         )
-        # Use get: contents blob is needed for MIME type inspection.
         att_result = await client.get("Attachment", att_oql, fields="contents")
 
         files = []
@@ -444,12 +435,11 @@ def register(mcp, client: ItopClient):
         if not files:
             return (
                 "No file attachments found for "
-                + obj_class + " " + (ticket_ref or key) + "."
+                + obj_class + " " + obj_id_str + "."
             )
 
-        label = ticket_ref or key or str(resolved)
         lines = [
-            "File attachments for " + obj_class + " " + label
+            "File attachments for " + obj_class + " " + obj_id_str
             + " (" + str(len(files)) + " found):"
         ]
         for f in files:
