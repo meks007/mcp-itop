@@ -1,6 +1,12 @@
 """
 State transition tools: Describe_state_change, Apply_stimulus_to_object.
 
+ID-only contract
+----------------
+Both tools require a confirmed integer database ID (obj_id: int) when
+targeting a specific object. Use Resolve_object first if you only have a
+ref or user-supplied number.
+
 Design
 ------
 Both tools share a common lookup pattern:
@@ -16,24 +22,22 @@ Both tools share a common lookup pattern:
      it is NOT assumed to be 'status'.
 
   3. Optionally read the current lifecycle state of the object via a core/get
-     call (only when obj_id is provided -- object mode).
+     call (only when obj_id is provided -- object mode). obj_id is used
+     directly as the integer database ID; no ref resolution is performed.
 
   4. In schema mode (no obj_id), first compute which states can reach the
      requested target_state via reverse-reachability (BFS from target
      walking edges backwards). Then run a forward DFS restricted to that
      reachable set, so the path finder never wanders into branches that
-     cannot lead to target_state (e.g. it will not follow resolved->closed
-     when searching for approved).
+     cannot lead to target_state.
 
   5. Consolidate required fields PER PATH from every visited state, not
      just the target state. Fields from each state are merged; duplicate
      field names accumulate their option flags.
 
   6. In object mode (obj_id provided), the current state is read from iTop
-     and used as the fixed starting point. Path finding then behaves
-     identically to schema mode with current_state set. This means multi-
-     step paths are shown when target_state is not directly reachable.
-     Apply_stimulus_to_object still only accepts a single direct transition.
+     and used as the fixed starting point. Multi-step paths may be returned,
+     but Apply_stimulus_to_object only performs one direct transition per call.
 
 Stimulus classification
 -----------------------
@@ -55,7 +59,7 @@ import re as _re
 
 from client import ItopClient
 from cache import get_transition_map, find_lifecycle_state_attribute
-from helpers import resolve_key, format_and_cache, ensure_ref_field
+from helpers import format_and_cache, ensure_ref_field
 
 
 MAX_USUAL_PATHS = 10
@@ -84,18 +88,9 @@ _KV_RE = _re.compile(r"^([^=:\n]+?)\s*[=:]\s*(.*)", _re.DOTALL)
 def _parse_field_lines(field_lines: str) -> dict[str, str]:
     """Parse Key=Value or Key: Value lines into a plain dict.
 
-    Rules:
-      - Blank lines are ignored.
-      - Lines starting with '#' are treated as comments and ignored.
-      - Both '=' and ':' are accepted as key-value delimiters; only the
-        first occurrence is used so values may contain either character.
-      - Whitespace around key and delimiter is stripped; trailing whitespace
-        is stripped from the value.
-
-    Fallback: if the input starts with '{' it is assumed to be a JSON object
-    and parsed directly. This handles agents that pass JSON despite the
-    docstring instruction. Each value is cast to str so the returned type is
-    always dict[str, str].
+    Blank lines and lines starting with '#' are ignored. Both '=' and ':'
+    are accepted as delimiters; only the first occurrence is used.
+    Fallback: if the input starts with '{' it is parsed as JSON directly.
     """
     raw = (field_lines or "").strip()
 
@@ -105,7 +100,7 @@ def _parse_field_lines(field_lines: str) -> dict[str, str]:
             if isinstance(parsed, dict):
                 return {k: str(v) for k, v in parsed.items()}
         except Exception:
-            pass  # fall through to line-by-line parsing
+            pass
 
     result: dict[str, str] = {}
     for line in raw.splitlines():
@@ -135,10 +130,7 @@ def _build_hint(ftype: str, fvalues: dict) -> str:
 
 
 def _get_current_lifecycle_state(result: dict, lifecycle_attribute: str) -> "str | None":
-    """Extract the lifecycle state value from a core/get result dict.
-
-    Uses the schema-derived attribute name rather than assuming 'status'.
-    """
+    """Extract the lifecycle state value from a core/get result dict."""
     objects = result.get("objects") or {}
     if not objects:
         return None
@@ -186,12 +178,7 @@ def _format_path_fields(
     transitions: dict,
     fields_def: dict,
 ) -> list[str]:
-    """Return required fields consolidated across every state visited by path.
-
-    Visits the start state and every destination state in order. For each
-    state, collects fields that carry at least one required option flag.
-    Duplicate field names accumulate their option flags across states.
-    """
+    """Return required fields consolidated across every state visited by path."""
     state_names = [start] + [to_state for _, _, to_state in path]
     collected: dict[str, set[str]] = {}
 
@@ -261,13 +248,8 @@ def _format_state_fields(state: str, transitions: dict, fields_def: dict) -> lis
 def _states_reaching_target(transitions: dict, target: str) -> set[str]:
     """Return every state that has at least one path leading to target.
 
-    Builds a reverse adjacency map (to_state -> set of from_states) and
-    walks backwards from target via BFS. Only states in the returned set
-    can possibly reach target through the exposed lifecycle graph.
-
-    This is used to prune the forward DFS so that branches leading to
-    genuine terminal states (e.g. closed) are never followed when they
-    cannot continue toward the requested target_state.
+    Builds a reverse adjacency map and walks backwards from target via BFS.
+    Used to prune the forward DFS so that dead-end branches are never followed.
     """
     predecessors: dict[str, set[str]] = {}
     for from_state, state_map in transitions.items():
@@ -300,13 +282,8 @@ def _find_paths(
 ) -> list[list[tuple[str, str, str]]]:
     """Find all non-cyclic paths from start to target.
 
-    Before traversal, computes the reverse-reachable set for target so that
-    the DFS never follows edges into states that cannot lead to target.
-    This eliminates spurious branches such as resolved->closed when searching
-    for a state that closed cannot reach.
-
-    Returns a list of complete paths. Each path is a list of steps:
-        (from_state, stimulus, to_state)
+    Uses reverse-reachability pruning so the DFS never follows edges into
+    states that cannot lead to target.
     """
     reachable = _states_reaching_target(transitions, target)
 
@@ -347,11 +324,7 @@ def _find_paths(
 # ---------------------------------------------------------------------------
 
 def _path_agent_key(path: list[tuple[str, str, str]], transitions: dict) -> tuple:
-    """Return a deduplication key based on the agent-visible stimulus sequence.
-
-    Internal steps are excluded so that paths that look identical to an agent
-    (same sequence of StimulusUserAction stimuli) collapse to a single entry.
-    """
+    """Return a deduplication key based on the agent-visible stimulus sequence."""
     return tuple(
         (f, s, t)
         for f, s, t in path
@@ -449,22 +422,15 @@ def register(mcp, client: ItopClient) -> None:
     ) -> str:
         """Show lifecycle paths that can transition an iTop object to target_state.
 
-        Without obj_id (schema mode), searches from current_state or all states.
-        Returns only paths that can reach target_state, with required fields
-        collected across each path. System-driven edges are marked [internal].
+        Without obj_id: searches from current_state or all states (schema mode).
+        With obj_id: reads the object's current lifecycle state and searches
+        from that fixed state. obj_id must be the confirmed integer database ID
+        -- use Resolve_object first if you only have a ref.
 
-        With obj_id (object mode), reads the object's current lifecycle state and
-        searches from that fixed state. Multi-step paths may be returned, but
         Apply_stimulus_to_object can perform only one direct transition per call.
+        System-driven edges are marked [internal].
 
-        Parameters:
-          obj_class: iTop class, e.g. UserRequest
-          target_state: desired state, e.g. resolved
-          obj_id: optional object reference or numeric ID
-          current_state: optional start state; ignored when obj_id is supplied
-          path_mode: "usual" (up to 10 representative paths) or "all"
-
-        Provide obj_id when a specific object's next valid transition is needed.
+        path_mode: "usual" (default, up to 10 paths) or "all".
         """
         if path_mode not in {"usual", "all"}:
             return "Error: path_mode must be \"usual\" or \"all\"."
@@ -473,7 +439,6 @@ def register(mcp, client: ItopClient) -> None:
         transitions = schema.get("transitions", {})
         fields_def = schema.get("fields", {})
 
-        # Determine the lifecycle state attribute from the schema.
         try:
             lifecycle_attribute = find_lifecycle_state_attribute(fields_def)
         except ValueError as exc:
@@ -498,9 +463,15 @@ def register(mcp, client: ItopClient) -> None:
         # Resolve starting state
         # ----------------------------------------------------------------
         if obj_id and obj_id.strip():
-            resolved_class, resolved = await resolve_key(obj_class, obj_id)
+            try:
+                numeric_id = int(obj_id)
+            except (ValueError, TypeError):
+                return (
+                    "Error: obj_id must be a confirmed integer database ID. "
+                    "Use Resolve_object to obtain the numeric ID from a ref."
+                )
             result = await client.get(
-                resolved_class, resolved, fields=lifecycle_attribute
+                obj_class, numeric_id, fields=lifecycle_attribute
             )
             cur = _get_current_lifecycle_state(result, lifecycle_attribute)
             if not cur:
@@ -524,7 +495,7 @@ def register(mcp, client: ItopClient) -> None:
             start_label = ""
 
         # ----------------------------------------------------------------
-        # Path finding (identical for both modes)
+        # Path finding
         # ----------------------------------------------------------------
         all_paths: list[tuple[str, list[tuple[str, str, str]]]] = []
         for start in start_states:
@@ -562,32 +533,25 @@ def register(mcp, client: ItopClient) -> None:
         field_lines: str = "",
         output_fields: str = "id, friendlyname",
     ) -> str:
-        """Apply one direct, user-action lifecycle transition to an iTop object.
+        """Apply one direct lifecycle transition to an iTop object.
 
-        The tool resolves the required stimulus from the object's current state.
-        If the target state is not directly reachable, use Describe_state_change
-        to find the full path. Internal system-driven transitions cannot be applied.
+        obj_id must be the confirmed integer database ID. Use Resolve_object
+        first if you only have a ref.
 
-        The lifecycle state attribute is determined from the class schema via the
-        REST API flag is_lifecycle_state=true; it is not assumed to be "status".
-
-        field_lines accepts optional input fields, one per line, key=value or
-        key: value. Example:
-          approver_id=24
-          approval_reason=Approval requested.
-
-        Validation rules:
-          MANDATORY: value must already exist on the object or be supplied.
-          MUSTPROMPT: suggested input; does not block the transition.
-          MUSTCHANGE: supply a new value different from the current value.
+        The required stimulus is resolved automatically from the object's
+        current state. Only StimulusUserAction transitions can be applied;
+        internal transitions are triggered by iTop automatically.
 
         Use Describe_state_change first to identify paths and required fields.
+
+        field_lines: optional key=value or key: value pairs, one per line.
+        Validation: MANDATORY (must exist), MUSTCHANGE (must differ from
+        current), MUSTPROMPT (suggested, never blocks the transition).
         """
         schema = await get_transition_map(obj_class, client)
         transitions = schema.get("transitions", {})
         fields_def = schema.get("fields", {})
 
-        # Determine the lifecycle state attribute from the schema.
         try:
             lifecycle_attribute = find_lifecycle_state_attribute(fields_def)
         except ValueError as exc:
@@ -600,10 +564,15 @@ def register(mcp, client: ItopClient) -> None:
                 "is_lifecycle_state=true in the transition schema)."
             )
 
-        obj_class, resolved = await resolve_key(obj_class, obj_id)
+        try:
+            numeric_id = int(obj_id)
+        except (ValueError, TypeError):
+            return (
+                "Error: obj_id must be a confirmed integer database ID. "
+                "Use Resolve_object to obtain the numeric ID from a ref."
+            )
 
-        # Single fetch: lifecycle state + all fields for validation in one round-trip.
-        result = await client.get(obj_class, resolved, fields="*")
+        result = await client.get(obj_class, numeric_id, fields="*")
         current_state = _get_current_lifecycle_state(result, lifecycle_attribute)
         if not current_state:
             return (
@@ -648,17 +617,6 @@ def register(mcp, client: ItopClient) -> None:
         state_fields = target_state_map.get("fields", {})
         target_fields: dict = state_fields if isinstance(state_fields, dict) else {}
 
-        # ----------------------------------------------------------------
-        # Validate required fields respecting per-flag semantics:
-        #
-        #   MUSTCHANGE  -- must be provided AND differ from the current value.
-        #                  Takes priority over MUSTPROMPT/MANDATORY when combined.
-        #   MUSTPROMPT  -- suggested as input but not enforced here; the field
-        #                  is shown in Describe_state_change output so the caller
-        #                  is aware, but omitting it does NOT block the transition.
-        #   MANDATORY   -- value must be non-empty either on the object already
-        #                  or in field_lines. Already-set fields satisfy this.
-        # ----------------------------------------------------------------
         missing: list[str] = []
         for field_name, field_opts in target_fields.items():
             options = set(
@@ -671,21 +629,17 @@ def register(mcp, client: ItopClient) -> None:
                 continue
 
             provided_val = provided.get(field_name, "").strip()
-            current_val  = current_fields.get(field_name, "").strip()
+            current_val = current_fields.get(field_name, "").strip()
 
             if "OPT_ATT_MUSTCHANGE" in options:
-                # Must be explicitly provided AND different from current value.
                 if not provided_val or provided_val == current_val:
                     missing.append(
                         field_name + " (MUSTCHANGE: provide a new value different from '"
                         + current_val + "')"
                     )
             elif "OPT_ATT_MANDATORY" in options:
-                # Satisfied by either a provided value or an existing non-empty value.
                 if provided_val in _EMPTY_VALUES and current_val in _EMPTY_VALUES:
                     missing.append(field_name)
-            # OPT_ATT_MUSTPROMPT: shown in Describe_state_change as a prompt
-            # suggestion only; never blocks the transition here.
 
         if missing:
             return (
@@ -695,16 +649,13 @@ def register(mcp, client: ItopClient) -> None:
                 + "\n\nCall Describe_state_change to see all required fields."
             )
 
-        # Append the lifecycle state attribute to output_fields so the caller
-        # always receives the new lifecycle state in the response, regardless
-        # of what the attribute is named on this class.
         effective_output = output_fields
         if lifecycle_attribute not in effective_output:
             effective_output = effective_output.rstrip(", ") + ", " + lifecycle_attribute
 
         apply_result = await client.apply_stimulus(
             obj_class,
-            resolved,
+            numeric_id,
             stimulus,
             fields=provided,
             output_fields=ensure_ref_field(obj_class, effective_output),
