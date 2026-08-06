@@ -253,6 +253,11 @@ def register(mcp, client: ItopClient):
         when field names are unknown. public_log is included by default.
         Set full=True only when the user explicitly requests private_log.
         Do not disclose private_log otherwise.
+
+        Output rendering:
+          Single object:    present as a two-column Field | Value table.
+          Multiple objects: present as a row-per-object table, one column per field.
+          Do not paraphrase fields in prose.
         """
         if not output_fields or not output_fields.strip():
             visible = sorted(
