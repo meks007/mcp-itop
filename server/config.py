@@ -122,6 +122,20 @@ ITOP_TIMEOUT = float(os.getenv("ITOP_TIMEOUT", "30"))
 
 DEFAULT_COMMENT = "Modified via MCP"
 
+# -- Knowledge base -------------------------------------------------------
+# The iTop class used for KB articles. Two common values:
+#   KBEntry  -- standard iTop knowledge base (default)
+#   FAQ      -- FAQ module (older installations)
+# The category class is derived automatically:
+#   KBEntry -> KBCategory
+#   FAQ     -> FAQCategory
+# Set ITOP_KB_CLASS in .env when running the FAQ module.
+ITOP_KB_CLASS: str = os.getenv("ITOP_KB_CLASS", "KBEntry")
+ITOP_KB_CAT_CLASS: str = {
+    "KBEntry": "KBCategory",
+    "FAQ": "FAQCategory",
+}.get(ITOP_KB_CLASS, "KBCategory")
+
 # -- Token validation cache -----------------------------------------------
 # TTL in seconds for the bearer token validation cache (sliding window).
 # The window resets on every request that hits the cache, so a token
