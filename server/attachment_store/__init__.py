@@ -25,6 +25,7 @@ from attachment_store.metadata import (
     purge_expired_metadata,
 )
 from attachment_store.attachment_sync import (
+    is_sync_running,
     start_sync,
     wait_for_image,
     wait_for_all,
@@ -51,6 +52,7 @@ __all__ = [
     "get_current_object_for_token",
     "purge_expired_metadata",
     # sync
+    "is_sync_running",
     "start_sync",
     "wait_for_image",
     "wait_for_all",
