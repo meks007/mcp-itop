@@ -94,11 +94,13 @@ def register(mcp, client: ItopClient):
     async def itop_describe_mentions() -> str:
         """Show configured mention tags and their iTop target classes.
 
-        Call before writing Person or FAQ mentions, or whenever mention settings may
-        have changed. Returns tag characters, target classes, and lookup attributes.
+        Call before writing Person or FAQ mentions, or when mention settings
+        may have changed. Returns tag characters, target classes, and lookup
+        attributes.
 
-        For lookup_attribute="id", resolve the object first and use its numeric ID.
-        For "ref", use the complete ticket reference token, such as R-000084.
+        For lookup_attribute="id", resolve the object first and use its
+        numeric ID. For "ref", use the complete ticket reference token such
+        as R-000084.
         """
         config = await get_mention_config(client)
         if not config:
