@@ -152,12 +152,12 @@ def register(mcp, client: ItopClient):
     ) -> str:
         """Search KB articles by title and body text.
 
-        Use specific topic keywords, separated by spaces or commas. Each keyword is
-        searched independently with OR logic; avoid full sentences.
+        Use specific topic keywords separated by spaces or commas. Each keyword
+        is searched independently with OR logic; avoid full sentences.
 
         Results include confirmed numeric IDs. Pass an ID directly to
-        Get_KB_article or Load_object with obj_class=ITOP_KB_CLASS; do not call
-        Resolve_object first. Results may include articles in any status.
+        Get_KB_article or Load_object with obj_class=ITOP_KB_CLASS; do not
+        call Resolve_object first. Results may include articles in any status.
         """
         text_field = await _kb_text_field()
 
@@ -230,7 +230,7 @@ def register(mcp, client: ItopClient):
         otherwise call Load_object directly with obj_class=ITOP_KB_CLASS.
 
         article_id must be a confirmed integer database ID. IDs returned by
-        Search_KB_articles are already confirmed -- no Resolve_object call needed.
+        Search_KB_articles are already confirmed -- no Resolve_object needed.
         """
         logger.debug(
             "[kb] get_kb_article: cls=%r article_id=%r", ITOP_KB_CLASS, article_id
@@ -256,14 +256,12 @@ def register(mcp, client: ItopClient):
         Category class: ITOP_KB_CAT_CLASS (derived from ITOP_KB_CLASS in .env,
         default KBCategory).
 
-        The ID column in the result contains confirmed integer database IDs.
-        Pass them directly to Load_object with obj_class=ITOP_KB_CAT_CLASS
-        without calling Resolve_object first.
+        The ID column contains confirmed integer database IDs. Pass them
+        directly to Load_object with obj_class=ITOP_KB_CAT_CLASS without
+        calling Resolve_object first.
         """
         logger.debug("[kb] list_kb_categories: cat_cls=%r limit=%d", ITOP_KB_CAT_CLASS, limit)
 
-        # Resolve available fields via schema to avoid requesting fields that
-        # do not exist on this installation.
         try:
             schema = await get_class_schema(ITOP_KB_CAT_CLASS, client)
             optional = [f for f in ("description",) if f in schema]
