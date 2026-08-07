@@ -1,11 +1,10 @@
 """
-Attachment tools: fetch image metadata and download attachments as files.
+tools/attachments.py - Unified attachment tools and resources.
 
 ID-only contract
 ----------------
-List_ticket_images and List_ticket_attachments both require a confirmed
-integer database ID (obj_id: int). Use Resolve_object first if you only
-have a ref or user-supplied number.
+All tools require a confirmed integer database ID (obj_id: int).
+Use Resolve_object first when you only have a ref or ambiguous identifier.
 
 Public API
 ----------
@@ -13,79 +12,68 @@ register(mcp, client)
     Registers the following MCP tools and resources:
 
     Tools:
-        List_ticket_images(obj_class, obj_id)
-            Fetches image attachments for a ticket, stores them in the
-            SQLite attachment store, and returns the image count plus
-            the static MCP resource URI _STATIC_RESOURCE_URI.
-            The client may read that resource once per image to retrieve
-            each binary in sequence (one image per resource call).
+        List_object_attachments(obj_class, obj_id)
+            Lists all attachments and inline images for any iTop object.
+            Writes metadata to the session store and starts a background
+            task that downloads and normalizes image binaries.
+            Works for UserRequest, Incident, Change, FAQ, FunctionalCI, etc.
 
-            Inline images are resolved exclusively from refs parsed out of
-            the ticket HTML fields by format_and_cache() (via parse_objects).
-            The core/get InlineImage approach is intentionally NOT used
-            because iTop does not delete InlineImage records when the
-            corresponding <img> tag is removed from a ticket text field,
-            leading to stale/ghost images being returned.
-
-            Cache behaviour:
-              - Cache hit  (inline_image_refs table) : download and store.
-              - Cache miss : call _fetch_and_cache_ticket() which runs
-                             format_and_cache() and populates the cache,
-                             then read the cache. If still empty the ticket
-                             has no inline images.
-
-        List_ticket_attachments(obj_class, obj_id)
-            List all non-image file attachments for a ticket.
-            Returns metadata and browser download links only.
+        Prepare_single_attachment(obj_class, obj_id, id)
+            Marks a single attachment for retrieval via get_single_attachment.
+            Call List_object_attachments first to populate the store and
+            obtain the attachment id from the listing.
 
     Resources:
-        _STATIC_RESOURCE_URI  (static)
-            Returns one image per call from the store populated by the most
-            recent List_ticket_images call for this client session.
-            Each call marks the served image as done and advances to the
-            next. Returns an empty response when all images have been served
-            or the store is empty. All images are served as JPEG.
+        itop://attachment/get_attachments
+            Downloads and returns all unserved attachments in a single
+            multi-entry contents array. Images are served from cache
+            (waits for background sync). Non-images are downloaded live.
+            Marks all returned attachments as served.
+
+        itop://attachment/get_single_attachment
+            Downloads and returns the single attachment marked by
+            Prepare_single_attachment. Images served from cache,
+            non-images downloaded live. Marks the record as served.
 
 iTop blob field notes
 ---------------------
 The contents AttributeBlob is returned by the REST API as a dict:
   {"mimetype": "<mime>", "data": "<base64>", "filename": "<name>"}
 
-Attachment  : may be any MIME type; mimetype is checked before including.
-              The base64 payload is decoded to bytes immediately and stored
-              as a BLOB in the attachment store.
-InlineImage : resolved from <img data-img-id data-img-secret> tags found in
-              ticket HTML fields after format_and_cache() has run. Secret and
-              id are read from the inline_image_refs SQLite cache.
+InlineImage refs are resolved from <img data-img-id data-img-secret> tags
+found in iTop HTML fields after _fetch_and_cache_object() has run.
+The refs are stored in the inline_image_refs SQLite cache by
+helpers/formatters.py (via parse_objects()) and read back here.
 """
 
 from __future__ import annotations
 
-import base64 as _base64
-import hashlib
 import httpx
 from fastmcp.resources import ResourceResult, ResourceContent
 
 from attachment_store import (
-    get_next_image,
+    store_attachment_metadata,
+    get_unserved_attachment_metadata,
+    get_single_attachment_metadata,
+    get_selected_attachment_metadata,
+    get_current_object_for_token,
+    set_selected,
+    set_served,
+    set_all_served,
+    start_sync,
+    wait_for_image,
+    wait_for_all,
     read_inline_image_refs,
-    store_images,
     write_inline_image_refs,
 )
 from auth import get_bearer_token
 from client import ItopClient
-from config import ITOP_TIMEOUT, ITOP_URL, ITOP_VERIFY_SSL, MCP_DEBUG, logger
-from tools.crud import _fetch_and_cache_ticket
-
-_IMAGE_PREFIXES = ("image/",)
-
-_STATIC_RESOURCE_URI = "itop://attachment/image.jpg"
+from config import ITOP_TIMEOUT, ITOP_URL, ITOP_VERIFY_SSL, logger
 
 
-def _is_image(mimetype: str) -> bool:
-    ct = mimetype.split(";")[0].strip().lower()
-    return any(ct.startswith(p) for p in _IMAGE_PREFIXES)
-
+# ---------------------------------------------------------------------------
+# Download helpers
+# ---------------------------------------------------------------------------
 
 def _attachment_url(attachment_id: "str | int") -> str:
     return (
@@ -133,46 +121,61 @@ async def _download_binary(url: str) -> "tuple[bytes, str]":
         return response.content, mimetype
 
 
+def _is_image_entry(entry: dict) -> bool:
+    return (
+        entry.get("source") == "InlineImage"
+        or (entry.get("mimetype") or "").startswith("image/")
+    )
+
+
+# ---------------------------------------------------------------------------
+# Registration
+# ---------------------------------------------------------------------------
+
 def register(mcp, client: ItopClient):
-    """Register attachment tools and the static image resource.
-
-    Args:
-        mcp:    FastMCP server instance.
-        client: ItopClient instance for REST requests.
-
-    The bearer token is read from the request context via get_bearer_token()
-    so no get_token_fn parameter is needed.
-    """
+    """Register attachment tools and resources on the given mcp instance."""
 
     # ------------------------------------------------------------------
-    # Tool: List_ticket_images
+    # Tool: List_object_attachments
     # ------------------------------------------------------------------
 
-    @mcp.tool(name="List_ticket_images")
-    async def itop_get_ticket_images(
+    @mcp.tool(name="List_object_attachments")
+    async def list_object_attachments(
         obj_class: str,
         obj_id: int,
-    ):
-        """Fetch and store all image attachments for an iTop ticket.
+    ) -> str:
+        """List all attachments and inline images for an iTop object.
 
-        Downloads binaries, deduplicates by content hash, writes to the
-        session image store. Returns the image count N.
+        Use Resolve_object first to obtain the confirmed obj_class and obj_id.
+        Works for any iTop class that supports attachments:
+        UserRequest, Incident, Change, FAQ, FunctionalCI, etc.
 
-        obj_id must be the confirmed integer database ID. Use Resolve_object
-        first if you only have a ref.
+        Fetches Attachment records via OQL and resolves inline image refs from
+        the HTML field cache. Writes metadata to the session store; no binaries
+        are downloaded at this stage. Starts a background task that downloads
+        and normalizes all image attachments into the cache.
 
-        After this returns, read the resource "Download ticket image" up to
-        N times to retrieve images one by one.
+        If called for a different object while a previous sync is still running,
+        the previous cache is cleared and a warning is included in the response.
+
+        Returns one entry per attachment with: id, filename, mimetype, source.
+
+        To retrieve all attachments at once: read resource get_attachments.
+        To retrieve a single attachment: call Prepare_single_attachment with the
+        desired id, then read resource get_single_attachment.
         """
+        token = get_bearer_token()
+        token_preview = (token[:8] + "...") if token and len(token) > 8 else (token or "(empty)")
+        obj_id_str = str(obj_id)
+
         logger.debug(
-            "[attachments] itop_get_ticket_images: called obj_class=%s obj_id=%r",
-            obj_class, obj_id,
+            "[attachments] list_object_attachments: token=%s cls=%s id=%s",
+            token_preview, obj_class, obj_id_str,
         )
 
-        obj_id_str = str(obj_id)
-        images = []
+        entries: list[dict] = []
 
-        # -- Attachment (image types only) --
+        # -- Attachment records (all MIME types) --
         att_oql = (
             "SELECT Attachment"
             " WHERE item_class = '" + obj_class + "'"
@@ -181,340 +184,314 @@ def register(mcp, client: ItopClient):
         att_result = await client.get("Attachment", att_oql, fields="contents")
         att_objects = att_result.get("objects") or {}
         logger.debug(
-            "[attachments] itop_get_ticket_images: Attachment query returned %d object(s)",
+            "[attachments] list_object_attachments: Attachment OQL returned %d object(s)",
             len(att_objects),
         )
 
         for obj_key, obj_data in att_objects.items():
             fields = obj_data.get("fields") or {}
             record_id = str(obj_data.get("key") or obj_key.split("::")[-1])
-            mimetype, b64_data, filename = _unpack_contents(fields.get("contents"))
-            if not _is_image(mimetype):
-                continue
+            mimetype, _b64, filename = _unpack_contents(fields.get("contents"))
             if not filename:
                 filename = "attachment_" + record_id
-            uri = "itop://attachment/" + record_id
-            content: bytes | None = None
-            if b64_data:
-                try:
-                    content = _base64.b64decode(b64_data)
-                    logger.debug(
-                        "[attachments] itop_get_ticket_images: decoded Attachment"
-                        " record_id=%s mime=%s bytes=%d",
-                        record_id, mimetype, len(content),
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "[attachments] itop_get_ticket_images: base64 decode failed"
-                        " record_id=%s exc=%s",
-                        record_id, exc,
-                    )
-            images.append({
+            if not mimetype:
+                mimetype = "application/octet-stream"
+            entries.append({
+                "id":     record_id,
                 "source": "Attachment",
                 "filename": filename,
                 "mimetype": mimetype,
-                "uri": uri,
-                "content": content,
-                "_b64": b64_data,
+                "inline_secret": None,
             })
             logger.debug(
-                "[attachments] itop_get_ticket_images: added Attachment"
-                " record_id=%s uri=%s content=%s",
-                record_id, uri,
-                ("%d bytes" % len(content)) if content is not None else "None",
+                "[attachments] list_object_attachments: Attachment id=%s mime=%s filename=%s",
+                record_id, mimetype, filename,
             )
 
-        # -- InlineImage via HTML-parsed refs cache --
+        # -- InlineImage refs via HTML-parsed cache --
         inline_refs = read_inline_image_refs(obj_class, obj_id_str)
         logger.debug(
-            "[attachments] itop_get_ticket_images: inline_image_refs cache %s for cls=%r id=%r",
+            "[attachments] list_object_attachments: inline_image_refs cache %s cls=%r id=%r",
             "hit" if inline_refs is not None else "miss",
             obj_class, obj_id_str,
         )
 
         if inline_refs is None:
             logger.debug(
-                "[attachments] itop_get_ticket_images: fetching ticket cls=%r id=%r"
-                " to populate inline image ref cache",
-                obj_class, obj_id_str,
+                "[attachments] list_object_attachments: fetching obj to populate ref cache"
+                " cls=%r id=%r", obj_class, obj_id_str,
             )
-            await _fetch_and_cache_ticket(obj_class, obj_id_str, client)
+            from tools.crud import _fetch_and_cache_object
+            await _fetch_and_cache_object(obj_class, obj_id_str, client)
             inline_refs = read_inline_image_refs(obj_class, obj_id_str)
             if inline_refs is None:
                 inline_refs = []
                 write_inline_image_refs(obj_class, obj_id_str, [])
 
         logger.debug(
-            "[attachments] itop_get_ticket_images: %d inline image ref(s) for cls=%r id=%r",
+            "[attachments] list_object_attachments: %d inline ref(s) cls=%r id=%r",
             len(inline_refs), obj_class, obj_id_str,
         )
 
-        for ref_entry in inline_refs:
-            img_id = ref_entry["id"]
-            secret = ref_entry["secret"]
-            filename = "inlineimage_" + img_id + ".jpg"
-            uri = "itop://inlineimage/" + secret + "/" + img_id
-            mimetype = "image/jpeg"
-            content = None
-            try:
-                url = _inline_image_url(img_id, secret)
-                content, dl_mime = await _download_binary(url)
-                if dl_mime and dl_mime != "application/octet-stream":
-                    mimetype = dl_mime
-                logger.debug(
-                    "[attachments] itop_get_ticket_images: downloaded InlineImage"
-                    " img_id=%s mime=%s bytes=%d",
-                    img_id, mimetype, len(content),
-                )
-            except Exception as exc:
-                logger.warning(
-                    "[attachments] itop_get_ticket_images: InlineImage download failed"
-                    " img_id=%s exc=%s",
-                    img_id, exc,
-                )
-            images.append({
+        for ref in inline_refs:
+            img_id = ref["id"]
+            secret = ref["secret"]
+            entries.append({
+                "id":     img_id,
                 "source": "InlineImage",
-                "filename": filename,
-                "mimetype": mimetype,
-                "uri": uri,
-                "content": content,
-                "_b64": "",
-            })
-            logger.debug(
-                "[attachments] itop_get_ticket_images: added InlineImage"
-                " img_id=%s uri=%s content=%s",
-                img_id, uri,
-                ("%d bytes" % len(content)) if content is not None else "None",
-            )
-
-        logger.debug(
-            "[attachments] itop_get_ticket_images: total images collected=%d", len(images)
-        )
-
-        # Deduplicate by img_id for InlineImages and by SHA-256 for Attachments.
-        seen_hashes: set[str] = set()
-        seen_inline_ids: set[str] = set()
-        unique_images = []
-        for img in images:
-            if img.get("source") == "InlineImage":
-                img_id_str = img.get("uri", "").split("/")[-1]
-                if img_id_str in seen_inline_ids:
-                    logger.debug(
-                        "[attachments] itop_get_ticket_images: skipping duplicate InlineImage"
-                        " img_id=%s", img_id_str,
-                    )
-                    continue
-                seen_inline_ids.add(img_id_str)
-            else:
-                b64 = img.get("_b64") or ""
-                if b64:
-                    digest = hashlib.sha256(b64.encode("ascii", errors="replace")).hexdigest()
-                    if digest in seen_hashes:
-                        logger.debug(
-                            "[attachments] itop_get_ticket_images: skipping duplicate"
-                            " digest=%s filename=%s uri=%s",
-                            digest[:12], img.get("filename"), img.get("uri"),
-                        )
-                        continue
-                    seen_hashes.add(digest)
-
-            content_bytes = img.get("content")
-            if content_bytes:
-                content_digest = hashlib.sha256(content_bytes).hexdigest()
-                if content_digest in seen_hashes:
-                    logger.debug(
-                        "[attachments] itop_get_ticket_images: skipping duplicate by content"
-                        " filename=%s uri=%s",
-                        img.get("filename"), img.get("uri"),
-                    )
-                    continue
-                seen_hashes.add(content_digest)
-
-            unique_images.append(img)
-
-        duplicates_removed = len(images) - len(unique_images)
-        if duplicates_removed:
-            logger.debug(
-                "[attachments] itop_get_ticket_images: removed %d duplicate(s),"
-                " %d unique image(s) remain",
-                duplicates_removed, len(unique_images),
-            )
-        images = unique_images
-
-        if not images:
-            return (
-                "No image attachments found for "
-                + obj_class + " " + obj_id_str + "."
-            )
-
-        store_entries = [
-            {k: v for k, v in img.items() if k not in ("source", "_b64")}
-            for img in images
-        ]
-        try:
-            token = get_bearer_token()
-            token_preview = (
-                (token[:8] + "...") if token and len(token) > 8 else (token or "(empty)")
-            )
-            if token:
-                logger.debug(
-                    "[attachments] itop_get_ticket_images: writing %d image(s) "
-                    "to attachment_store for token=%s",
-                    len(store_entries), token_preview,
-                )
-                store_images(token, store_entries)
-                logger.debug(
-                    "[attachments] itop_get_ticket_images: attachment_store write complete"
-                )
-            else:
-                logger.debug(
-                    "[attachments] itop_get_ticket_images: empty token,"
-                    " skipping attachment_store write"
-                )
-        except Exception as exc:
-            logger.warning(
-                "[attachments] itop_get_ticket_images: attachment_store write failed: %s",
-                exc,
-            )
-
-        dedup_note = (
-            " (" + str(duplicates_removed) + " duplicate(s) removed)"
-            if duplicates_removed
-            else ""
-        )
-        return (
-            str(len(images)) + " image attachment(s) found for "
-            + obj_class + " " + obj_id_str + dedup_note + ".\n"
-            + "Read the MCP resource " + _STATIC_RESOURCE_URI
-            + " once per image (up to " + str(len(images)) + " time(s)) to retrieve them."
-        )
-
-    # ------------------------------------------------------------------
-    # Tool: List_ticket_attachments
-    # ------------------------------------------------------------------
-
-    @mcp.tool(name="List_ticket_attachments")
-    async def itop_get_ticket_attachments(
-        obj_class: str,
-        obj_id: int,
-    ) -> str:
-        """List non-image file attachments for an iTop ticket.
-
-        Returns metadata and browser download links only -- no file binaries.
-        Use List_ticket_images for image attachments.
-
-        obj_id must be the confirmed integer database ID. Use Resolve_object
-        first if you only have a ref.
-        """
-        obj_id_str = str(obj_id)
-        att_oql = (
-            "SELECT Attachment"
-            " WHERE item_class = '" + obj_class + "'"
-            " AND item_id = " + obj_id_str
-        )
-        att_result = await client.get("Attachment", att_oql, fields="contents")
-
-        files = []
-
-        for obj_key, obj_data in (att_result.get("objects") or {}).items():
-            fields = obj_data.get("fields") or {}
-            record_id = str(obj_data.get("key") or obj_key.split("::")[-1])
-            mimetype, _data, filename = _unpack_contents(fields.get("contents"))
-            if _is_image(mimetype):
-                continue
-            if not filename:
-                filename = "attachment_" + record_id
-            if not mimetype:
-                mimetype = "application/octet-stream"
-            files.append({
-                "filename": filename,
-                "mimetype": mimetype,
-                "url": _attachment_url(record_id),
+                "filename": "inlineimage_" + img_id + ".jpg",
+                "mimetype": "image/jpeg",
+                "inline_secret": secret,
             })
 
-        if not files:
+        # -- Persist metadata and start background sync --
+        store_attachment_metadata(token, obj_class, obj_id, entries)
+        warning = await start_sync(token, obj_class, obj_id, entries)
+
+        # -- Build response --
+        if not entries:
             return (
-                "No file attachments found for "
-                + obj_class + " " + obj_id_str + "."
+                "No attachments found for " + obj_class + " " + obj_id_str + "."
             )
 
         lines = [
-            "File attachments for " + obj_class + " " + obj_id_str
-            + " (" + str(len(files)) + " found):"
+            "Attachments for " + obj_class + " " + obj_id_str
+            + " (" + str(len(entries)) + " found):"
         ]
-        for f in files:
-            lines.append("\n--- " + f["filename"] + " ---")
-            lines.append("  mimetype     : " + f["mimetype"])
-            lines.append("  browser_link : " + f["url"])
+        for e in entries:
+            lines.append("\n--- " + e["filename"] + " ---")
+            lines.append("  id      : " + e["id"])
+            lines.append("  source  : " + e["source"])
+            lines.append("  mimetype: " + e["mimetype"])
+
+        lines.append(
+            "\nTo retrieve all attachments: read resource get_attachments."
+        )
+        lines.append(
+            "To retrieve a single attachment: call Prepare_single_attachment(id=<id>),"
+            " then read resource get_single_attachment."
+        )
+
+        if warning:
+            lines.append("\nWarning: " + warning)
 
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
-    # Resource: itop://attachment/image.jpg  (static, no URI template)
+    # Tool: Prepare_single_attachment
+    # ------------------------------------------------------------------
+
+    @mcp.tool(name="Prepare_single_attachment")
+    async def prepare_single_attachment(
+        obj_class: str,
+        obj_id: int,
+        id: str,
+    ) -> str:
+        """Mark a single attachment for retrieval via get_single_attachment.
+
+        Call List_object_attachments first to populate the metadata store and
+        obtain the attachment id from the listing.
+
+        Sets the selected flag on the record matching id so that
+        get_single_attachment knows which attachment to download and return.
+        No binary is downloaded by this tool.
+
+        After this tool returns, read resource get_single_attachment.
+        """
+        token = get_bearer_token()
+        entry = get_single_attachment_metadata(token, obj_class, obj_id, id)
+        if entry is None:
+            return (
+                "No attachment found for id=" + id + " on "
+                + obj_class + " obj_id=" + str(obj_id)
+                + ". Call List_object_attachments first."
+            )
+        set_selected(token, obj_class, obj_id, id)
+        return (
+            "Attachment " + entry["filename"] + " (id=" + id
+            + ") selected. Read resource get_single_attachment to retrieve it."
+        )
+
+    # ------------------------------------------------------------------
+    # Resource: get_attachments
     # ------------------------------------------------------------------
 
     @mcp.resource(
-        _STATIC_RESOURCE_URI,
-        name="Download ticket image",
+        "itop://attachment/get_attachments",
+        name="Get all attachments",
         description=(
-            "Returns one image per call from the store populated by List_ticket_images. "
-            "You MUST call List_ticket_images first. "
-            "Each call serves the next unserved image in sequence and marks it done. "
-            "Call this resource once per image, up to the count returned by "
-            "List_ticket_images. Returns an empty response when all images have been "
-            "served or the store is empty."
+            "Downloads and returns all unserved attachments for the object "
+            "prepared by List_object_attachments. "
+            "Call List_object_attachments first. "
+            "Images are served from cache (waits for background sync if still running). "
+            "Non-image attachments are downloaded live from iTop. "
+            "Each attachment is one entry in the contents array with its own "
+            "uri (itop://attachment/<filename>), mimeType and blob. "
+            "Previously served attachments (via get_single_attachment) are excluded. "
+            "Marks all returned attachments as served."
         ),
-        mime_type="image/jpeg",
+        mime_type="application/octet-stream",
     )
-    async def serve_ticket_images() -> ResourceResult:
-        """Serve the next unserved ticket image for the current bearer token session."""
-        logger.debug("[attachments] serve_ticket_images: resource handler invoked")
+    async def get_attachments() -> ResourceResult:
+        """Serve all unserved attachments for the current bearer token session."""
+        logger.debug("[attachments] get_attachments: resource handler invoked")
 
         try:
             token = get_bearer_token()
-            token_preview = (
-                (token[:8] + "...") if token and len(token) > 8 else (token or "(empty)")
-            )
-            logger.debug(
-                "[attachments] serve_ticket_images: token=%s (len=%d)",
-                token_preview,
-                len(token) if token else 0,
-            )
         except Exception as exc:
-            logger.warning(
-                "[attachments] serve_ticket_images: get_bearer_token raised: %s", exc
-            )
-            token = ""
+            logger.warning("[attachments] get_attachments: get_bearer_token raised: %s", exc)
+            return ResourceResult(contents=[])
 
         if not token:
             return ResourceResult(contents=[])
 
-        entry = get_next_image(token)
+        current = get_current_object_for_token(token)
+        if current is None:
+            logger.debug("[attachments] get_attachments: no active object for token")
+            return ResourceResult(contents=[])
 
-        if entry is None:
+        obj_class, obj_id = current
+
+        # Wait for background image sync to finish
+        await wait_for_all(token)
+
+        entries = get_unserved_attachment_metadata(token, obj_class, obj_id)
+        if not entries:
+            logger.debug("[attachments] get_attachments: no unserved entries")
+            return ResourceResult(contents=[])
+
+        contents = []
+        for entry in entries:
+            entry_id = entry["id"]
+            filename = entry["filename"]
+            mime = entry["mimetype"]
+
+            if _is_image_entry(entry):
+                # Re-fetch to get content written by sync task
+                from attachment_store import get_single_attachment_metadata as _get_single
+                fresh = _get_single(token, obj_class, obj_id, entry_id)
+                content_bytes = (fresh or {}).get("content")
+                if content_bytes is None:
+                    logger.warning(
+                        "[attachments] get_attachments: no content for image id=%s", entry_id
+                    )
+                    continue
+                if fresh:
+                    mime = fresh.get("mimetype") or mime
+            else:
+                try:
+                    url = _attachment_url(entry_id)
+                    content_bytes, dl_mime = await _download_binary(url)
+                    if dl_mime:
+                        mime = dl_mime
+                except Exception as exc:
+                    logger.warning(
+                        "[attachments] get_attachments: download failed id=%s: %s",
+                        entry_id, exc,
+                    )
+                    continue
+
+            contents.append(
+                ResourceContent(
+                    uri="itop://attachment/" + filename,
+                    content=content_bytes,
+                    mime_type=mime,
+                )
+            )
             logger.debug(
-                "[attachments] serve_ticket_images: no unserved image for token=%s",
-                token_preview,
+                "[attachments] get_attachments: serving id=%s filename=%s mime=%s bytes=%d",
+                entry_id, filename, mime, len(content_bytes),
             )
-            return ResourceResult(contents=[])
 
-        content_bytes: bytes | None = entry.get("content")
-        mime: str = entry.get("mimetype", "image/jpeg")
-
+        set_all_served(token, obj_class, obj_id)
         logger.debug(
-            "[attachments] serve_ticket_images: filename=%s uri=%s content=%s",
-            entry.get("filename", "?"),
-            entry.get("uri", "?"),
-            ("%d bytes" % len(content_bytes)) if content_bytes is not None else "None",
+            "[attachments] get_attachments: returning %d content(s)", len(contents)
         )
+        return ResourceResult(contents=contents)
 
-        if content_bytes is None:
+    # ------------------------------------------------------------------
+    # Resource: get_single_attachment
+    # ------------------------------------------------------------------
+
+    @mcp.resource(
+        "itop://attachment/get_single_attachment",
+        name="Get single attachment",
+        description=(
+            "Downloads and returns the single attachment marked by Prepare_single_attachment. "
+            "You MUST call List_object_attachments and then Prepare_single_attachment "
+            "before reading this resource. "
+            "Image is served from cache (waits for background sync if still running). "
+            "Non-image attachment is downloaded live from iTop. "
+            "Marks the returned attachment as served."
+        ),
+        mime_type="application/octet-stream",
+    )
+    async def get_single_attachment() -> ResourceResult:
+        """Serve the attachment marked as selected for the current bearer token session."""
+        logger.debug("[attachments] get_single_attachment: resource handler invoked")
+
+        try:
+            token = get_bearer_token()
+        except Exception as exc:
             logger.warning(
-                "[attachments] serve_ticket_images: entry has no content uri=%s",
-                entry.get("uri", "?"),
+                "[attachments] get_single_attachment: get_bearer_token raised: %s", exc
             )
             return ResourceResult(contents=[])
 
+        if not token:
+            return ResourceResult(contents=[])
+
+        current = get_current_object_for_token(token)
+        if current is None:
+            logger.debug("[attachments] get_single_attachment: no active object for token")
+            return ResourceResult(contents=[])
+
+        obj_class, obj_id = current
+        entry = get_selected_attachment_metadata(token, obj_class, obj_id)
+        if entry is None:
+            logger.debug("[attachments] get_single_attachment: no selected entry")
+            return ResourceResult(contents=[])
+
+        entry_id = entry["id"]
+        filename = entry["filename"]
+        mime = entry["mimetype"]
+
+        if _is_image_entry(entry):
+            await wait_for_image(token, entry_id)
+            from attachment_store import get_single_attachment_metadata as _get_single
+            fresh = _get_single(token, obj_class, obj_id, entry_id)
+            content_bytes = (fresh or {}).get("content")
+            if content_bytes is None:
+                logger.warning(
+                    "[attachments] get_single_attachment: no content for image id=%s", entry_id
+                )
+                return ResourceResult(contents=[])
+            if fresh:
+                mime = fresh.get("mimetype") or mime
+        else:
+            try:
+                url = _attachment_url(entry_id)
+                content_bytes, dl_mime = await _download_binary(url)
+                if dl_mime:
+                    mime = dl_mime
+            except Exception as exc:
+                logger.warning(
+                    "[attachments] get_single_attachment: download failed id=%s: %s",
+                    entry_id, exc,
+                )
+                return ResourceResult(contents=[])
+
+        set_served(token, obj_class, obj_id, entry_id)
+        logger.debug(
+            "[attachments] get_single_attachment: serving id=%s filename=%s mime=%s bytes=%d",
+            entry_id, filename, mime, len(content_bytes),
+        )
         return ResourceResult(
-            contents=[ResourceContent(content=content_bytes, mime_type=mime)]
+            contents=[
+                ResourceContent(
+                    uri="itop://attachment/" + filename,
+                    content=content_bytes,
+                    mime_type=mime,
+                )
+            ]
         )
