@@ -1,21 +1,34 @@
 """
 attachment_store/__init__.py - Public API shim for the attachment_store package.
 
-Re-exports all public names from the submodules so that existing imports like
-    from attachment_store import store_images, ImageEntry
-continue to work without any changes to callers.
+Re-exports all public names from the submodules so callers can use:
+    from attachment_store import store_attachment_metadata, start_sync, ...
 
-Note: init_db() is no longer exported. Schema registration now happens
-automatically at import time via db.register_schema() in session.py and
-refs.py. Callers only need to call db.init() once at server startup.
+session.py is superseded by metadata.py + attachment_sync.py.
+It is kept in the directory but no longer imported here.
+db.init() runs the _migrate_from_sessions migration in metadata.py which
+drops the legacy attachment_sessions table on first startup.
 """
 
-from attachment_store.image import _normalize_image
-from attachment_store.session import (
-    store_images,
-    get_next_image,
-    purge_expired_images,
-    ImageEntry,
+from attachment_store.metadata import (
+    store_attachment_metadata,
+    get_all_attachment_metadata,
+    get_unserved_attachment_metadata,
+    get_single_attachment_metadata,
+    get_selected_attachment_metadata,
+    set_selected,
+    set_served,
+    set_all_served,
+    store_image_content,
+    clear_attachment_metadata,
+    get_current_object_for_token,
+    purge_expired_metadata,
+)
+from attachment_store.attachment_sync import (
+    start_sync,
+    wait_for_image,
+    wait_for_all,
+    cancel_sync,
 )
 from attachment_store.refs import (
     write_inline_image_refs,
@@ -24,12 +37,26 @@ from attachment_store.refs import (
 )
 
 __all__ = [
-    "store_images",
-    "get_next_image",
-    "purge_expired_images",
-    "ImageEntry",
+    # metadata
+    "store_attachment_metadata",
+    "get_all_attachment_metadata",
+    "get_unserved_attachment_metadata",
+    "get_single_attachment_metadata",
+    "get_selected_attachment_metadata",
+    "set_selected",
+    "set_served",
+    "set_all_served",
+    "store_image_content",
+    "clear_attachment_metadata",
+    "get_current_object_for_token",
+    "purge_expired_metadata",
+    # sync
+    "start_sync",
+    "wait_for_image",
+    "wait_for_all",
+    "cancel_sync",
+    # refs (unchanged)
     "write_inline_image_refs",
     "read_inline_image_refs",
     "purge_expired_inline_image_refs",
-    "_normalize_image",
 ]
