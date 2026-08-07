@@ -110,6 +110,11 @@ def _unpack_contents(contents: object) -> tuple:
 
 async def _download_binary(url: str) -> "tuple[bytes, str]":
     """Download binary content from url. Returns (content_bytes, mimetype)."""
+    from auth import get_bearer_token as _get_token
+    token = _get_token()
+    if token:
+        sep = "&" if "?" in url else "?"
+        url = url + sep + "auth_token=" + token
     logger.debug("[attachments] _download_binary: GET %s", url)
     async with httpx.AsyncClient(verify=ITOP_VERIFY_SSL, timeout=ITOP_TIMEOUT) as http:
         response = await http.get(url)
