@@ -121,17 +121,21 @@ def _format_field_entry(name: str, meta: dict) -> str:
     return "\n".join(lines)
 
 
-async def _fetch_and_cache_ticket(
+async def _fetch_and_cache_object(
     obj_class: str,
     obj_id: "str | int",
     client: ItopClient,
     *,
     full: bool = False,
 ) -> str:
-    """Fetch an object via core/get, apply stripping, and run format_and_cache.
+    """Fetch an iTop object via core/get, apply stripping, and run format_and_cache.
 
-    Used by Load_object and the attachments cache-miss path. The format_and_cache
-    call writes inline image refs to the SQLite cache as a side effect.
+    Used by Load_object and the inline image ref cache-miss path in
+    tools/attachments.py. The format_and_cache call writes inline image refs
+    to the SQLite cache as a side effect, making them available for
+    List_object_attachments without a second round-trip.
+
+    Works for any iTop class, not only tickets.
 
     Args:
         obj_class: iTop class name (concrete class preferred).
@@ -155,7 +159,7 @@ async def _fetch_and_cache_ticket(
 async def _resolve_mentions_in_fields(
     fields: dict,
     obj_class: str,
-    schema: dict | None,
+    schema: "dict | None",
     client: ItopClient,
 ) -> dict:
     """Return a copy of fields with mention tokens resolved in HTML attributes.
@@ -293,8 +297,8 @@ def register(mcp, client: ItopClient):
                     annotations[oid] = (
                         "[images] "
                         + ", ".join(parts)
-                        + ". Call List_ticket_images to fetch them."
-                        + " These images are an inherent part of the ticket."
+                        + ". Call List_object_attachments to fetch them."
+                        + " These images are an inherent part of the object."
                     )
 
         return format_and_cache(result, annotations=annotations or None)
