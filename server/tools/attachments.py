@@ -18,6 +18,11 @@ register(mcp, client)
             task that downloads and normalizes image binaries.
             Works for UserRequest, Incident, Change, FAQ, FunctionalCI, etc.
 
+            Same-object guard: if a sync for the same (obj_class, obj_id)
+            is already running, the store is NOT reset and start_sync()
+            returns as a no-op. is_sync_running() is checked before any
+            store write to avoid erasing cached image content.
+
         Prepare_single_attachment(obj_class, obj_id, id)
             Marks a single attachment for retrieval via get_single_attachment.
             Call List_object_attachments first to populate the store and
@@ -28,7 +33,8 @@ register(mcp, client)
             Downloads and returns all unserved attachments in a single
             multi-entry contents array. Images are served from cache
             (waits for background sync). Non-images are downloaded live.
-            Marks all returned attachments as served.
+            Only successfully returned attachments are marked served;
+            failed entries remain served=0 and are retried on next call.
 
         itop://attachment/get_single_attachment
             Downloads and returns the single attachment marked by
@@ -52,6 +58,7 @@ import httpx
 from fastmcp.resources import ResourceResult, ResourceContent
 
 from attachment_store import (
+    is_sync_running,
     store_attachment_metadata,
     get_unserved_attachment_metadata,
     get_single_attachment_metadata,
@@ -59,7 +66,6 @@ from attachment_store import (
     get_current_object_for_token,
     set_selected,
     set_served,
-    set_all_served,
     start_sync,
     wait_for_image,
     wait_for_all,
@@ -121,13 +127,6 @@ async def _download_binary(url: str) -> "tuple[bytes, str]":
         return response.content, mimetype
 
 
-def _is_image_entry(entry: dict) -> bool:
-    return (
-        entry.get("source") == "InlineImage"
-        or (entry.get("mimetype") or "").startswith("image/")
-    )
-
-
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
@@ -155,6 +154,9 @@ def register(mcp, client: ItopClient):
         are downloaded at this stage. Starts a background task that downloads
         and normalizes all image attachments into the cache.
 
+        If a sync for the same object is already running, the store is not
+        reset and start_sync() returns as a no-op.
+
         If called for a different object while a previous sync is still running,
         the previous cache is cleared and a warning is included in the response.
 
@@ -172,6 +174,19 @@ def register(mcp, client: ItopClient):
             "[attachments] list_object_attachments: token=%s cls=%s id=%s",
             token_preview, obj_class, obj_id_str,
         )
+
+        # -- Same-object guard: skip store write if sync is already running --
+        if is_sync_running(token, obj_class, obj_id):
+            logger.debug(
+                "[attachments] list_object_attachments: sync already running for"
+                " cls=%s id=%s -- skipping store reset, returning no-op",
+                obj_class, obj_id_str,
+            )
+            warning = await start_sync(token, obj_class, obj_id, [])
+            return (
+                "Sync already running for " + obj_class + " " + obj_id_str + "."
+                " Read resource get_attachments when ready."
+            )
 
         entries: list[dict] = []
 
@@ -197,10 +212,10 @@ def register(mcp, client: ItopClient):
             if not mimetype:
                 mimetype = "application/octet-stream"
             entries.append({
-                "id":     record_id,
-                "source": "Attachment",
-                "filename": filename,
-                "mimetype": mimetype,
+                "id":           record_id,
+                "source":       "Attachment",
+                "filename":     filename,
+                "mimetype":     mimetype,
                 "inline_secret": None,
             })
             logger.debug(
@@ -218,7 +233,7 @@ def register(mcp, client: ItopClient):
 
         if inline_refs is None:
             logger.debug(
-                "[attachments] list_object_attachments: fetching obj to populate ref cache"
+                "[attachments] list_object_attachments: fetching object to populate ref cache"
                 " cls=%r id=%r", obj_class, obj_id_str,
             )
             from tools.crud import _fetch_and_cache_object
@@ -237,10 +252,10 @@ def register(mcp, client: ItopClient):
             img_id = ref["id"]
             secret = ref["secret"]
             entries.append({
-                "id":     img_id,
-                "source": "InlineImage",
-                "filename": "inlineimage_" + img_id + ".jpg",
-                "mimetype": "image/jpeg",
+                "id":           img_id,
+                "source":       "InlineImage",
+                "filename":     "inlineimage_" + img_id + ".jpg",
+                "mimetype":     "image/jpeg",
                 "inline_secret": secret,
             })
 
@@ -328,7 +343,8 @@ def register(mcp, client: ItopClient):
             "Each attachment is one entry in the contents array with its own "
             "uri (itop://attachment/<filename>), mimeType and blob. "
             "Previously served attachments (via get_single_attachment) are excluded. "
-            "Marks all returned attachments as served."
+            "Only successfully returned attachments are marked as served; "
+            "failed entries remain available for retry on the next call."
         ),
         mime_type="application/octet-stream",
     )
@@ -361,19 +377,24 @@ def register(mcp, client: ItopClient):
             return ResourceResult(contents=[])
 
         contents = []
+        served_ids: list[str] = []
+
         for entry in entries:
             entry_id = entry["id"]
             filename = entry["filename"]
             mime = entry["mimetype"]
+            source = entry.get("source", "")
+            is_image = (source == "InlineImage" or mime.startswith("image/"))
 
-            if _is_image_entry(entry):
+            if is_image:
                 # Re-fetch to get content written by sync task
-                from attachment_store import get_single_attachment_metadata as _get_single
-                fresh = _get_single(token, obj_class, obj_id, entry_id)
+                fresh = get_single_attachment_metadata(token, obj_class, obj_id, entry_id)
                 content_bytes = (fresh or {}).get("content")
                 if content_bytes is None:
                     logger.warning(
-                        "[attachments] get_attachments: no content for image id=%s", entry_id
+                        "[attachments] get_attachments: no content for image id=%s"
+                        " -- skipping, will remain unserved",
+                        entry_id,
                     )
                     continue
                 if fresh:
@@ -386,7 +407,8 @@ def register(mcp, client: ItopClient):
                         mime = dl_mime
                 except Exception as exc:
                     logger.warning(
-                        "[attachments] get_attachments: download failed id=%s: %s",
+                        "[attachments] get_attachments: download failed id=%s: %s"
+                        " -- skipping, will remain unserved",
                         entry_id, exc,
                     )
                     continue
@@ -398,14 +420,19 @@ def register(mcp, client: ItopClient):
                     mime_type=mime,
                 )
             )
+            served_ids.append(entry_id)
             logger.debug(
                 "[attachments] get_attachments: serving id=%s filename=%s mime=%s bytes=%d",
                 entry_id, filename, mime, len(content_bytes),
             )
 
-        set_all_served(token, obj_class, obj_id)
+        # Mark only successfully returned attachments as served
+        for sid in served_ids:
+            set_served(token, obj_class, obj_id, sid)
+
         logger.debug(
-            "[attachments] get_attachments: returning %d content(s)", len(contents)
+            "[attachments] get_attachments: returning %d content(s), %d skipped",
+            len(contents), len(entries) - len(served_ids),
         )
         return ResourceResult(contents=contents)
 
@@ -455,15 +482,17 @@ def register(mcp, client: ItopClient):
         entry_id = entry["id"]
         filename = entry["filename"]
         mime = entry["mimetype"]
+        source = entry.get("source", "")
+        is_image = (source == "InlineImage" or mime.startswith("image/"))
 
-        if _is_image_entry(entry):
+        if is_image:
             await wait_for_image(token, entry_id)
-            from attachment_store import get_single_attachment_metadata as _get_single
-            fresh = _get_single(token, obj_class, obj_id, entry_id)
+            fresh = get_single_attachment_metadata(token, obj_class, obj_id, entry_id)
             content_bytes = (fresh or {}).get("content")
             if content_bytes is None:
                 logger.warning(
-                    "[attachments] get_single_attachment: no content for image id=%s", entry_id
+                    "[attachments] get_single_attachment: no content for image id=%s",
+                    entry_id,
                 )
                 return ResourceResult(contents=[])
             if fresh:
