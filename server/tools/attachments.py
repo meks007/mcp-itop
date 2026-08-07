@@ -54,11 +54,8 @@ helpers/formatters.py (via parse_objects()) and read back here.
 
 from __future__ import annotations
 
-import base64
-
 import httpx
-from fastmcp.resources import ResourceResult
-from mcp.types import BlobResourceContents
+from fastmcp.resources import ResourceResult, ResourceContent
 
 from attachment_store import (
     is_sync_running,
@@ -252,47 +249,60 @@ def register(mcp, client: ItopClient):
         )
 
         for ref in inline_refs:
-            img_id = ref["id"]
-            secret = ref["secret"]
+            img_id = str(ref.get("id", ""))
+            secret = ref.get("secret", "")
+            filename = ref.get("filename") or ("inline_" + img_id + ".png")
+            mimetype = ref.get("mimetype") or "image/png"
+            if not img_id:
+                continue
             entries.append({
-                "id":           img_id,
-                "source":       "InlineImage",
-                "filename":     "inlineimage_" + img_id + ".jpg",
-                "mimetype":     "image/jpeg",
+                "id":            img_id,
+                "source":        "InlineImage",
+                "filename":      filename,
+                "mimetype":      mimetype,
                 "inline_secret": secret,
             })
-
-        # -- Persist metadata and start background sync --
-        store_attachment_metadata(token, obj_class, obj_id, entries)
-        warning = await start_sync(token, obj_class, obj_id, entries)
-
-        # -- Build response --
-        if not entries:
-            return (
-                "No attachments found for " + obj_class + " " + obj_id_str + "."
+            logger.debug(
+                "[attachments] list_object_attachments: InlineImage id=%s mime=%s filename=%s",
+                img_id, mimetype, filename,
             )
 
+        # Store metadata (no binaries yet) and start background image sync
+        current_token = get_bearer_token()
+        prev_object = get_current_object_for_token(current_token)
+        warning = ""
+        if prev_object is not None and prev_object != (obj_class, obj_id):
+            prev_cls, prev_id = prev_object
+            warning = (
+                " WARNING: previous object " + prev_cls + " " + str(prev_id)
+                + " cache cleared."
+            )
+
+        store_attachment_metadata(token, obj_class, obj_id, entries)
+        sync_warning = await start_sync(token, obj_class, obj_id, entries)
+
+        count = len(entries)
+        if count == 0:
+            return "No attachments found for " + obj_class + " " + obj_id_str + "." + warning
+
         lines = [
-            "Attachments for " + obj_class + " " + obj_id_str
-            + " (" + str(len(entries)) + " found):"
+            "Found " + str(count) + " attachment(s) for "
+            + obj_class + " " + obj_id_str + ":" + warning
         ]
         for e in entries:
-            lines.append("\n--- " + e["filename"] + " ---")
-            lines.append("  id      : " + e["id"])
-            lines.append("  source  : " + e["source"])
-            lines.append("  mimetype: " + e["mimetype"])
-
+            lines.append(
+                "  id=" + e["id"]
+                + " source=" + e["source"]
+                + " filename=" + e["filename"]
+                + " mime=" + e["mimetype"]
+            )
+        if sync_warning:
+            lines.append(sync_warning)
         lines.append(
-            "\nTo retrieve all attachments: read resource get_attachments."
+            "Call Prepare_single_attachment(obj_class, obj_id, id) to select one,"
+            " then read get_single_attachment."
+            " Or read get_attachments to retrieve all at once."
         )
-        lines.append(
-            "To retrieve a single attachment: call Prepare_single_attachment(id=<id>),"
-            " then read resource get_single_attachment."
-        )
-
-        if warning:
-            lines.append("\nWarning: " + warning)
-
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -307,27 +317,40 @@ def register(mcp, client: ItopClient):
     ) -> str:
         """Mark a single attachment for retrieval via get_single_attachment.
 
-        Call List_object_attachments first to populate the metadata store and
-        obtain the attachment id from the listing.
+        Call List_object_attachments first to populate the store and obtain
+        the attachment id from the listing. Then call this tool with the
+        desired id, and read the get_single_attachment resource.
 
-        Sets the selected flag on the record matching id so that
-        get_single_attachment knows which attachment to download and return.
-        No binary is downloaded by this tool.
-
-        After this tool returns, read resource get_single_attachment.
+        obj_class: iTop class of the parent object (e.g. UserRequest).
+        obj_id:    Integer database ID of the parent object.
+        id:        Attachment id as returned by List_object_attachments.
         """
         token = get_bearer_token()
+        obj_id_str = str(obj_id)
+
+        logger.debug(
+            "[attachments] prepare_single_attachment: token=... cls=%s id=%s att_id=%s",
+            obj_class, obj_id_str, id,
+        )
+
         entry = get_single_attachment_metadata(token, obj_class, obj_id, id)
         if entry is None:
             return (
-                "No attachment found for id=" + id + " on "
-                + obj_class + " obj_id=" + str(obj_id)
-                + ". Call List_object_attachments first."
+                "Attachment id=" + id + " not found in store for "
+                + obj_class + " " + obj_id_str + "."
+                " Call List_object_attachments first."
             )
+
         set_selected(token, obj_class, obj_id, id)
+        logger.debug(
+            "[attachments] prepare_single_attachment: selected id=%s filename=%s",
+            id, entry.get("filename", ""),
+        )
         return (
-            "Attachment " + entry["filename"] + " (id=" + id
-            + ") selected. Read resource get_single_attachment to retrieve it."
+            "Attachment id=" + id + " selected ("
+            + entry.get("filename", "") + ", "
+            + entry.get("mimetype", "") + ")."
+            " Read resource get_single_attachment to retrieve the binary."
         )
 
     # ------------------------------------------------------------------
@@ -336,11 +359,9 @@ def register(mcp, client: ItopClient):
 
     @mcp.resource(
         "itop://attachment/get_attachments",
-        name="Get all attachments",
+        name="Get attachments",
         description=(
-            "Downloads and returns all unserved attachments for the object "
-            "prepared by List_object_attachments. "
-            "Call List_object_attachments first. "
+            "Downloads and returns all unserved attachments for the current bearer token session. "
             "Images are served from cache (waits for background sync if still running). "
             "Non-image attachments are downloaded live from iTop. "
             "Each attachment is one entry in the contents array with its own "
@@ -417,10 +438,10 @@ def register(mcp, client: ItopClient):
                     continue
 
             contents.append(
-                BlobResourceContents(
+                ResourceContent(
+                    content=content_bytes,
+                    mime_type=mime,
                     uri="itop://attachment/" + filename,
-                    blob=base64.b64encode(content_bytes).decode(),
-                    mimeType=mime,
                 )
             )
             served_ids.append(entry_id)
@@ -520,10 +541,10 @@ def register(mcp, client: ItopClient):
         )
         return ResourceResult(
             contents=[
-                BlobResourceContents(
+                ResourceContent(
+                    content=content_bytes,
+                    mime_type=mime,
                     uri="itop://attachment/" + filename,
-                    blob=base64.b64encode(content_bytes).decode(),
-                    mimeType=mime,
                 )
             ]
         )
