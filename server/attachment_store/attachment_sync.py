@@ -15,6 +15,15 @@ Image detection rule:
 In-memory state (_sync_state) is keyed by raw bearer token and holds
 the current (obj_class, obj_id), the running Task, per-id Events, and
 a done_event. State is not persisted to SQLite.
+
+Same-object guard
+-----------------
+is_sync_running(token, obj_class, obj_id) must be called by
+List_object_attachments BEFORE store_attachment_metadata() to prevent
+the store from being reset while a sync for the same object is already
+running. start_sync() itself enforces the same guard, but by the time
+it is called the store write has already occurred if the guard is not
+checked beforehand.
 """
 
 from __future__ import annotations
@@ -30,7 +39,7 @@ from attachment_store.metadata import (
     store_image_content,
     clear_attachment_metadata,
 )
-from config import ITOP_TIMEOUT, ITOP_URL, ITOP_VERIFY_SSL, logger as _cfg_logger
+from config import ITOP_TIMEOUT, ITOP_URL, ITOP_VERIFY_SSL
 
 logger = logging.getLogger(__name__)
 
@@ -89,13 +98,6 @@ _sync_state: dict[str, _SyncState] = {}
 # Background task
 # ---------------------------------------------------------------------------
 
-def _is_image_entry(entry: dict) -> bool:
-    return (
-        entry.get("source") == "InlineImage"
-        or (entry.get("mimetype") or "").startswith("image/")
-    )
-
-
 async def _sync_task(
     token: str,
     obj_class: str,
@@ -121,7 +123,10 @@ async def _sync_task(
             entry_id = entry["id"]
             source = entry.get("source", "")
             mimetype = entry.get("mimetype", "")
-            is_image = _is_image_entry(entry)
+            is_image = (
+                source == "InlineImage"
+                or mimetype.startswith("image/")
+            )
 
             if not is_image:
                 # Signal event immediately so wait_for_image() never blocks
@@ -180,6 +185,20 @@ async def _sync_task(
 # Public API
 # ---------------------------------------------------------------------------
 
+def is_sync_running(token: str, obj_class: str, obj_id: int) -> bool:
+    """Return True when a sync task for (token, obj_class, obj_id) is active.
+
+    Call this BEFORE store_attachment_metadata() in List_object_attachments
+    to avoid resetting a cache that is currently being populated by a running
+    sync task for the same object. If this returns True, skip the store write
+    and let start_sync() confirm the no-op.
+    """
+    state = _sync_state.get(token)
+    if state is None:
+        return False
+    return state.obj_class == obj_class and state.obj_id == obj_id
+
+
 async def start_sync(
     token: str,
     obj_class: str,
@@ -190,6 +209,8 @@ async def start_sync(
 
     If the token already has a running sync for the same (obj_class, obj_id):
         -> no-op; returns None.
+        Note: store_attachment_metadata() must NOT have been called before
+        this point for same-object calls. Use is_sync_running() to guard.
 
     If the token has a running sync for a different object:
         -> cancel the existing task
