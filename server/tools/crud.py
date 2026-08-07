@@ -222,9 +222,9 @@ def register(mcp, client: ItopClient):
     ) -> str:
         """Resolve an identifier to a confirmed iTop database ID.
 
-        Use this first for ticket refs, bare user-supplied numbers, OQL queries, or
-        other ambiguous identifiers. Returns the confirmed class, numeric ID, ref,
-        and friendly name.
+        Use this first for ticket refs, bare user-supplied numbers, OQL
+        queries, or other ambiguous identifiers. Returns the confirmed class,
+        numeric ID, ref, and friendly name.
 
         Use the returned numeric ID with all other object tools. Use
         obj_class=Ticket when the concrete ticket class is unknown.
@@ -245,9 +245,10 @@ def register(mcp, client: ItopClient):
     ):
         """Retrieve an iTop object by confirmed numeric ID.
 
-        Use Resolve_object first when you have a ticket ref or ambiguous identifier.
-        Set output_fields to "*" for standard fields, or use Describe_class to find
-        specific field names. public_log is included by default.
+        Use Resolve_object first when you have a ticket ref or ambiguous
+        identifier. Set output_fields to "*" for standard fields, or use
+        Describe_class to find specific field names. public_log is included
+        by default.
         """
         if not output_fields or not output_fields.strip():
             visible = sorted(
@@ -395,8 +396,8 @@ def register(mcp, client: ItopClient):
         simulate: bool = True,
     ) -> str:
         """Deletion is disabled by policy. Do not use to remove iTop objects.
-        Runs in simulation mode only. Retained for controlled dry-run checks.
 
+        Runs in simulation mode only. Retained for controlled dry-run checks.
         obj_id must be the confirmed integer database ID.
         """
         result = await client.delete(
