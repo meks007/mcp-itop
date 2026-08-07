@@ -32,14 +32,15 @@ register(mcp, client)
         itop://attachment/get_attachments
             Downloads and returns all unserved attachments in a single
             multi-entry contents array. Images are served from cache
-            (waits for background sync). Non-images are downloaded live.
+            (waits for background sync). Non-images are fetched live
+            via REST API (core/get Attachment fields=contents).
             Only successfully returned attachments are marked served;
             failed entries remain served=0 and are retried on next call.
 
         itop://attachment/get_single_attachment
             Downloads and returns the single attachment marked by
             Prepare_single_attachment. Images served from cache,
-            non-images downloaded live. Marks the record as served.
+            non-images fetched live via REST API. Marks record as served.
 
 iTop blob field notes
 ---------------------
@@ -55,8 +56,6 @@ helpers/formatters.py (via parse_objects()) and read back here.
 from __future__ import annotations
 
 import base64
-
-import httpx
 
 from attachment_store import (
     is_sync_running,
@@ -75,20 +74,12 @@ from attachment_store import (
 )
 from auth import get_bearer_token
 from client import ItopClient
-from config import ITOP_TIMEOUT, ITOP_URL, ITOP_VERIFY_SSL, logger
+from config import ITOP_URL, logger
 
 
 # ---------------------------------------------------------------------------
 # Download helpers
 # ---------------------------------------------------------------------------
-
-def _attachment_url(attachment_id: "str | int") -> str:
-    return (
-        ITOP_URL + "/webservices/ajax.document.php"
-        "?operation=download_document&class=Attachment&field=contents&id="
-        + str(attachment_id)
-    )
-
 
 def _inline_image_url(img_id: "str | int", secret: str) -> str:
     return (
@@ -108,29 +99,32 @@ def _unpack_contents(contents: object) -> tuple:
     return "", "", ""
 
 
-async def _download_binary(url: str) -> "tuple[bytes, str]":
-    """Download binary content from url. Returns (content_bytes, mimetype)."""
-    from auth import get_bearer_token as _get_token
-    token = _get_token()
-    if token:
-        sep = "&" if "?" in url else "?"
-        url = url + sep + "auth_token=" + token
-    logger.debug("[attachments] _download_binary: GET %s", url)
-    async with httpx.AsyncClient(verify=ITOP_VERIFY_SSL, timeout=ITOP_TIMEOUT) as http:
-        response = await http.get(url)
-        logger.debug(
-            "[attachments] _download_binary: status=%d content-type=%s",
-            response.status_code,
-            response.headers.get("content-type", "(none)"),
-        )
-        response.raise_for_status()
-        ct = response.headers.get("content-type", "application/octet-stream")
-        mimetype = ct.split(";")[0].strip()
-        logger.debug(
-            "[attachments] _download_binary: done url=%s mime=%s bytes=%d",
-            url, mimetype, len(response.content),
-        )
-        return response.content, mimetype
+async def _fetch_attachment_content(
+    client: ItopClient,
+    attachment_id: "str | int",
+    mimetype_hint: str = "application/octet-stream",
+) -> "tuple[bytes, str]":
+    """Fetch attachment binary via iTop REST API. Returns (content_bytes, mimetype)."""
+    logger.debug("[attachments] _fetch_attachment_content: id=%s", attachment_id)
+    result = await client.get_raw(
+        "Attachment",
+        str(attachment_id),
+        fields="contents",
+    )
+    objects = result.get("objects") or {}
+    if not objects:
+        raise ValueError("Attachment id=" + str(attachment_id) + " not found")
+    obj = next(iter(objects.values()))
+    contents = (obj.get("fields") or {}).get("contents") or {}
+    mime, b64data, _ = _unpack_contents(contents)
+    if not b64data:
+        raise ValueError("No content data for attachment id=" + str(attachment_id))
+    mime = mime or mimetype_hint
+    logger.debug(
+        "[attachments] _fetch_attachment_content: done id=%s mime=%s",
+        attachment_id, mime,
+    )
+    return base64.b64decode(b64data), mime
 
 
 # ---------------------------------------------------------------------------
@@ -369,7 +363,7 @@ def register(mcp, client: ItopClient):
         description=(
             "Downloads and returns all unserved attachments for the current bearer token session. "
             "Images are served from cache (waits for background sync if still running). "
-            "Non-image attachments are downloaded live from iTop. "
+            "Non-image attachments are fetched live via REST API. "
             "Each attachment is one entry in the contents array with its own "
             "uri (itop://attachment/<filename>), mimeType and blob. "
             "Previously served attachments (via get_single_attachment) are excluded. "
@@ -417,7 +411,7 @@ def register(mcp, client: ItopClient):
             is_image = (source == "InlineImage" or mime.startswith("image/"))
 
             if is_image:
-                # Re-fetch to get content written by sync task
+                # Read from cache written by background sync task
                 fresh = get_single_attachment_metadata(token, obj_class, obj_id, entry_id)
                 content_bytes = (fresh or {}).get("content")
                 if content_bytes is None:
@@ -431,8 +425,9 @@ def register(mcp, client: ItopClient):
                     mime = fresh.get("mimetype") or mime
             else:
                 try:
-                    url = _attachment_url(entry_id)
-                    content_bytes, dl_mime = await _download_binary(url)
+                    content_bytes, dl_mime = await _fetch_attachment_content(
+                        client, entry_id, mime,
+                    )
                     if dl_mime:
                         mime = dl_mime
                 except Exception as exc:
@@ -476,7 +471,7 @@ def register(mcp, client: ItopClient):
             "You MUST call List_object_attachments and then Prepare_single_attachment "
             "before reading this resource. "
             "Image is served from cache (waits for background sync if still running). "
-            "Non-image attachment is downloaded live from iTop. "
+            "Non-image attachment is fetched live via REST API. "
             "Marks the returned attachment as served."
         ),
         mime_type="application/octet-stream",
@@ -527,8 +522,9 @@ def register(mcp, client: ItopClient):
                 mime = fresh.get("mimetype") or mime
         else:
             try:
-                url = _attachment_url(entry_id)
-                content_bytes, dl_mime = await _download_binary(url)
+                content_bytes, dl_mime = await _fetch_attachment_content(
+                    client, entry_id, mime,
+                )
                 if dl_mime:
                     mime = dl_mime
             except Exception as exc:
