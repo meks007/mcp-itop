@@ -54,8 +54,10 @@ helpers/formatters.py (via parse_objects()) and read back here.
 
 from __future__ import annotations
 
+import base64
+
 import httpx
-from fastmcp.resources import ResourceResult, ResourceContent
+from mcp.types import BlobResourceContents
 
 from attachment_store import (
     is_sync_running,
@@ -372,7 +374,7 @@ def register(mcp, client: ItopClient):
         ),
         mime_type="application/octet-stream",
     )
-    async def get_attachments() -> ResourceResult:
+    async def get_attachments() -> list[BlobResourceContents]:
         """Serve all unserved attachments for the current bearer token session."""
         logger.debug("[attachments] get_attachments: resource handler invoked")
 
@@ -380,15 +382,15 @@ def register(mcp, client: ItopClient):
             token = get_bearer_token()
         except Exception as exc:
             logger.warning("[attachments] get_attachments: get_bearer_token raised: %s", exc)
-            return ResourceResult(contents=[])
+            return []
 
         if not token:
-            return ResourceResult(contents=[])
+            return []
 
         current = get_current_object_for_token(token)
         if current is None:
             logger.debug("[attachments] get_attachments: no active object for token")
-            return ResourceResult(contents=[])
+            return []
 
         obj_class, obj_id = current
 
@@ -398,7 +400,7 @@ def register(mcp, client: ItopClient):
         entries = get_unserved_attachment_metadata(token, obj_class, obj_id)
         if not entries:
             logger.debug("[attachments] get_attachments: no unserved entries")
-            return ResourceResult(contents=[])
+            return []
 
         contents = []
         served_ids: list[str] = []
@@ -438,10 +440,10 @@ def register(mcp, client: ItopClient):
                     continue
 
             contents.append(
-                ResourceContent(
-                    content=content_bytes,
-                    mime_type=mime,
+                BlobResourceContents(
                     uri="itop://attachment/" + filename,
+                    blob=base64.b64encode(content_bytes).decode(),
+                    mimeType=mime,
                 )
             )
             served_ids.append(entry_id)
@@ -458,7 +460,7 @@ def register(mcp, client: ItopClient):
             "[attachments] get_attachments: returning %d content(s), %d skipped",
             len(contents), len(entries) - len(served_ids),
         )
-        return ResourceResult(contents=contents)
+        return contents
 
     # ------------------------------------------------------------------
     # Resource: get_single_attachment
@@ -477,7 +479,7 @@ def register(mcp, client: ItopClient):
         ),
         mime_type="application/octet-stream",
     )
-    async def get_single_attachment() -> ResourceResult:
+    async def get_single_attachment() -> list[BlobResourceContents]:
         """Serve the attachment marked as selected for the current bearer token session."""
         logger.debug("[attachments] get_single_attachment: resource handler invoked")
 
@@ -487,21 +489,21 @@ def register(mcp, client: ItopClient):
             logger.warning(
                 "[attachments] get_single_attachment: get_bearer_token raised: %s", exc
             )
-            return ResourceResult(contents=[])
+            return []
 
         if not token:
-            return ResourceResult(contents=[])
+            return []
 
         current = get_current_object_for_token(token)
         if current is None:
             logger.debug("[attachments] get_single_attachment: no active object for token")
-            return ResourceResult(contents=[])
+            return []
 
         obj_class, obj_id = current
         entry = get_selected_attachment_metadata(token, obj_class, obj_id)
         if entry is None:
             logger.debug("[attachments] get_single_attachment: no selected entry")
-            return ResourceResult(contents=[])
+            return []
 
         entry_id = entry["id"]
         filename = entry["filename"]
@@ -518,7 +520,7 @@ def register(mcp, client: ItopClient):
                     "[attachments] get_single_attachment: no content for image id=%s",
                     entry_id,
                 )
-                return ResourceResult(contents=[])
+                return []
             if fresh:
                 mime = fresh.get("mimetype") or mime
         else:
@@ -532,19 +534,17 @@ def register(mcp, client: ItopClient):
                     "[attachments] get_single_attachment: download failed id=%s: %s",
                     entry_id, exc,
                 )
-                return ResourceResult(contents=[])
+                return []
 
         set_served(token, obj_class, obj_id, entry_id)
         logger.debug(
             "[attachments] get_single_attachment: serving id=%s filename=%s mime=%s bytes=%d",
             entry_id, filename, mime, len(content_bytes),
         )
-        return ResourceResult(
-            contents=[
-                ResourceContent(
-                    content=content_bytes,
-                    mime_type=mime,
-                    uri="itop://attachment/" + filename,
-                )
-            ]
-        )
+        return [
+            BlobResourceContents(
+                uri="itop://attachment/" + filename,
+                blob=base64.b64encode(content_bytes).decode(),
+                mimeType=mime,
+            )
+        ]
