@@ -30,9 +30,10 @@ def register(mcp, client: ItopClient):
         end_date: str = "",
         limit: int = 500,
     ) -> str:
-        """SLA compliance report showing TTO and TTR pass/breach rates and median resolution time.
+        """SLA compliance report: TTO/TTR pass/breach rates and median resolution time.
 
-        Covers all services or a single service over the given period."""
+        Covers all services or a single service over the given date range.
+        """
         s, e = parse_date_range(start_date, end_date)
 
         oql = f"SELECT UserRequest WHERE start_date >= '{s}' AND start_date < '{e}'"
@@ -61,7 +62,6 @@ def register(mcp, client: ItopClient):
 
         for t in tickets:
             f = t["fields"]
-            # TTO
             tto = str_or(f, "sla_tto_passed")
             if sla_is_passed(tto):
                 tto_passed += 1
@@ -69,7 +69,6 @@ def register(mcp, client: ItopClient):
                 tto_breached += 1
             else:
                 tto_na += 1
-            # TTR
             ttr = str_or(f, "sla_ttr_passed")
             if sla_is_passed(ttr):
                 ttr_passed += 1
@@ -78,7 +77,6 @@ def register(mcp, client: ItopClient):
             else:
                 ttr_na += 1
 
-            # Resolution time
             st = f.get("start_date")
             rt = f.get("resolution_date")
             if st and rt:
@@ -91,7 +89,6 @@ def register(mcp, client: ItopClient):
                 except (ValueError, TypeError):
                     pass
 
-            # Time spent
             ts = f.get("time_spent")
             if ts:
                 try:
@@ -141,9 +138,11 @@ def register(mcp, client: ItopClient):
         end_date: str = "",
         limit: int = 500,
     ) -> str:
-        """Agent workload analysis showing ticket counts, open/closed breakdown,
-        total time spent, and current backlog per agent or team.
-        Agents with more than 10 open tickets are flagged as overloaded."""
+        """Agent workload: ticket counts, open/closed breakdown, time spent, backlog.
+
+        Agents with more than 10 open tickets are flagged as overloaded.
+        Filter by agent_name or team_name; omit both for all agents.
+        """
         s, e = parse_date_range(start_date, end_date)
 
         oql = f"SELECT UserRequest WHERE start_date >= '{s}' AND start_date < '{e}'"
@@ -216,13 +215,12 @@ def register(mcp, client: ItopClient):
         status: str = "assigned",
         limit: int = 50,
     ) -> str:
-        """Find tickets with no recent activity for longer than the given idle threshold.
+        """Find tickets idle for longer than the given threshold (default: 2h).
 
-        Filters by status (default: assigned; any valid iTop status is accepted).
-        A ticket is considered idle only when BOTH its assignment_date AND its
-        last_update are older than the threshold. Returns one row per ticket,
-        not per agent -- an agent may appear multiple times.
-        Helps detect stalled tickets and unresponsive agents."""
+        A ticket is idle when BOTH assignment_date AND last_update are older
+        than the threshold. Filters by status (default: assigned). Returns one
+        row per ticket; an agent may appear multiple times.
+        """
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
             "%Y-%m-%d %H:%M:%S"
         )
@@ -298,10 +296,10 @@ def register(mcp, client: ItopClient):
     ) -> str:
         """Detect service classification mismatches over the last N days (default: 30).
 
-        Groups tickets with similar titles using keyword overlap (>=2 shared words of
-        3+ characters, common stop-words excluded). Groups smaller than min_similar
-        tickets (default: 3) are ignored. Only groups routed to more than one distinct
-        service are reported as potential mismatches."""
+        Groups tickets by keyword overlap (>=2 shared words of 3+ chars, stop-words
+        excluded). Groups smaller than min_similar are ignored. Only groups routed to
+        more than one distinct service are reported as potential mismatches.
+        """
         import re
 
         s = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
@@ -384,9 +382,11 @@ def register(mcp, client: ItopClient):
         days: int = 60,
         limit: int = 500,
     ) -> str:
-        """Analyse how accurately each caller selects the correct service category.
+        """Rank callers by service-selection accuracy over the last N days.
 
-        Callers who frequently pick the wrong service are flagged."""
+        Callers who frequently pick the wrong service category are flagged.
+        Only callers with at least min_tickets tickets are included.
+        """
         s = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
         e = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -454,12 +454,13 @@ def register(mcp, client: ItopClient):
         days: int = 60,
         limit: int = 500,
     ) -> str:
-        """Analyse the service diversity of tickets handled by each agent over the last N days.
+        """Analyse service diversity per agent over the last N days.
 
-        The diversity score (unique services / total tickets x 100) measures how many
-        different service categories an agent handles. A high score may indicate the agent
-        works across many services or actively recategorises tickets, but is not a direct
-        measure of caller-correction -- no caller-vs-agent service comparison is performed."""
+        Diversity score = unique services / total tickets x 100. A high score
+        indicates broad service coverage or active recategorisation, but is not
+        a direct measure of caller-correction. No caller-vs-agent comparison
+        is performed.
+        """
         s = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
         e = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -516,7 +517,7 @@ def register(mcp, client: ItopClient):
         header = ["Agent", "Tickets", "Services", "Primary Rate", "Diversity Score", "Assessment"]
         out = [
             f"**Agent Service Diversity Analysis** (last {days} days, >={min_tickets} tickets)",
-            "Note: Diversity score = unique services / total tickets x 100. Higher = broader service range.",
+            "Note: Diversity score = unique services / total tickets x 100. Higher = broader range.",
             "",
         ]
         out.append(format_table(header, rows))
@@ -527,8 +528,10 @@ def register(mcp, client: ItopClient):
         days: int = 30,
         limit: int = 500,
     ) -> str:
-        """High-level dashboard showing ticket volume, status breakdown, SLA breach count,
-        and average resolution time for the given period."""
+        """Dashboard snapshot: ticket volume, status breakdown, SLA breaches, resolution time.
+
+        Covers the last N days (default: 30).
+        """
         s = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
         e = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
