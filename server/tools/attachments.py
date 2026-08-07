@@ -143,28 +143,21 @@ def register(mcp, client: ItopClient):
         obj_class: str,
         obj_id: int,
     ) -> str:
-        """List all attachments and inline images for an iTop object.
+        """List attachments and inline images for an iTop object.
 
-        Use Resolve_object first to obtain the confirmed obj_class and obj_id.
-        Works for any iTop class that supports attachments:
-        UserRequest, Incident, Change, FAQ, FunctionalCI, etc.
+        Use Resolve_object first for the confirmed obj_class and obj_id. Supports
+        UserRequest, Incident, Change, FAQ, FunctionalCI, and similar classes.
+        Records metadata without downloading binaries, then starts background image
+        download and normalization. A running sync for this object is reused; changing
+        objects clears the previous cache and returns a warning.
 
-        Fetches Attachment records via OQL and resolves inline image refs from
-        the HTML field cache. Writes metadata to the session store; no binaries
-        are downloaded at this stage. Starts a background task that downloads
-        and normalizes all image attachments into the cache.
+        Returns each attachment's id, filename, mimetype, and source.
 
-        If a sync for the same object is already running, the store is not
-        reset and start_sync() returns as a no-op.
-
-        If called for a different object while a previous sync is still running,
-        the previous cache is cleared and a warning is included in the response.
-
-        Returns one entry per attachment with: id, filename, mimetype, source.
-
-        To retrieve all attachments at once: read resource get_attachments.
-        To retrieve a single attachment: call Prepare_single_attachment with the
-        desired id, then read resource get_single_attachment.
+        Routing: for all attachments, all remaining attachments, or every file, read
+        get_attachments once. It returns every currently unserved attachment, including
+        files not yet retrieved after earlier single-file calls. For one identified file
+        (for example by filename or id), call Prepare_single_attachment, then read
+        get_single_attachment.
         """
         token = get_bearer_token()
         token_preview = (token[:8] + "...") if token and len(token) > 8 else (token or "(empty)")
@@ -299,9 +292,8 @@ def register(mcp, client: ItopClient):
         if sync_warning:
             lines.append(sync_warning)
         lines.append(
-            "Call Prepare_single_attachment(obj_class, obj_id, id) to select one,"
-            " then read get_single_attachment."
-            " Or read get_attachments to retrieve all at once."
+            "Read get_attachments once for all or all remaining attachments. "
+            "Use Prepare_single_attachment and get_single_attachment only for one identified file."
         )
         return "\n".join(lines)
 
@@ -359,14 +351,18 @@ def register(mcp, client: ItopClient):
 
     @mcp.resource(
         "itop://attachment/get_attachments",
-        name="Get attachments",
+        name="Get all remaining attachments",
         description=(
-            "Downloads and returns all unserved attachments for the current bearer token session. "
+            "PREFERRED for requests to get all attachments, all remaining attachments, "
+            "or every file for the current object. It returns all currently unserved "
+            "attachments in one multi-entry contents array; do not make repeated "
+            "get_single_attachment calls for this use case. "
             "Images are served from cache (waits for background sync if still running). "
             "Non-image attachments are fetched live via REST API. "
             "Each attachment is one entry in the contents array with its own "
             "uri (itop://attachment/<filename>), mimeType and blob. "
-            "Previously served attachments (via get_single_attachment) are excluded. "
+            "Previously served attachments (including those returned by "
+            "get_single_attachment) are excluded. "
             "Only successfully returned attachments are marked as served; "
             "failed entries remain available for retry on the next call."
         ),
@@ -465,8 +461,13 @@ def register(mcp, client: ItopClient):
 
     @mcp.resource(
         "itop://attachment/get_single_attachment",
-        name="Get single attachment",
+        name="Get one selected attachment",
         description=(
+            "Use this only when one specific attachment is needed, for example when "
+            "a filename or attachment id identifies the requested file. Do not use it "
+            "repeatedly to retrieve all or all remaining attachments; use the "
+            "get_attachments resource instead, which returns all unserved attachments "
+            "in one multi-entry response. "
             "Downloads and returns the single attachment marked by Prepare_single_attachment. "
             "You MUST call List_object_attachments and then Prepare_single_attachment "
             "before reading this resource. "
