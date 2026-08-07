@@ -322,6 +322,58 @@ def clear_attachment_metadata(
         )
 
 
+def clear_if_all_served(
+    token: str,
+    obj_class: str,
+    obj_id: int,
+) -> bool:
+    """Delete active metadata for an object when every entry has been served.
+
+    Checks atomically inside one transaction whether all non-expired records
+    for (token, obj_class, obj_id) have served=1 and, if so, deletes them all
+    (including cached image BLOBs stored in the same rows).
+
+    Returns True when rows were deleted.
+    Returns False when unserved active entries remain or no active metadata exists.
+    """
+    now = time.time()
+
+    with db.transaction():
+        active_rows = db.execute(
+            "SELECT COUNT(*) FROM attachment_metadata "
+            "WHERE token = ? AND obj_class = ? AND obj_id = ? "
+            "AND expires_at >= ?",
+            (token, obj_class, obj_id, now),
+        )
+        active_count = active_rows[0][0] if active_rows else 0
+        if active_count == 0:
+            return False
+
+        unserved_rows = db.execute(
+            "SELECT COUNT(*) FROM attachment_metadata "
+            "WHERE token = ? AND obj_class = ? AND obj_id = ? "
+            "AND expires_at >= ? AND served = 0",
+            (token, obj_class, obj_id, now),
+        )
+        unserved_count = unserved_rows[0][0] if unserved_rows else 0
+        if unserved_count:
+            return False
+
+        db.execute(
+            "DELETE FROM attachment_metadata "
+            "WHERE token = ? AND obj_class = ? AND obj_id = ?",
+            (token, obj_class, obj_id),
+        )
+
+    logger.debug(
+        "[attachment_store] clear_if_all_served: removed completed metadata "
+        "cls=%s id=%d",
+        obj_class,
+        obj_id,
+    )
+    return True
+
+
 def get_current_object_for_token(token: str) -> tuple[str, int] | None:
     """Return (obj_class, obj_id) of the most recently stored object for this token.
 
