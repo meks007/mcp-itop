@@ -57,7 +57,7 @@ from __future__ import annotations
 import base64
 
 import httpx
-from fastmcp.resources import ResourceResult, ResourceContent
+from fastmcp.resources import ResourceResult
 from mcp.types import BlobResourceContents
 
 from attachment_store import (
@@ -417,12 +417,10 @@ def register(mcp, client: ItopClient):
                     continue
 
             contents.append(
-                ResourceContent(
-                    BlobResourceContents(
-                        uri="itop://attachment/" + filename,
-                        blob=base64.b64encode(content_bytes).decode(),
-                        mimeType=mime,
-                    )
+                BlobResourceContents(
+                    uri="itop://attachment/" + filename,
+                    blob=base64.b64encode(content_bytes).decode(),
+                    mimeType=mime,
                 )
             )
             served_ids.append(entry_id)
@@ -522,12 +520,10 @@ def register(mcp, client: ItopClient):
         )
         return ResourceResult(
             contents=[
-                ResourceContent(
-                    BlobResourceContents(
-                        uri="itop://attachment/" + filename,
-                        blob=base64.b64encode(content_bytes).decode(),
-                        mimeType=mime,
-                    )
+                BlobResourceContents(
+                    uri="itop://attachment/" + filename,
+                    blob=base64.b64encode(content_bytes).decode(),
+                    mimeType=mime,
                 )
             ]
         )
