@@ -14,9 +14,8 @@ register(mcp, client)
     Tools:
         List_object_attachments(obj_class, obj_id)
             Lists all attachments and inline images for any iTop object.
-            Always fetches the object fresh from iTop to discover current
-            inline images. Writes metadata to the session store and starts
-            a background task that downloads and normalizes image binaries.
+            Writes metadata to the session store and starts a background
+            task that downloads and normalizes image binaries.
             Works for UserRequest, Incident, Change, FAQ, FunctionalCI, etc.
 
             Same-object guard: if a sync for the same (obj_class, obj_id)
@@ -36,28 +35,30 @@ register(mcp, client)
             (waits for background sync). Non-images are downloaded live.
             Only successfully returned attachments are marked served;
             failed entries remain served=0 and are retried on next call.
-            Calls clear_if_all_served() after marking served entries.
 
         itop://attachment/get_single_attachment
             Downloads and returns the single attachment marked by
             Prepare_single_attachment. Images served from cache,
             non-images downloaded live. Marks the record as served.
-            Calls clear_if_all_served() after marking served.
 
 iTop blob field notes
 ---------------------
 The contents AttributeBlob is returned by the REST API as a dict:
   {"mimetype": "<mime>", "data": "<base64>", "filename": "<name>"}
 
-InlineImage refs are resolved by always fetching the object fresh from iTop
-so that newly added inline images are visible immediately without waiting
-for the ref-cache TTL to expire.
+InlineImage refs are resolved from <img data-img-id data-img-secret> tags
+found in iTop HTML fields after _fetch_and_cache_object() has run.
+The refs are stored in the inline_image_refs SQLite cache by
+helpers/formatters.py (via parse_objects()) and read back here.
 """
 
 from __future__ import annotations
 
+import base64
+
 import httpx
-from fastmcp.resources import ResourceResult, ResourceContent
+from fastmcp.resources import ResourceResult
+from mcp.types import BlobResourceContents
 
 from attachment_store import (
     is_sync_running,
@@ -68,11 +69,11 @@ from attachment_store import (
     get_current_object_for_token,
     set_selected,
     set_served,
-    clear_if_all_served,
     start_sync,
     wait_for_image,
     wait_for_all,
     read_inline_image_refs,
+    write_inline_image_refs,
 )
 from auth import get_bearer_token
 from client import ItopClient
@@ -151,10 +152,10 @@ def register(mcp, client: ItopClient):
         Works for any iTop class that supports attachments:
         UserRequest, Incident, Change, FAQ, FunctionalCI, etc.
 
-        Always fetches the object fresh from iTop so that inline images added
-        since the last call are visible immediately. Writes metadata to the
-        session store; no binaries are downloaded at this stage. Starts a
-        background task that downloads and normalizes all image attachments.
+        Fetches Attachment records via OQL and resolves inline image refs from
+        the HTML field cache. Writes metadata to the session store; no binaries
+        are downloaded at this stage. Starts a background task that downloads
+        and normalizes all image attachments into the cache.
 
         If a sync for the same object is already running, the store is not
         reset and start_sync() returns as a no-op.
@@ -184,7 +185,7 @@ def register(mcp, client: ItopClient):
                 " cls=%s id=%s -- skipping store reset, returning no-op",
                 obj_class, obj_id_str,
             )
-            await start_sync(token, obj_class, obj_id, [])
+            warning = await start_sync(token, obj_class, obj_id, [])
             return (
                 "Sync already running for " + obj_class + " " + obj_id_str + "."
                 " Read resource get_attachments when ready."
@@ -225,47 +226,38 @@ def register(mcp, client: ItopClient):
                 record_id, mimetype, filename,
             )
 
-        # -- InlineImage refs: always fetch fresh from iTop --
-        # Do not use the cache as the primary source here. A user can add or
-        # remove inline images at any time; a cache hit would hide new images
-        # until the TTL expires. _fetch_and_cache_object calls format_and_cache
-        # which invokes write_inline_image_refs, replacing any stale refs.
+        # -- InlineImage refs via HTML-parsed cache --
+        inline_refs = read_inline_image_refs(obj_class, obj_id_str)
         logger.debug(
-            "[attachments] list_object_attachments: refreshing inline-image refs"
-            " from iTop cls=%r id=%r",
+            "[attachments] list_object_attachments: inline_image_refs cache %s cls=%r id=%r",
+            "hit" if inline_refs is not None else "miss",
             obj_class, obj_id_str,
         )
-        from tools.crud import _fetch_and_cache_object
-        await _fetch_and_cache_object(obj_class, obj_id_str, client)
-        inline_refs = read_inline_image_refs(obj_class, obj_id_str) or []
+
+        if inline_refs is None:
+            logger.debug(
+                "[attachments] list_object_attachments: fetching object to populate ref cache"
+                " cls=%r id=%r", obj_class, obj_id_str,
+            )
+            from tools.crud import _fetch_and_cache_object
+            await _fetch_and_cache_object(obj_class, obj_id_str, client)
+            inline_refs = read_inline_image_refs(obj_class, obj_id_str)
+            if inline_refs is None:
+                inline_refs = []
+                write_inline_image_refs(obj_class, obj_id_str, [])
 
         logger.debug(
-            "[attachments] list_object_attachments: inline-image refresh complete"
-            " cls=%r id=%r count=%d ids=%s",
-            obj_class,
-            obj_id_str,
-            len(inline_refs),
-            [ref["id"] for ref in inline_refs],
+            "[attachments] list_object_attachments: %d inline ref(s) cls=%r id=%r",
+            len(inline_refs), obj_class, obj_id_str,
         )
 
         for ref in inline_refs:
             img_id = ref["id"]
             secret = ref["secret"]
-            filename = "inlineimage_" + img_id + ".jpg"
-
-            logger.debug(
-                "[attachments] list_object_attachments: InlineImage"
-                " id=%s secret_prefix=%s filename=%s mime=%s",
-                img_id,
-                (secret[:6] + "...") if len(secret) > 6 else "***",
-                filename,
-                "image/jpeg",
-            )
-
             entries.append({
                 "id":           img_id,
                 "source":       "InlineImage",
-                "filename":     filename,
+                "filename":     "inlineimage_" + img_id + ".jpg",
                 "mimetype":     "image/jpeg",
                 "inline_secret": secret,
             })
@@ -355,8 +347,7 @@ def register(mcp, client: ItopClient):
             "uri (itop://attachment/<filename>), mimeType and blob. "
             "Previously served attachments (via get_single_attachment) are excluded. "
             "Only successfully returned attachments are marked as served; "
-            "failed entries remain available for retry on the next call. "
-            "Metadata is deleted immediately once every attachment is served."
+            "failed entries remain available for retry on the next call."
         ),
         mime_type="application/octet-stream",
     )
@@ -426,9 +417,10 @@ def register(mcp, client: ItopClient):
                     continue
 
             contents.append(
-                ResourceContent(
-                    content=content_bytes,
-                    mime_type=mime,
+                BlobResourceContents(
+                    uri="itop://attachment/" + filename,
+                    blob=base64.b64encode(content_bytes).decode(),
+                    mimeType=mime,
                 )
             )
             served_ids.append(entry_id)
@@ -440,9 +432,6 @@ def register(mcp, client: ItopClient):
         # Mark only successfully returned attachments as served
         for sid in served_ids:
             set_served(token, obj_class, obj_id, sid)
-
-        # Remove metadata immediately once every attachment has been served
-        clear_if_all_served(token, obj_class, obj_id)
 
         logger.debug(
             "[attachments] get_attachments: returning %d content(s), %d skipped",
@@ -463,8 +452,7 @@ def register(mcp, client: ItopClient):
             "before reading this resource. "
             "Image is served from cache (waits for background sync if still running). "
             "Non-image attachment is downloaded live from iTop. "
-            "Marks the returned attachment as served. "
-            "Metadata is deleted immediately once every attachment for the object is served."
+            "Marks the returned attachment as served."
         ),
         mime_type="application/octet-stream",
     )
@@ -530,15 +518,12 @@ def register(mcp, client: ItopClient):
             "[attachments] get_single_attachment: serving id=%s filename=%s mime=%s bytes=%d",
             entry_id, filename, mime, len(content_bytes),
         )
-
-        # Remove metadata immediately once every attachment for this object is served
-        clear_if_all_served(token, obj_class, obj_id)
-
         return ResourceResult(
             contents=[
-                ResourceContent(
-                    content=content_bytes,
-                    mime_type=mime,
+                BlobResourceContents(
+                    uri="itop://attachment/" + filename,
+                    blob=base64.b64encode(content_bytes).decode(),
+                    mimeType=mime,
                 )
             ]
         )
