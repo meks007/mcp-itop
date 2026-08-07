@@ -21,6 +21,7 @@ from attachment_store.metadata import (
     set_all_served,
     store_image_content,
     clear_attachment_metadata,
+    clear_if_all_served,
     get_current_object_for_token,
     purge_expired_metadata,
 )
@@ -49,6 +50,7 @@ __all__ = [
     "set_all_served",
     "store_image_content",
     "clear_attachment_metadata",
+    "clear_if_all_served",
     "get_current_object_for_token",
     "purge_expired_metadata",
     # sync
