@@ -415,7 +415,6 @@ def register(mcp, client: ItopClient):
 
             contents.append(
                 ResourceContent(
-                    uri="itop://attachment/" + filename,
                     content=content_bytes,
                     mime_type=mime,
                 )
@@ -518,7 +517,6 @@ def register(mcp, client: ItopClient):
         return ResourceResult(
             contents=[
                 ResourceContent(
-                    uri="itop://attachment/" + filename,
                     content=content_bytes,
                     mime_type=mime,
                 )
