@@ -457,9 +457,6 @@ def register(mcp, client: ItopClient) -> None:
                 "Known states: " + ", ".join(all_states)
             )
 
-        # ----------------------------------------------------------------
-        # Resolve starting state
-        # ----------------------------------------------------------------
         if obj_id and obj_id.strip():
             try:
                 numeric_id = int(obj_id)
@@ -492,9 +489,6 @@ def register(mcp, client: ItopClient) -> None:
             start_states = all_states
             start_label = ""
 
-        # ----------------------------------------------------------------
-        # Path finding
-        # ----------------------------------------------------------------
         all_paths: list[tuple[str, list[tuple[str, str, str]]]] = []
         for start in start_states:
             if start == target_state:
@@ -537,8 +531,8 @@ def register(mcp, client: ItopClient) -> None:
         The tool determines the required user-action stimulus from the object's
         current state. Internal transitions cannot be applied manually.
 
-        Use Describe_state_change first to identify valid target states and required
-        fields. field_lines accepts optional key=value or key: value entries.
+        Use Describe_state_change first to identify valid target states and
+        required fields. field_lines accepts key=value or key: value entries.
         """
         schema = await get_transition_map(obj_class, client)
         transitions = schema.get("transitions", {})
