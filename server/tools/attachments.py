@@ -57,7 +57,6 @@ from __future__ import annotations
 import base64
 
 import httpx
-from mcp.types import BlobResourceContents
 
 from attachment_store import (
     is_sync_running,
@@ -374,7 +373,7 @@ def register(mcp, client: ItopClient):
         ),
         mime_type="application/octet-stream",
     )
-    async def get_attachments() -> list[BlobResourceContents]:
+    async def get_attachments() -> list[dict]:
         """Serve all unserved attachments for the current bearer token session."""
         logger.debug("[attachments] get_attachments: resource handler invoked")
 
@@ -439,13 +438,11 @@ def register(mcp, client: ItopClient):
                     )
                     continue
 
-            contents.append(
-                BlobResourceContents(
-                    uri="itop://attachment/" + filename,
-                    blob=base64.b64encode(content_bytes).decode(),
-                    mimeType=mime,
-                )
-            )
+            contents.append({
+                "uri": "itop://attachment/" + filename,
+                "blob": base64.b64encode(content_bytes).decode(),
+                "mimeType": mime,
+            })
             served_ids.append(entry_id)
             logger.debug(
                 "[attachments] get_attachments: serving id=%s filename=%s mime=%s bytes=%d",
@@ -479,7 +476,7 @@ def register(mcp, client: ItopClient):
         ),
         mime_type="application/octet-stream",
     )
-    async def get_single_attachment() -> list[BlobResourceContents]:
+    async def get_single_attachment() -> list[dict]:
         """Serve the attachment marked as selected for the current bearer token session."""
         logger.debug("[attachments] get_single_attachment: resource handler invoked")
 
@@ -541,10 +538,8 @@ def register(mcp, client: ItopClient):
             "[attachments] get_single_attachment: serving id=%s filename=%s mime=%s bytes=%d",
             entry_id, filename, mime, len(content_bytes),
         )
-        return [
-            BlobResourceContents(
-                uri="itop://attachment/" + filename,
-                blob=base64.b64encode(content_bytes).decode(),
-                mimeType=mime,
-            )
-        ]
+        return [{
+            "uri": "itop://attachment/" + filename,
+            "blob": base64.b64encode(content_bytes).decode(),
+            "mimeType": mime,
+        }]
