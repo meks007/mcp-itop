@@ -12,6 +12,12 @@ They are fetched live from iTop when a resource handler serves them.
 Image detection rule:
     source == 'InlineImage'  OR  mimetype.startswith('image/')
 
+Fetch strategy:
+    source == 'InlineImage':
+        ajax.document.php + auth_token query param (no REST API endpoint)
+    source == 'Attachment', mime starts with 'image/':
+        core/get Attachment fields=contents via REST API
+
 In-memory state (_sync_state) is keyed by raw bearer token and holds
 the current (obj_class, obj_id), the running Task, per-id Events, and
 a done_event. State is not persisted to SQLite.
@@ -29,6 +35,8 @@ checked beforehand.
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 from dataclasses import dataclass, field
 
@@ -39,7 +47,7 @@ from attachment_store.metadata import (
     store_image_content,
     clear_attachment_metadata,
 )
-from config import ITOP_TIMEOUT, ITOP_URL, ITOP_VERIFY_SSL
+from config import ITOP_TIMEOUT, ITOP_URL, ITOP_VERIFY_SSL, ITOP_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -48,14 +56,6 @@ logger = logging.getLogger(__name__)
 # Download helpers
 # ---------------------------------------------------------------------------
 
-def _attachment_url(attachment_id: str) -> str:
-    return (
-        ITOP_URL + "/webservices/ajax.document.php"
-        "?operation=download_document&class=Attachment&field=contents&id="
-        + str(attachment_id)
-    )
-
-
 def _inline_image_url(img_id: str, secret: str) -> str:
     return (
         ITOP_URL + "/webservices/ajax.document.php"
@@ -63,18 +63,67 @@ def _inline_image_url(img_id: str, secret: str) -> str:
     )
 
 
-async def _download_binary(url: str, client: httpx.AsyncClient) -> tuple[bytes, str]:
-    """Download binary content. Returns (content_bytes, mimetype)."""
-    logger.debug("[attachment_sync] _download_binary: GET %s", url)
-    response = await client.get(url)
+async def _download_inline_image(
+    img_id: str,
+    secret: str,
+    token: str,
+    http_client: httpx.AsyncClient,
+) -> "tuple[bytes, str]":
+    """Download an InlineImage via ajax.document.php with auth_token."""
+    url = _inline_image_url(img_id, secret)
+    url = url + "&auth_token=" + token
+    logger.debug("[attachment_sync] _download_inline_image: GET id=%s", img_id)
+    response = await http_client.get(url)
     response.raise_for_status()
     ct = response.headers.get("content-type", "application/octet-stream")
     mimetype = ct.split(";")[0].strip()
     logger.debug(
-        "[attachment_sync] _download_binary: done mime=%s bytes=%d",
-        mimetype, len(response.content),
+        "[attachment_sync] _download_inline_image: done id=%s mime=%s bytes=%d",
+        img_id, mimetype, len(response.content),
     )
     return response.content, mimetype
+
+
+async def _fetch_image_attachment(
+    attachment_id: str,
+    token: str,
+    http_client: httpx.AsyncClient,
+    mimetype_hint: str = "application/octet-stream",
+) -> "tuple[bytes, str]":
+    """Fetch image-type Attachment binary via iTop REST API (core/get)."""
+    logger.debug("[attachment_sync] _fetch_image_attachment: id=%s", attachment_id)
+    url = ITOP_URL + "/webservices/rest.php"
+    op = {
+        "operation": "core/get",
+        "class": "Attachment",
+        "key": attachment_id,
+        "output_fields": "contents",
+    }
+    data = {
+        "version": ITOP_VERSION,
+        "json_data": json.dumps(op),
+        "auth_token": token,
+    }
+    response = await http_client.post(url, data=data)
+    response.raise_for_status()
+    result = response.json()
+    objects = result.get("objects") or {}
+    if not objects:
+        raise ValueError("Attachment id=" + attachment_id + " not found via REST API")
+    obj = next(iter(objects.values()))
+    contents = (obj.get("fields") or {}).get("contents") or {}
+    if isinstance(contents, dict):
+        mime = (contents.get("mimetype") or mimetype_hint).strip()
+        b64data = contents.get("data") or ""
+    else:
+        raise ValueError("Unexpected contents format for attachment id=" + attachment_id)
+    if not b64data:
+        raise ValueError("No content data for attachment id=" + attachment_id)
+    logger.debug(
+        "[attachment_sync] _fetch_image_attachment: done id=%s mime=%s",
+        attachment_id, mime,
+    )
+    return base64.b64decode(b64data), mime
 
 
 # ---------------------------------------------------------------------------
@@ -138,11 +187,14 @@ async def _sync_task(
             try:
                 if source == "InlineImage":
                     secret = entry.get("inline_secret") or ""
-                    url = _inline_image_url(entry_id, secret)
+                    binary, dl_mimetype = await _download_inline_image(
+                        entry_id, secret, token, http_client,
+                    )
                 else:
-                    url = _attachment_url(entry_id)
+                    binary, dl_mimetype = await _fetch_image_attachment(
+                        entry_id, token, http_client, mimetype,
+                    )
 
-                binary, dl_mimetype = await _download_binary(url, http_client)
                 used_mime = dl_mimetype if dl_mimetype else mimetype
                 filename = entry.get("filename", "attachment")
 
@@ -204,7 +256,7 @@ async def start_sync(
     obj_class: str,
     obj_id: int,
     entries: list[dict],
-) -> str | None:
+) -> "str | None":
     """Start or replace the background sync task for this token.
 
     If the token already has a running sync for the same (obj_class, obj_id):
@@ -226,7 +278,7 @@ async def start_sync(
     """
     token_preview = token[:8] + "..." if len(token) > 8 else token
     existing = _sync_state.get(token)
-    warning: str | None = None
+    warning: "str | None" = None
 
     if existing is not None:
         if existing.obj_class == obj_class and existing.obj_id == obj_id:
