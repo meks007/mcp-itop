@@ -1,6 +1,6 @@
 """
 State transition tools: Describe_state_change, Apply_stimulus_to_object,
-Check_object_previous_lifecycle_state.
+Get_object_state_history.
 
 ID-only contract
 ----------------
@@ -52,10 +52,13 @@ Path modes (schema mode only)
                        by agent-visible (non-internal) stimulus sequence.
   "all"             -- all paths, no limit.
 
-Check_object_previous_lifecycle_state
---------------------------------------
-  Calls company/object_was_in_state and returns the response unchanged.
-  Result shape: {code, message, result: {was_in_state: true/false}}.
+Get_object_state_history
+-------------------------
+  Calls company/state_history and returns the ordered list of lifecycle
+  states the object has passed through.
+  Result shape: list of state code strings, e.g. ["new", "assigned", "pending"].
+  obj_id must be a confirmed integer database ID; use Resolve_object first
+  if you only have a ref.
 """
 
 from __future__ import annotations
@@ -640,21 +643,55 @@ def register(mcp, client: ItopClient) -> None:
         return format_and_cache(apply_result)
 
     # ------------------------------------------------------------------ #
-    #  TOOL 3: Check_object_previous_lifecycle_state                       #
+    #  TOOL 3: Get_object_state_history                                    #
     # ------------------------------------------------------------------ #
 
-    @mcp.tool(name="Check_object_previous_lifecycle_state")
-    async def check_object_previous_lifecycle_state(
+    @mcp.tool(name="Get_object_state_history")
+    async def get_object_state_history(
         obj_class: str,
         obj_id: int,
-        lifecycle_state: str,
-    ) -> dict:
-        """Check whether an iTop object has ever been in a specific lifecycle state.
+    ) -> str:
+        """Return the ordered list of lifecycle states an iTop object has passed through.
 
-        Calls company/object_was_in_state and returns the result unchanged.
-        Result shape: {code, message, result: {was_in_state: true/false}}.
-        obj_id must be a confirmed integer database ID; use Resolve_object first
-        if you only have a ref. Use enumerate_transitions or describe_class to
-        discover valid lifecycle state codes for the class.
+        Calls company/state_history. Only available for classes with a lifecycle
+        state machine. obj_id must be a confirmed integer database ID; use
+        Resolve_object first if you only have a ref.
+
+        Result: ordered list of state code strings, e.g. ["new", "assigned", "resolved"].
         """
-        return await client.object_was_in_state(obj_class, obj_id, lifecycle_state)
+        response = await client.state_history(obj_class, obj_id)
+
+        code = response.get("code", -1)
+        if code != 0:
+            return (
+                "Error: company/state_history returned code "
+                + str(code) + ": "
+                + response.get("message", "unknown error")
+            )
+
+        result = response.get("result")
+        history = None
+        if isinstance(result, dict):
+            history = result.get("history")
+        elif isinstance(result, list):
+            history = result
+
+        if not isinstance(history, list):
+            return (
+                "Error: unexpected response shape from company/state_history -- "
+                "no history list found. Raw result: " + str(result)
+            )
+
+        if not history:
+            return (
+                "No state history found for " + obj_class
+                + " id=" + str(obj_id) + "."
+            )
+
+        lines = [
+            "State history for " + obj_class + " id=" + str(obj_id)
+            + " (" + str(len(history)) + " state(s)):",
+        ]
+        for i, state in enumerate(history, 1):
+            lines.append("  " + str(i) + ". " + str(state))
+        return "\n".join(lines)
