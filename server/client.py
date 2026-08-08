@@ -558,14 +558,14 @@ class ItopClient:
 
     async def object_was_in_state(
         self,
-        cls: str,
+        obj_cls: str,
         obj_id: int,
         lifecycle_state: str,
     ) -> dict:
         """Call company/object_was_in_state and return the raw iTop response dict.
 
         Args:
-            cls:             iTop class name, e.g. 'UserRequest'.
+            obj_cls:         iTop class name, e.g. 'UserRequest'.
             obj_id:          Confirmed integer database ID of the object.
             lifecycle_state: Lifecycle state code to check, e.g. 'approved'.
 
@@ -574,7 +574,7 @@ class ItopClient:
         """
         return await self.request({
             "operation": "company/object_was_in_state",
-            "class": cls,
+            "obj_class": obj_cls,
             "obj_id": obj_id,
             "lifecycle_state": lifecycle_state,
         })
