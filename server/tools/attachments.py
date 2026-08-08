@@ -13,9 +13,9 @@ register(mcp, client)
 
     Tools:
         List_object_attachments(obj_class, obj_id)
-            Lists all attachments and inline images for any iTop object.
+            Lists all attachments and inline images for an iTop object.
             Writes metadata to the session store and starts a background
-            task that downloads and normalizes image binaries.
+            task that downloads and normalises image binaries.
             Works for UserRequest, Incident, Change, FAQ, FunctionalCI, etc.
 
             Same-object guard: if a sync for the same (obj_class, obj_id)
@@ -23,28 +23,28 @@ register(mcp, client)
             returns as a no-op. is_sync_running() is checked before any
             store write to avoid erasing cached image content.
 
-        Prepare_single_attachment(obj_class, obj_id, id)
-            Marks a single attachment for retrieval via get_single_attachment.
-            Call List_object_attachments first to populate the store and
-            obtain the attachment id from the listing.
+            After listing, call Prepare_object_attachments with the IDs
+            you want to retrieve (all IDs for everything, a subset for
+            specific files). Then read get_object_attachments.
+
+        Prepare_object_attachments(obj_class, obj_id, ids)
+            Accepts one or more attachment IDs as returned by
+            List_object_attachments. Marks exactly those attachments as
+            prepared. A subsequent read of get_object_attachments serves
+            only the prepared IDs and nothing else.
+            Call this tool again to change the selection before re-reading.
 
     Resources:
-        itop://attachment/get_attachments
-            Downloads and returns all unserved attachments in a single
-            multi-entry contents array. Images are served from cache
-            (waits for background sync). Non-images are fetched live
-            via REST API (core/get Attachment fields=contents).
+        itop://attachment/get_object_attachments
+            Serves all attachments that were prepared by
+            Prepare_object_attachments. Returns a multi-entry contents
+            array; each entry carries its own uri, mimeType and blob.
+            Images are served from the background-sync cache.
+            Non-image attachments are fetched live via iTop REST API.
             Only successfully returned attachments are marked served;
-            failed entries remain served=0 and are retried on next call.
-            The actual transport response is produced by the low-level
-            router installed in server.py via get_low_level_resource_handlers().
-            The FastMCP-decorated stub below keeps the resource visible in
-            resources/list but returns [] and is never called for the read.
-
-        itop://attachment/get_single_attachment
-            Downloads and returns the single attachment marked by
-            Prepare_single_attachment. Images served from cache,
-            non-images fetched live via REST API. Marks record as served.
+            failed entries remain prepared and can be retried.
+            The transport response is produced by the low-level router
+            installed in server.py via get_low_level_resource_handlers().
 
 get_low_level_resource_handlers(client)
     Returns a dict mapping resource URIs to low-level handler callables.
@@ -71,11 +71,10 @@ import mcp.types as types
 from attachment_store import (
     is_sync_running,
     store_attachment_metadata,
-    get_unserved_attachment_metadata,
     get_single_attachment_metadata,
-    get_selected_attachment_metadata,
+    get_prepared_attachment_metadata,
     get_current_object_for_token,
-    set_selected,
+    set_prepared,
     set_served,
     start_sync,
     wait_for_image,
@@ -87,6 +86,8 @@ from auth import get_bearer_token
 from client import ItopClient
 from config import ITOP_URL, logger
 from low_level_resource_types import LowLevelResourceHandler
+
+_RESOURCE_URI = "itop://attachment/get_object_attachments"
 
 
 # ---------------------------------------------------------------------------
@@ -161,26 +162,29 @@ async def _fetch_attachment_content(
 # Core payload builder (used by the low-level resource handler)
 # ---------------------------------------------------------------------------
 
-async def build_unserved_attachment_payloads(
+async def build_prepared_attachment_payloads(
     client: ItopClient,
 ) -> list[AttachmentPayload]:
-    """Collect all unserved attachments for the current bearer token session.
+    """Collect all prepared attachments for the current bearer token session.
 
-    Returns a list of AttachmentPayload objects with raw bytes content.
+    Reads the IDs that were marked by Prepare_object_attachments (selected=1)
+    and retrieves their binaries. Returns a list of AttachmentPayload objects
+    with raw bytes content.
+
     An empty list is returned (without raising) when:
       - the bearer token cannot be read,
       - no active object is set for the token,
-      - all entries are already served or none exist.
+      - no attachments have been prepared.
 
     Only successfully processed payloads are marked as served.
     Failed entries (missing cache, download error) are skipped and
-    remain available for retry on the next call.
+    remain prepared so they can be retried on the next call.
     """
     try:
         token = get_bearer_token()
     except Exception as exc:
         logger.warning(
-            "[attachments] build_unserved_attachment_payloads:"
+            "[attachments] build_prepared_attachment_payloads:"
             " get_bearer_token raised: %s",
             exc,
         )
@@ -192,21 +196,28 @@ async def build_unserved_attachment_payloads(
     current = get_current_object_for_token(token)
     if current is None:
         logger.debug(
-            "[attachments] build_unserved_attachment_payloads: no active object"
+            "[attachments] build_prepared_attachment_payloads: no active object"
         )
         return []
 
     obj_class, obj_id = current
+    entries = get_prepared_attachment_metadata(token, obj_class, obj_id)
 
-    # Wait for background image sync to finish before reading cache
-    await wait_for_all(token)
-
-    entries = get_unserved_attachment_metadata(token, obj_class, obj_id)
     if not entries:
         logger.debug(
-            "[attachments] build_unserved_attachment_payloads: no unserved entries"
+            "[attachments] build_prepared_attachment_payloads: no prepared entries"
         )
         return []
+
+    # For any image entries, wait for background sync to finish first.
+    # Non-image entries are fetched live, so the wait is only triggered
+    # when at least one prepared entry is an image.
+    has_image = any(
+        e.get("source") == "InlineImage" or (e.get("mimetype") or "").startswith("image/")
+        for e in entries
+    )
+    if has_image:
+        await wait_for_all(token)
 
     payloads: list[AttachmentPayload] = []
     served_ids: list[str] = []
@@ -219,11 +230,14 @@ async def build_unserved_attachment_payloads(
         is_image = (source == "InlineImage" or mime.startswith("image/"))
 
         if is_image:
+            # Wait for this specific image if not already done above.
+            if not has_image:
+                await wait_for_image(token, entry_id)
             fresh = get_single_attachment_metadata(token, obj_class, obj_id, entry_id)
             content_bytes = (fresh or {}).get("content")
             if content_bytes is None:
                 logger.warning(
-                    "[attachments] build_unserved_attachment_payloads:"
+                    "[attachments] build_prepared_attachment_payloads:"
                     " no content for image id=%s -- skipping",
                     entry_id,
                 )
@@ -239,7 +253,7 @@ async def build_unserved_attachment_payloads(
                     mime = dl_mime
             except Exception as exc:
                 logger.warning(
-                    "[attachments] build_unserved_attachment_payloads:"
+                    "[attachments] build_prepared_attachment_payloads:"
                     " download failed id=%s: %s -- skipping",
                     entry_id, exc,
                 )
@@ -255,17 +269,16 @@ async def build_unserved_attachment_payloads(
         )
         served_ids.append(entry_id)
         logger.debug(
-            "[attachments] build_unserved_attachment_payloads:"
+            "[attachments] build_prepared_attachment_payloads:"
             " queued id=%s filename=%s mime=%s bytes=%d",
             entry_id, filename, mime, len(content_bytes),
         )
 
-    # Mark only successfully built payloads as served
     for sid in served_ids:
         set_served(token, obj_class, obj_id, sid)
 
     logger.debug(
-        "[attachments] build_unserved_attachment_payloads:"
+        "[attachments] build_prepared_attachment_payloads:"
         " %d payload(s), %d skipped",
         len(payloads), len(entries) - len(served_ids),
     )
@@ -281,14 +294,14 @@ def get_low_level_resource_handlers(
 ) -> dict[str, LowLevelResourceHandler]:
     """Return a URI -> handler mapping for server.py to install in the router.
 
-    The handler for itop://attachment/get_attachments builds a full
-    types.ServerResult with one types.BlobResourceContents entry per
-    unserved attachment, each carrying its own URI and MIME type.
-    Base64 encoding happens here, not in build_unserved_attachment_payloads().
+    The handler for itop://attachment/get_object_attachments builds a full
+    types.ServerResult with one types.BlobResourceContents entry per prepared
+    attachment, each carrying its own URI and MIME type.
+    Base64 encoding happens here, not in build_prepared_attachment_payloads().
     """
 
-    async def _build_get_attachments_result() -> types.ServerResult:
-        payloads = await build_unserved_attachment_payloads(client)
+    async def _build_get_object_attachments_result() -> types.ServerResult:
+        payloads = await build_prepared_attachment_payloads(client)
         return types.ServerResult(
             types.ReadResourceResult(
                 contents=[
@@ -303,7 +316,7 @@ def get_low_level_resource_handlers(
         )
 
     return {
-        "itop://attachment/get_attachments": _build_get_attachments_result,
+        _RESOURCE_URI: _build_get_object_attachments_result,
     }
 
 
@@ -328,16 +341,14 @@ def register(mcp, client: ItopClient):
         Use Resolve_object first for the confirmed obj_class and obj_id. Supports
         UserRequest, Incident, Change, FAQ, FunctionalCI, and similar classes.
         Records metadata without downloading binaries, then starts background image
-        download and normalization. A running sync for this object is reused; changing
+        download and normalisation. A running sync for this object is reused; changing
         objects clears the previous cache and returns a warning.
 
         Returns each attachment's id, filename, mimetype, and source.
 
-        Routing: for all attachments, all remaining attachments, or every file, read
-        get_attachments once. It returns every currently unserved attachment, including
-        files not yet retrieved after earlier single-file calls. For one identified file
-        (for example by filename or id), call Prepare_single_attachment, then read
-        get_single_attachment.
+        After listing, call Prepare_object_attachments with the IDs you want:
+        pass all IDs to get every attachment, or a subset for specific files.
+        Then read get_object_attachments to retrieve the binaries.
         """
         token = get_bearer_token()
         token_preview = (token[:8] + "...") if token and len(token) > 8 else (token or "(empty)")
@@ -348,7 +359,6 @@ def register(mcp, client: ItopClient):
             token_preview, obj_class, obj_id_str,
         )
 
-        # -- Same-object guard: skip store write if sync is already running --
         if is_sync_running(token, obj_class, obj_id):
             logger.debug(
                 "[attachments] list_object_attachments: sync already running for"
@@ -358,12 +368,12 @@ def register(mcp, client: ItopClient):
             await start_sync(token, obj_class, obj_id, [])
             return (
                 "Sync already running for " + obj_class + " " + obj_id_str + "."
-                " Read resource get_attachments when ready."
+                " Call Prepare_object_attachments with the IDs you want,"
+                " then read get_object_attachments."
             )
 
         entries: list[dict] = []
 
-        # -- Attachment records (all MIME types) --
         att_oql = (
             "SELECT Attachment"
             " WHERE item_class = '" + obj_class + "'"
@@ -396,7 +406,6 @@ def register(mcp, client: ItopClient):
                 record_id, mimetype, filename,
             )
 
-        # -- InlineImage refs via HTML-parsed cache --
         inline_refs = read_inline_image_refs(obj_class, obj_id_str)
         logger.debug(
             "[attachments] list_object_attachments: inline_image_refs cache %s cls=%r id=%r",
@@ -440,7 +449,6 @@ def register(mcp, client: ItopClient):
                 img_id, mimetype, filename,
             )
 
-        # Store metadata (no binaries yet) and start background image sync
         current_token = get_bearer_token()
         prev_object = get_current_object_for_token(current_token)
         warning = ""
@@ -472,178 +480,111 @@ def register(mcp, client: ItopClient):
         if sync_warning:
             lines.append(sync_warning)
         lines.append(
-            "Read get_attachments once for all or all remaining attachments. "
-            "Use Prepare_single_attachment and get_single_attachment only for one identified file."
+            "Call Prepare_object_attachments with the IDs you want"
+            " (all IDs for everything, a subset for specific files),"
+            " then read get_object_attachments."
         )
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
-    # Tool: Prepare_single_attachment
+    # Tool: Prepare_object_attachments
     # ------------------------------------------------------------------
 
-    @mcp.tool(name="Prepare_single_attachment")
-    async def prepare_single_attachment(
+    @mcp.tool(name="Prepare_object_attachments")
+    async def prepare_object_attachments(
         obj_class: str,
         obj_id: int,
-        id: str,
+        ids: list[str],
     ) -> str:
-        """Mark a single attachment for retrieval via get_single_attachment.
+        """Mark one or more attachments for retrieval via get_object_attachments.
 
         Call List_object_attachments first to populate the store and obtain
-        the attachment id from the listing. Then call this tool with the
-        desired id, and read the get_single_attachment resource.
+        the attachment IDs from the listing. Then pass the IDs you want:
+          - Pass all listed IDs to retrieve every attachment.
+          - Pass a subset to retrieve only specific files.
+
+        A subsequent read of get_object_attachments serves exactly the
+        prepared IDs and nothing else. Call this tool again to change the
+        selection before re-reading.
 
         obj_class: iTop class of the parent object (e.g. UserRequest).
         obj_id:    Integer database ID of the parent object.
-        id:        Attachment id as returned by List_object_attachments.
+        ids:       One or more attachment IDs from List_object_attachments.
         """
         token = get_bearer_token()
         obj_id_str = str(obj_id)
 
-        logger.debug(
-            "[attachments] prepare_single_attachment: token=... cls=%s id=%s att_id=%s",
-            obj_class, obj_id_str, id,
-        )
-
-        entry = get_single_attachment_metadata(token, obj_class, obj_id, id)
-        if entry is None:
+        if not ids:
             return (
-                "Attachment id=" + id + " not found in store for "
-                + obj_class + " " + obj_id_str + "."
-                " Call List_object_attachments first."
+                "No IDs provided. Pass at least one attachment ID"
+                " from List_object_attachments."
             )
 
-        set_selected(token, obj_class, obj_id, id)
         logger.debug(
-            "[attachments] prepare_single_attachment: selected id=%s filename=%s",
-            id, entry.get("filename", ""),
-        )
-        return (
-            "Attachment id=" + id + " selected ("
-            + entry.get("filename", "") + ", "
-            + entry.get("mimetype", "") + ")."
-            " Read resource get_single_attachment to retrieve the binary."
+            "[attachments] prepare_object_attachments: token=... cls=%s id=%s ids=%s",
+            obj_class, obj_id_str, ids,
         )
 
+        # Validate each ID exists in the store before committing.
+        from attachment_store import get_single_attachment_metadata
+        valid: list[str] = []
+        invalid: list[str] = []
+        for att_id in ids:
+            entry = get_single_attachment_metadata(token, obj_class, obj_id, att_id)
+            if entry is None:
+                invalid.append(att_id)
+            else:
+                valid.append(att_id)
+
+        if invalid:
+            return (
+                "Unknown attachment ID(s): " + ", ".join(invalid) + "."
+                " Call List_object_attachments first to populate the store."
+            )
+
+        set_prepared(token, obj_class, obj_id, valid)
+
+        lines = [
+            "Prepared " + str(len(valid)) + " attachment(s) for "
+            + obj_class + " " + obj_id_str + ":"
+        ]
+        for att_id in valid:
+            entry = get_single_attachment_metadata(token, obj_class, obj_id, att_id)
+            lines.append(
+                "  id=" + att_id
+                + " filename=" + (entry or {}).get("filename", "")
+                + " mime=" + (entry or {}).get("mimetype", "")
+            )
+        lines.append("Read get_object_attachments to retrieve the binaries.")
+        return "\n".join(lines)
+
     # ------------------------------------------------------------------
-    # Resource: get_attachments (stub -- actual read via low-level router)
+    # Resource: get_object_attachments (stub -- actual read via low-level router)
     # ------------------------------------------------------------------
 
     @mcp.resource(
-        "itop://attachment/get_attachments",
-        name="Get all remaining attachments",
+        _RESOURCE_URI,
+        name="Get prepared attachments",
         description=(
-            "PREFERRED for requests to get all attachments, all remaining attachments, "
-            "or every file for the current object. It returns all currently unserved "
-            "attachments in one multi-entry contents array; do not make repeated "
-            "get_single_attachment calls for this use case. "
-            "Images are served from cache (waits for background sync if still running). "
-            "Non-image attachments are fetched live via REST API. "
-            "Each attachment is one entry in the contents array with its own "
-            "uri (itop://attachment/<filename>), mimeType and blob. "
-            "Previously served attachments (including those returned by "
-            "get_single_attachment) are excluded. "
+            "Returns the attachments that were prepared by Prepare_object_attachments. "
+            "You MUST call List_object_attachments and then Prepare_object_attachments "
+            "before reading this resource. "
+            "Pass all listed IDs to Prepare_object_attachments to get every attachment; "
+            "pass a subset to get only specific files. "
+            "Each prepared attachment is returned as one entry in the contents array "
+            "with its own uri (itop://attachment/<filename>), mimeType, and blob. "
+            "Images are served from the background-sync cache. "
+            "Non-image attachments are fetched live via the iTop REST API. "
             "Only successfully returned attachments are marked as served; "
-            "failed entries remain available for retry on the next call."
+            "failed entries remain prepared and can be retried by reading again."
         ),
         mime_type="application/octet-stream",
     )
-    async def get_attachments() -> list[dict]:
+    async def get_object_attachments() -> list[dict]:
         """Stub: keeps the resource visible in resources/list.
 
         The actual multi-file response is produced by the low-level router
         installed in server.py. This stub is never called for a resources/read
-        of itop://attachment/get_attachments because the router intercepts first.
+        of itop://attachment/get_object_attachments because the router intercepts first.
         """
         return []
-
-    # ------------------------------------------------------------------
-    # Resource: get_single_attachment
-    # ------------------------------------------------------------------
-
-    @mcp.resource(
-        "itop://attachment/get_single_attachment",
-        name="Get one selected attachment",
-        description=(
-            "Use this only when one specific attachment is needed, for example when "
-            "a filename or attachment id identifies the requested file. Do not use it "
-            "repeatedly to retrieve all or all remaining attachments; use the "
-            "get_attachments resource instead, which returns all unserved attachments "
-            "in one multi-entry response. "
-            "Downloads and returns the single attachment marked by Prepare_single_attachment. "
-            "You MUST call List_object_attachments and then Prepare_single_attachment "
-            "before reading this resource. "
-            "Image is served from cache (waits for background sync if still running). "
-            "Non-image attachment is fetched live via REST API. "
-            "Marks the returned attachment as served."
-        ),
-        mime_type="application/octet-stream",
-    )
-    async def get_single_attachment() -> list[dict]:
-        """Serve the attachment marked as selected for the current bearer token session."""
-        logger.debug("[attachments] get_single_attachment: resource handler invoked")
-
-        try:
-            token = get_bearer_token()
-        except Exception as exc:
-            logger.warning(
-                "[attachments] get_single_attachment: get_bearer_token raised: %s", exc
-            )
-            return []
-
-        if not token:
-            return []
-
-        current = get_current_object_for_token(token)
-        if current is None:
-            logger.debug("[attachments] get_single_attachment: no active object for token")
-            return []
-
-        obj_class, obj_id = current
-        entry = get_selected_attachment_metadata(token, obj_class, obj_id)
-        if entry is None:
-            logger.debug("[attachments] get_single_attachment: no selected entry")
-            return []
-
-        entry_id = entry["id"]
-        filename = entry["filename"]
-        mime = entry["mimetype"]
-        source = entry.get("source", "")
-        is_image = (source == "InlineImage" or mime.startswith("image/"))
-
-        if is_image:
-            await wait_for_image(token, entry_id)
-            fresh = get_single_attachment_metadata(token, obj_class, obj_id, entry_id)
-            content_bytes = (fresh or {}).get("content")
-            if content_bytes is None:
-                logger.warning(
-                    "[attachments] get_single_attachment: no content for image id=%s",
-                    entry_id,
-                )
-                return []
-            if fresh:
-                mime = fresh.get("mimetype") or mime
-        else:
-            try:
-                content_bytes, dl_mime = await _fetch_attachment_content(
-                    client, entry_id, mime,
-                )
-                if dl_mime:
-                    mime = dl_mime
-            except Exception as exc:
-                logger.warning(
-                    "[attachments] get_single_attachment: download failed id=%s: %s",
-                    entry_id, exc,
-                )
-                return []
-
-        set_served(token, obj_class, obj_id, entry_id)
-        logger.debug(
-            "[attachments] get_single_attachment: serving id=%s filename=%s mime=%s bytes=%d",
-            entry_id, filename, mime, len(content_bytes),
-        )
-        return [{
-            "uri": "itop://attachment/" + filename,
-            "blob": base64.b64encode(content_bytes).decode(),
-            "mimeType": mime,
-        }]
