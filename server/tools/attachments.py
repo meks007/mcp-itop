@@ -13,7 +13,7 @@ register(mcp, client)
 
     Tools:
         List_object_attachments(obj_class, obj_id)
-            Lists all attachments and inline images for an iTop object.
+            Lists all attachments and inline images for any iTop object.
             Writes metadata to the session store and starts a background
             task that downloads and normalises image binaries.
             Works for UserRequest, Incident, Change, FAQ, FunctionalCI, etc.
@@ -26,6 +26,11 @@ register(mcp, client)
             After listing, call Prepare_object_attachments with the IDs
             you want to retrieve (all IDs for everything, a subset for
             specific files). Then read get_object_attachments.
+
+            Image MIME type note: all image attachments are normalised to
+            JPEG by the background sync task. The listing reports the
+            effective stored MIME type (image/jpeg) and the .jpg filename
+            immediately, so the agent does not need to wait for the sync.
 
         Prepare_object_attachments(obj_class, obj_id, ids)
             Accepts one or more attachment IDs as returned by
@@ -49,6 +54,15 @@ register(mcp, client)
 get_low_level_resource_handlers(client)
     Returns a dict mapping resource URIs to low-level handler callables.
     Used by server.py to install the central ReadResourceRequest router.
+
+Image normalisation
+-------------------
+All image attachments (source InlineImage or mimetype starting with image/)
+are converted to JPEG by attachment_store/image.py regardless of their
+original format. The background sync stores the converted bytes and updates
+the mimetype column to image/jpeg. The filename extension is changed to .jpg.
+List_object_attachments reports image/jpeg and the .jpg filename immediately
+so the agent always sees the effective stored format without waiting for sync.
 
 iTop blob field notes
 ---------------------
@@ -88,6 +102,28 @@ from config import ITOP_URL, logger
 from low_level_resource_types import LowLevelResourceHandler
 
 _RESOURCE_URI = "itop://attachment/get_object_attachments"
+
+# MIME type and extension that the image normalisation pipeline always produces.
+_IMAGE_NORMALISED_MIME = "image/jpeg"
+_IMAGE_NORMALISED_EXT = ".jpg"
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _is_image_entry(entry: dict) -> bool:
+    """Return True when the entry will be normalised to JPEG by attachment_sync."""
+    return (
+        entry.get("source") == "InlineImage"
+        or (entry.get("mimetype") or "").startswith("image/")
+    )
+
+
+def _normalised_filename(filename: str) -> str:
+    """Return filename with extension replaced by .jpg."""
+    stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+    return stem + _IMAGE_NORMALISED_EXT
 
 
 # ---------------------------------------------------------------------------
@@ -209,13 +245,8 @@ async def build_prepared_attachment_payloads(
         )
         return []
 
-    # For any image entries, wait for background sync to finish first.
-    # Non-image entries are fetched live, so the wait is only triggered
-    # when at least one prepared entry is an image.
-    has_image = any(
-        e.get("source") == "InlineImage" or (e.get("mimetype") or "").startswith("image/")
-        for e in entries
-    )
+    # Wait for background sync before reading image cache entries.
+    has_image = any(_is_image_entry(e) for e in entries)
     if has_image:
         await wait_for_all(token)
 
@@ -226,11 +257,8 @@ async def build_prepared_attachment_payloads(
         entry_id = entry["id"]
         filename = entry["filename"]
         mime = entry["mimetype"]
-        source = entry.get("source", "")
-        is_image = (source == "InlineImage" or mime.startswith("image/"))
 
-        if is_image:
-            # Wait for this specific image if not already done above.
+        if _is_image_entry(entry):
             if not has_image:
                 await wait_for_image(token, entry_id)
             fresh = get_single_attachment_metadata(token, obj_class, obj_id, entry_id)
@@ -244,6 +272,7 @@ async def build_prepared_attachment_payloads(
                 continue
             if fresh:
                 mime = fresh.get("mimetype") or mime
+                filename = fresh.get("filename") or filename
         else:
             try:
                 content_bytes, dl_mime = await _fetch_attachment_content(
@@ -344,7 +373,10 @@ def register(mcp, client: ItopClient):
         download and normalisation. A running sync for this object is reused; changing
         objects clears the previous cache and returns a warning.
 
-        Returns each attachment's id, filename, mimetype, and source.
+        Returns each attachment's id, filename, mimetype, and source. Image attachments
+        are always normalised to JPEG by the background sync task. The listing reports
+        image/jpeg and the .jpg filename immediately so the values match what will
+        actually be served via get_object_attachments.
 
         After listing, call Prepare_object_attachments with the IDs you want:
         pass all IDs to get every attachment, or a subset for specific files.
@@ -471,11 +503,20 @@ def register(mcp, client: ItopClient):
             + obj_class + " " + obj_id_str + ":" + warning
         ]
         for e in entries:
+            # Images are always converted to JPEG by the background sync task.
+            # Report the effective stored MIME type and filename so the agent
+            # sees values that match what get_object_attachments will serve.
+            if _is_image_entry(e):
+                disp_mime = _IMAGE_NORMALISED_MIME
+                disp_filename = _normalised_filename(e["filename"])
+            else:
+                disp_mime = e["mimetype"]
+                disp_filename = e["filename"]
             lines.append(
                 "  id=" + e["id"]
                 + " source=" + e["source"]
-                + " filename=" + e["filename"]
-                + " mime=" + e["mimetype"]
+                + " filename=" + disp_filename
+                + " mime=" + disp_mime
             )
         if sync_warning:
             lines.append(sync_warning)
@@ -525,8 +566,6 @@ def register(mcp, client: ItopClient):
             obj_class, obj_id_str, ids,
         )
 
-        # Validate each ID exists in the store before committing.
-        from attachment_store import get_single_attachment_metadata
         valid: list[str] = []
         invalid: list[str] = []
         for att_id in ids:
@@ -550,10 +589,19 @@ def register(mcp, client: ItopClient):
         ]
         for att_id in valid:
             entry = get_single_attachment_metadata(token, obj_class, obj_id, att_id)
+            raw_mime = (entry or {}).get("mimetype", "")
+            raw_filename = (entry or {}).get("filename", "")
+            # Report the effective JPEG mime/filename for image entries.
+            if entry and _is_image_entry(entry):
+                disp_mime = _IMAGE_NORMALISED_MIME
+                disp_filename = _normalised_filename(raw_filename)
+            else:
+                disp_mime = raw_mime
+                disp_filename = raw_filename
             lines.append(
                 "  id=" + att_id
-                + " filename=" + (entry or {}).get("filename", "")
-                + " mime=" + (entry or {}).get("mimetype", "")
+                + " filename=" + disp_filename
+                + " mime=" + disp_mime
             )
         lines.append("Read get_object_attachments to retrieve the binaries.")
         return "\n".join(lines)
@@ -573,7 +621,7 @@ def register(mcp, client: ItopClient):
             "pass a subset to get only specific files. "
             "Each prepared attachment is returned as one entry in the contents array "
             "with its own uri (itop://attachment/<filename>), mimeType, and blob. "
-            "Images are served from the background-sync cache. "
+            "Images are served as JPEG from the background-sync cache. "
             "Non-image attachments are fetched live via the iTop REST API. "
             "Only successfully returned attachments are marked as served; "
             "failed entries remain prepared and can be retried by reading again."
