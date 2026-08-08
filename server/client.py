@@ -19,9 +19,8 @@ ItopClient.get_class_fields -- field name set for a class; derived from describe
                                schema on first call, falls back to core/get sampling
                                when describe_class is unavailable.
 ItopClient.describe_class   -- full field schema from company/describe_class.
-ItopClient.object_was_in_state
-                            -- call company/object_was_in_state and return the
-                               raw iTop response dict unchanged.
+ItopClient.state_history    -- call company/state_history and return the raw iTop
+                               response dict unchanged.
 
 Use get_raw when you need the unfiltered response (e.g. internal resolvers,
 attachment queries). Use get everywhere else so that privacy-sensitive fields
@@ -553,30 +552,31 @@ class ItopClient:
         return response
 
     # ------------------------------------------------------------------
-    # company/object_was_in_state
+    # company/state_history
     # ------------------------------------------------------------------
 
-    async def object_was_in_state(
+    async def state_history(
         self,
-        obj_cls: str,
+        obj_class: str,
         obj_id: int,
-        lifecycle_state: str,
     ) -> dict:
-        """Call company/object_was_in_state and return the raw iTop response dict.
+        """Fetch the lifecycle state history for an iTop object.
+
+        Calls company/state_history and returns the raw iTop response dict
+        unchanged. The response carries the ordered list of states the object
+        has passed through under result['history'].
 
         Args:
-            obj_cls:         iTop class name, e.g. 'UserRequest'.
-            obj_id:          Confirmed integer database ID of the object.
-            lifecycle_state: Lifecycle state code to check, e.g. 'approved'.
+            obj_class: iTop class name, e.g. 'UserRequest'.
+            obj_id:    Confirmed integer database ID of the object.
 
         Returns:
             Full iTop response dict (code, message, result).
         """
         return await self.request({
-            "operation": "company/object_was_in_state",
-            "obj_class": obj_cls,
+            "operation": "company/state_history",
+            "obj_class": obj_class,
             "obj_id": obj_id,
-            "lifecycle_state": lifecycle_state,
         })
 
     # ------------------------------------------------------------------
