@@ -150,14 +150,7 @@ def register(mcp, client: ItopClient):
         keywords: str,
         limit: int = 20,
     ) -> str:
-        """Search KB articles by title and body text.
-
-        Use specific topic keywords separated by spaces or commas. Each keyword
-        is searched independently with OR logic; avoid full sentences.
-
-        Results include confirmed numeric IDs. Pass an ID directly to
-        Get_KB_article or Load_object with obj_class=ITOP_KB_CLASS; do not
-        call Resolve_object first. Results may include articles in any status.
+        """Search titles and body text in the configured knowledge-base article class. Words are OR-matched, so use specific words rather than sentences. Results may have any status and include confirmed numeric IDs for direct use with Get_KB_article or Load_object.
         """
         text_field = await _kb_text_field()
 
@@ -222,15 +215,7 @@ def register(mcp, client: ItopClient):
 
     @mcp.tool(name="Get_KB_article")
     async def itop_get_kb_article(article_id: int) -> str:
-        """Get the full content of a knowledge-base article by numeric ID.
-
-        Convenience wrapper around Load_object that supplies the correct KB
-        article class (ITOP_KB_CLASS, configured in .env) automatically.
-        Use this when the KB class is not already known from context;
-        otherwise call Load_object directly with obj_class=ITOP_KB_CLASS.
-
-        article_id must be a confirmed integer database ID. IDs returned by
-        Search_KB_articles are already confirmed -- no Resolve_object needed.
+        """Retrieve a complete knowledge-base article by confirmed numeric ID using the configured article class. IDs returned by Search_KB_articles can be used directly; otherwise resolve the ID first.
         """
         logger.debug(
             "[kb] get_kb_article: cls=%r article_id=%r", ITOP_KB_CLASS, article_id
@@ -251,14 +236,7 @@ def register(mcp, client: ItopClient):
 
     @mcp.tool(name="List_KB_categories")
     async def itop_list_kb_categories(limit: int = 100) -> str:
-        """List all knowledge-base categories.
-
-        Category class: ITOP_KB_CAT_CLASS (derived from ITOP_KB_CLASS in .env,
-        default KBCategory).
-
-        The ID column contains confirmed integer database IDs. Pass them
-        directly to Load_object with obj_class=ITOP_KB_CAT_CLASS without
-        calling Resolve_object first.
+        """List categories from the configured knowledge-base category class. Returned IDs are confirmed numeric IDs and can be passed directly to Load_object.
         """
         logger.debug("[kb] list_kb_categories: cat_cls=%r limit=%d", ITOP_KB_CAT_CLASS, limit)
 
