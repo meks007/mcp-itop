@@ -220,14 +220,7 @@ def register(mcp, client: ItopClient):
         obj_class: str,
         key_or_ref: str,
     ) -> str:
-        """Resolve an identifier to a confirmed iTop database ID.
-
-        Use this first for ticket refs, bare user-supplied numbers, OQL
-        queries, or other ambiguous identifiers. Returns the confirmed class,
-        numeric ID, ref, and friendly name.
-
-        Use the returned numeric ID with all other object tools. Use
-        obj_class=Ticket when the concrete ticket class is unknown.
+        """Resolve a ticket reference, user-supplied number, OQL query, or other identifier to a confirmed iTop class and numeric database ID. Use obj_class=Ticket when the concrete ticket class is unknown.
         """
         resolved_class, resolved_key = await resolve_key(obj_class, key_or_ref)
         fields = ensure_ref_field(resolved_class, "id, friendlyname")
@@ -243,12 +236,7 @@ def register(mcp, client: ItopClient):
         page: int = 0,
         full: bool = False,
     ):
-        """Retrieve an iTop object by confirmed numeric ID.
-
-        Use Resolve_object first when you have a ticket ref or ambiguous
-        identifier. Set output_fields to "*" for standard fields, or use
-        Describe_class to find specific field names. public_log is included
-        by default.
+        """Retrieve an iTop object by confirmed numeric ID. Resolve references or ambiguous identifiers first. Use output_fields to select fields; public_log is included by default. Set full=True to disable field stripping.
         """
         if not output_fields or not output_fields.strip():
             visible = sorted(
@@ -311,14 +299,7 @@ def register(mcp, client: ItopClient):
         output_fields: str = "id, friendlyname",
         comment: str = "",
     ) -> str:
-        """Create an iTop object. Use Describe_class first if field names are unknown.
-
-        Mention tokens in Value:HTML fields and Case Log add_item messages are
-        resolved automatically before the object is created:
-          @<id>   Person by numeric id
-          ?<id>   FAQ article by numeric id
-          R-<ref>, I-<ref>, C-<ref>  ticket references
-        Unresolvable tokens are stored as plain text without blocking the create.
+        """Create an iTop object from JSON fields. Use Describe_class when field names are unknown. Mention tokens in HTML fields and Case Log messages are resolved automatically: @<id>, ?<id>, and R-/I-/C- references. Unresolved tokens remain plain text.
         """
         parsed = parse_json_arg(fields, "fields")
         if isinstance(parsed, str):
@@ -347,14 +328,7 @@ def register(mcp, client: ItopClient):
         output_fields: str = "id, friendlyname",
         comment: str = "",
     ) -> str:
-        """Update fields on an existing iTop object.
-
-        obj_id must be the confirmed integer database ID. Use Resolve_object
-        first if you only have a ref. Do not include the lifecycle state
-        attribute in fields; use Apply_stimulus_to_object instead.
-
-        Mention tokens in Value:HTML fields and Case Log add_item messages are
-        resolved automatically (@<id>, ?<id>, R-<ref>, I-<ref>, C-<ref>).
+        """Update an iTop object by confirmed numeric ID. Resolve references first. Do not set its lifecycle-state field directly; use Apply_stimulus_to_object. Mention tokens in HTML fields and Case Log messages are resolved automatically: @<id>, ?<id>, and R-/I-/C- references.
         """
         parsed = parse_json_arg(fields, "fields")
         if isinstance(parsed, str):
@@ -395,10 +369,7 @@ def register(mcp, client: ItopClient):
         comment: str = "",
         simulate: bool = True,
     ) -> str:
-        """Deletion is disabled by policy. Do not use to remove iTop objects.
-
-        Runs in simulation mode only. Retained for controlled dry-run checks.
-        obj_id must be the confirmed integer database ID.
+        """Simulate deletion of an iTop object by confirmed numeric ID. Deletion is disabled by policy; this tool performs dry-run checks only.
         """
         result = await client.delete(
             obj_class,
@@ -417,10 +388,7 @@ def register(mcp, client: ItopClient):
         direction: str = "down",
         redundancy: bool = True,
     ) -> str:
-        """Find CIs related to a given object via impact or dependency relations.
-
-        obj_id must be the confirmed integer database ID. Use Resolve_object
-        first if you only have a ref.
+        """Find configuration items related to an iTop object through impact or dependency relations. Requires a confirmed numeric object ID.
         """
         result = await client.get_related(
             obj_class,
@@ -441,7 +409,7 @@ def register(mcp, client: ItopClient):
 
     @mcp.tool(name="List_object_operations")
     async def itop_list_operations() -> str:
-        """List all available REST/JSON operations on the iTop server."""
+        """List the REST/JSON operations available on the iTop server."""
         result = await client.operations()
         if result.get("code", -1) != 0:
             return "Error: " + str_or(result, "message", "Unknown error")
@@ -457,12 +425,7 @@ def register(mcp, client: ItopClient):
 
     @mcp.tool(name="Describe_class")
     async def itop_describe_class(obj_class: str) -> str:
-        """Describe the field schema of an iTop class.
-
-        Returns field metadata including type, format (text/html), allowed
-        enum values, and whether a field is the lifecycle state attribute.
-        Works for classes with zero instances. Results are cached for the
-        lifetime of the server process.
+        """Return an iTop class's field schema, including types, text/HTML formats, enum values, references, and lifecycle-state metadata. Works for classes with no instances; results are cached for the server process.
         """
         try:
             schema = await get_class_schema(obj_class, client)
