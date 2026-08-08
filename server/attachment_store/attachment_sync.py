@@ -201,12 +201,18 @@ async def _sync_task(
                 normalized, norm_mime, norm_filename = _normalize_image(
                     binary, used_mime, filename
                 )
+                # Pass norm_filename so the DB filename column is updated to
+                # the .jpg name. build_prepared_attachment_payloads() reads it
+                # back via get_single_attachment_metadata() to build the URI,
+                # ensuring uri and mimeType are consistent (both .jpg / jpeg).
                 store_image_content(
-                    token, obj_class, obj_id, entry_id, normalized, norm_mime
+                    token, obj_class, obj_id, entry_id,
+                    normalized, norm_mime, norm_filename,
                 )
                 logger.debug(
-                    "[attachment_sync] _sync_task: stored id=%s mime=%s bytes=%d",
-                    entry_id, norm_mime, len(normalized),
+                    "[attachment_sync] _sync_task: stored id=%s"
+                    " mime=%s filename=%s bytes=%d",
+                    entry_id, norm_mime, norm_filename, len(normalized),
                 )
 
             except asyncio.CancelledError:
