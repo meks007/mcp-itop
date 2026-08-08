@@ -36,11 +36,19 @@ register(mcp, client)
             via REST API (core/get Attachment fields=contents).
             Only successfully returned attachments are marked served;
             failed entries remain served=0 and are retried on next call.
+            The actual transport response is produced by the low-level
+            router installed in server.py via get_low_level_resource_handlers().
+            The FastMCP-decorated stub below keeps the resource visible in
+            resources/list but returns [] and is never called for the read.
 
         itop://attachment/get_single_attachment
             Downloads and returns the single attachment marked by
             Prepare_single_attachment. Images served from cache,
             non-images fetched live via REST API. Marks record as served.
+
+get_low_level_resource_handlers(client)
+    Returns a dict mapping resource URIs to low-level handler callables.
+    Used by server.py to install the central ReadResourceRequest router.
 
 iTop blob field notes
 ---------------------
@@ -56,6 +64,9 @@ helpers/formatters.py (via parse_objects()) and read back here.
 from __future__ import annotations
 
 import base64
+from dataclasses import dataclass
+
+import mcp.types as types
 
 from attachment_store import (
     is_sync_running,
@@ -75,6 +86,25 @@ from attachment_store import (
 from auth import get_bearer_token
 from client import ItopClient
 from config import ITOP_URL, logger
+from low_level_resource_types import LowLevelResourceHandler
+
+
+# ---------------------------------------------------------------------------
+# Internal data model
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class AttachmentPayload:
+    """Raw attachment data ready for MCP transport.
+
+    content holds raw bytes. Base64 encoding is performed by the
+    low-level handler in get_low_level_resource_handlers(), not here.
+    uri follows the scheme itop://attachment/<filename>.
+    """
+    attachment_id: str
+    uri: str
+    mime_type: str
+    content: bytes
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +158,156 @@ async def _fetch_attachment_content(
 
 
 # ---------------------------------------------------------------------------
+# Core payload builder (used by the low-level resource handler)
+# ---------------------------------------------------------------------------
+
+async def build_unserved_attachment_payloads(
+    client: ItopClient,
+) -> list[AttachmentPayload]:
+    """Collect all unserved attachments for the current bearer token session.
+
+    Returns a list of AttachmentPayload objects with raw bytes content.
+    An empty list is returned (without raising) when:
+      - the bearer token cannot be read,
+      - no active object is set for the token,
+      - all entries are already served or none exist.
+
+    Only successfully processed payloads are marked as served.
+    Failed entries (missing cache, download error) are skipped and
+    remain available for retry on the next call.
+    """
+    try:
+        token = get_bearer_token()
+    except Exception as exc:
+        logger.warning(
+            "[attachments] build_unserved_attachment_payloads:"
+            " get_bearer_token raised: %s",
+            exc,
+        )
+        return []
+
+    if not token:
+        return []
+
+    current = get_current_object_for_token(token)
+    if current is None:
+        logger.debug(
+            "[attachments] build_unserved_attachment_payloads: no active object"
+        )
+        return []
+
+    obj_class, obj_id = current
+
+    # Wait for background image sync to finish before reading cache
+    await wait_for_all(token)
+
+    entries = get_unserved_attachment_metadata(token, obj_class, obj_id)
+    if not entries:
+        logger.debug(
+            "[attachments] build_unserved_attachment_payloads: no unserved entries"
+        )
+        return []
+
+    payloads: list[AttachmentPayload] = []
+    served_ids: list[str] = []
+
+    for entry in entries:
+        entry_id = entry["id"]
+        filename = entry["filename"]
+        mime = entry["mimetype"]
+        source = entry.get("source", "")
+        is_image = (source == "InlineImage" or mime.startswith("image/"))
+
+        if is_image:
+            fresh = get_single_attachment_metadata(token, obj_class, obj_id, entry_id)
+            content_bytes = (fresh or {}).get("content")
+            if content_bytes is None:
+                logger.warning(
+                    "[attachments] build_unserved_attachment_payloads:"
+                    " no content for image id=%s -- skipping",
+                    entry_id,
+                )
+                continue
+            if fresh:
+                mime = fresh.get("mimetype") or mime
+        else:
+            try:
+                content_bytes, dl_mime = await _fetch_attachment_content(
+                    client, entry_id, mime,
+                )
+                if dl_mime:
+                    mime = dl_mime
+            except Exception as exc:
+                logger.warning(
+                    "[attachments] build_unserved_attachment_payloads:"
+                    " download failed id=%s: %s -- skipping",
+                    entry_id, exc,
+                )
+                continue
+
+        payloads.append(
+            AttachmentPayload(
+                attachment_id=entry_id,
+                uri="itop://attachment/" + filename,
+                mime_type=mime,
+                content=content_bytes,
+            )
+        )
+        served_ids.append(entry_id)
+        logger.debug(
+            "[attachments] build_unserved_attachment_payloads:"
+            " queued id=%s filename=%s mime=%s bytes=%d",
+            entry_id, filename, mime, len(content_bytes),
+        )
+
+    # Mark only successfully built payloads as served
+    for sid in served_ids:
+        set_served(token, obj_class, obj_id, sid)
+
+    logger.debug(
+        "[attachments] build_unserved_attachment_payloads:"
+        " %d payload(s), %d skipped",
+        len(payloads), len(entries) - len(served_ids),
+    )
+    return payloads
+
+
+# ---------------------------------------------------------------------------
+# Low-level resource handler factory
+# ---------------------------------------------------------------------------
+
+def get_low_level_resource_handlers(
+    client: ItopClient,
+) -> dict[str, LowLevelResourceHandler]:
+    """Return a URI -> handler mapping for server.py to install in the router.
+
+    The handler for itop://attachment/get_attachments builds a full
+    types.ServerResult with one types.BlobResourceContents entry per
+    unserved attachment, each carrying its own URI and MIME type.
+    Base64 encoding happens here, not in build_unserved_attachment_payloads().
+    """
+
+    async def _build_get_attachments_result() -> types.ServerResult:
+        payloads = await build_unserved_attachment_payloads(client)
+        return types.ServerResult(
+            types.ReadResourceResult(
+                contents=[
+                    types.BlobResourceContents(
+                        uri=types.AnyUrl(payload.uri),
+                        mimeType=payload.mime_type,
+                        blob=base64.b64encode(payload.content).decode("ascii"),
+                    )
+                    for payload in payloads
+                ]
+            )
+        )
+
+    return {
+        "itop://attachment/get_attachments": _build_get_attachments_result,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -175,7 +355,7 @@ def register(mcp, client: ItopClient):
                 " cls=%s id=%s -- skipping store reset, returning no-op",
                 obj_class, obj_id_str,
             )
-            warning = await start_sync(token, obj_class, obj_id, [])
+            await start_sync(token, obj_class, obj_id, [])
             return (
                 "Sync already running for " + obj_class + " " + obj_id_str + "."
                 " Read resource get_attachments when ready."
@@ -346,7 +526,7 @@ def register(mcp, client: ItopClient):
         )
 
     # ------------------------------------------------------------------
-    # Resource: get_attachments
+    # Resource: get_attachments (stub -- actual read via low-level router)
     # ------------------------------------------------------------------
 
     @mcp.resource(
@@ -369,91 +549,13 @@ def register(mcp, client: ItopClient):
         mime_type="application/octet-stream",
     )
     async def get_attachments() -> list[dict]:
-        """Serve all unserved attachments for the current bearer token session."""
-        logger.debug("[attachments] get_attachments: resource handler invoked")
+        """Stub: keeps the resource visible in resources/list.
 
-        try:
-            token = get_bearer_token()
-        except Exception as exc:
-            logger.warning("[attachments] get_attachments: get_bearer_token raised: %s", exc)
-            return []
-
-        if not token:
-            return []
-
-        current = get_current_object_for_token(token)
-        if current is None:
-            logger.debug("[attachments] get_attachments: no active object for token")
-            return []
-
-        obj_class, obj_id = current
-
-        # Wait for background image sync to finish
-        await wait_for_all(token)
-
-        entries = get_unserved_attachment_metadata(token, obj_class, obj_id)
-        if not entries:
-            logger.debug("[attachments] get_attachments: no unserved entries")
-            return []
-
-        contents = []
-        served_ids: list[str] = []
-
-        for entry in entries:
-            entry_id = entry["id"]
-            filename = entry["filename"]
-            mime = entry["mimetype"]
-            source = entry.get("source", "")
-            is_image = (source == "InlineImage" or mime.startswith("image/"))
-
-            if is_image:
-                # Read from cache written by background sync task
-                fresh = get_single_attachment_metadata(token, obj_class, obj_id, entry_id)
-                content_bytes = (fresh or {}).get("content")
-                if content_bytes is None:
-                    logger.warning(
-                        "[attachments] get_attachments: no content for image id=%s"
-                        " -- skipping, will remain unserved",
-                        entry_id,
-                    )
-                    continue
-                if fresh:
-                    mime = fresh.get("mimetype") or mime
-            else:
-                try:
-                    content_bytes, dl_mime = await _fetch_attachment_content(
-                        client, entry_id, mime,
-                    )
-                    if dl_mime:
-                        mime = dl_mime
-                except Exception as exc:
-                    logger.warning(
-                        "[attachments] get_attachments: download failed id=%s: %s"
-                        " -- skipping, will remain unserved",
-                        entry_id, exc,
-                    )
-                    continue
-
-            contents.append({
-                "uri": "itop://attachment/" + filename,
-                "blob": base64.b64encode(content_bytes).decode(),
-                "mimeType": mime,
-            })
-            served_ids.append(entry_id)
-            logger.debug(
-                "[attachments] get_attachments: serving id=%s filename=%s mime=%s bytes=%d",
-                entry_id, filename, mime, len(content_bytes),
-            )
-
-        # Mark only successfully returned attachments as served
-        for sid in served_ids:
-            set_served(token, obj_class, obj_id, sid)
-
-        logger.debug(
-            "[attachments] get_attachments: returning %d content(s), %d skipped",
-            len(contents), len(entries) - len(served_ids),
-        )
-        return contents
+        The actual multi-file response is produced by the low-level router
+        installed in server.py. This stub is never called for a resources/read
+        of itop://attachment/get_attachments because the router intercepts first.
+        """
+        return []
 
     # ------------------------------------------------------------------
     # Resource: get_single_attachment
