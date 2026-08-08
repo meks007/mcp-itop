@@ -344,16 +344,30 @@ def store_image_content(
     attachment_id: str,
     content: bytes,
     mimetype: str,
+    filename: str = "",
 ) -> None:
-    """Write normalized image bytes and updated mimetype into the content column.
+    """Write normalised image bytes, mimetype, and optionally filename to the DB.
 
     Called by attachment_sync.py after _normalize_image() succeeds.
+
+    The filename parameter should be the normalised filename returned by
+    _normalize_image() (e.g. inline_49.jpg). When provided it is written to
+    the filename column so that build_prepared_attachment_payloads() can read
+    the correct .jpg name and produce a matching resource URI. Callers that
+    do not supply filename keep the existing column value unchanged.
     """
-    db.execute(
-        "UPDATE attachment_metadata SET content = ?, mimetype = ? "
-        "WHERE token = ? AND obj_class = ? AND obj_id = ? AND id = ?",
-        (content, mimetype, token, obj_class, obj_id, attachment_id),
-    )
+    if filename:
+        db.execute(
+            "UPDATE attachment_metadata SET content = ?, mimetype = ?, filename = ? "
+            "WHERE token = ? AND obj_class = ? AND obj_id = ? AND id = ?",
+            (content, mimetype, filename, token, obj_class, obj_id, attachment_id),
+        )
+    else:
+        db.execute(
+            "UPDATE attachment_metadata SET content = ?, mimetype = ? "
+            "WHERE token = ? AND obj_class = ? AND obj_id = ? AND id = ?",
+            (content, mimetype, token, obj_class, obj_id, attachment_id),
+        )
 
 
 def clear_attachment_metadata(
