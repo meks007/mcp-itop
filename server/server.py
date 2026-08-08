@@ -22,7 +22,7 @@ Module layout:
     kb.py               - knowledge base search and retrieval
     crud.py             - generic CRUD + impact tools
     comments.py         - ticket log read/write
-    attachments.py      - image and file attachment tools + static image resource
+    attachments.py      - image and file attachment tools + attachment resources
     transitions.py      - state transition tools (Describe_state_change, Apply_stimulus_to_object)
 
 Framework: fastmcp (PrefectHQ) >= 2.11.0
@@ -40,8 +40,8 @@ Low-level resource routing
 --------------------------
 FastMCP serialises every resource return value through its own normalisation
 layer, which overwrites individual content URIs with the resource's registered
-URI. For the itop://attachment/get_attachments resource this loses the per-file
-URIs that identify each attachment.
+URI. For the itop://attachment/get_object_attachments resource this loses the
+per-file URIs that identify each attachment in the multi-file response.
 
 To work around this, server.py installs a URI-based router directly on the
 low-level MCP server after all modules have been registered. Tool modules that
@@ -55,7 +55,7 @@ ReadResourceRequest handler that:
   - delegates every other URI to the original FastMCP handler.
 
 This relies on the internal attribute mcp._mcp_server, which is stable for
-the pinned FastMCP 3.4.6 / MCP SDK 1.9.4 combination. Revisit on every
+the pinned FastMCP 3.4.6 / MCP SDK 1.29.0 combination. Revisit on every
 dependency upgrade (see upgrade rule in the implementation plan).
 """
 
