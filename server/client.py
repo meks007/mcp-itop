@@ -19,10 +19,9 @@ ItopClient.get_class_fields -- field name set for a class; derived from describe
                                schema on first call, falls back to core/get sampling
                                when describe_class is unavailable.
 ItopClient.describe_class   -- full field schema from company/describe_class.
-ItopClient.get_object_lifecycle_history
-                            -- query CMDBChangeOpSetAttribute records for the
-                               lifecycle attribute of a given object to determine
-                               which states it has previously been in.
+ItopClient.object_was_in_state
+                            -- call company/object_was_in_state and return the
+                               raw iTop response dict unchanged.
 
 Use get_raw when you need the unfiltered response (e.g. internal resolvers,
 attachment queries). Use get everywhere else so that privacy-sensitive fields
@@ -554,52 +553,31 @@ class ItopClient:
         return response
 
     # ------------------------------------------------------------------
-    # get_object_lifecycle_history
+    # company/object_was_in_state
     # ------------------------------------------------------------------
 
-    async def get_object_lifecycle_history(
+    async def object_was_in_state(
         self,
-        obj_class: str,
+        cls: str,
         obj_id: int,
-        lifecycle_attribute: str,
-    ) -> list[str]:
-        """Return the list of lifecycle state values this object has transitioned into.
-
-        Queries CMDBChangeOpSetAttribute for all recorded changes to the
-        lifecycle attribute of the given object. Returns only the 'newvalue'
-        strings -- one entry per recorded transition into that state.
-
-        An empty list means no change records were found, which may indicate
-        the object was created directly in its current state, or that iTop
-        audit history has been purged or is unavailable.
+        lifecycle_state: str,
+    ) -> dict:
+        """Call company/object_was_in_state and return the raw iTop response dict.
 
         Args:
-            obj_class:           iTop class of the target object, e.g. 'UserRequest'.
-            obj_id:              Confirmed integer database ID of the object.
-            lifecycle_attribute: The lifecycle state field name, e.g. 'status'.
+            cls:             iTop class name, e.g. 'UserRequest'.
+            obj_id:          Confirmed integer database ID of the object.
+            lifecycle_state: Lifecycle state code to check, e.g. 'approved'.
 
         Returns:
-            List of newvalue strings from all matching CMDBChangeOpSetAttribute
-            records, in the order iTop returns them (typically chronological).
+            Full iTop response dict (code, message, result).
         """
-        oql = (
-            "SELECT CMDBChangeOpSetAttribute"
-            " WHERE objclass = '" + obj_class + "'"
-            " AND objkey = " + str(obj_id)
-            + " AND attcode = '" + lifecycle_attribute + "'"
-        )
-        result = await self.get_raw(
-            "CMDBChangeOpSetAttribute",
-            oql,
-            fields="newvalue",
-        )
-        objects = result.get("objects") or {}
-        values: list[str] = []
-        for obj_data in objects.values():
-            nv = (obj_data.get("fields") or {}).get("newvalue")
-            if nv is not None:
-                values.append(str(nv))
-        return values
+        return await self.request({
+            "operation": "company/object_was_in_state",
+            "class": cls,
+            "obj_id": obj_id,
+            "lifecycle_state": lifecycle_state,
+        })
 
     # ------------------------------------------------------------------
     # core/get_related
