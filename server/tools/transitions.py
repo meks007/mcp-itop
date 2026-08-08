@@ -1,15 +1,16 @@
 """
-State transition tools: Describe_state_change, Apply_stimulus_to_object.
+State transition tools: Describe_state_change, Apply_stimulus_to_object,
+Check_object_previous_lifecycle_state.
 
 ID-only contract
 ----------------
-Both tools require a confirmed integer database ID (obj_id: int) when
+All tools require a confirmed integer database ID (obj_id: int) when
 targeting a specific object. Use Resolve_object first if you only have a
 ref or user-supplied number.
 
 Design
 ------
-Both tools share a common lookup pattern:
+Describe_state_change and Apply_stimulus_to_object share a common lookup pattern:
 
   1. Fetch the normalised transition schema for obj_class via
      get_transition_map() (cached per class, TTL from TRANSITION_CACHE_TTL).
@@ -50,6 +51,13 @@ Path modes (schema mode only)
   "usual" (default) -- up to MAX_USUAL_PATHS paths, scored and deduplicated
                        by agent-visible (non-internal) stimulus sequence.
   "all"             -- all paths, no limit.
+
+Check_object_previous_lifecycle_state
+--------------------------------------
+  Returns {code, message, result: {was_in_state: true/false}}.
+  Queries CMDBChangeOpSetAttribute for recorded transitions into the
+  requested lifecycle state. Also returns true when the object is currently
+  in that state, even if no change record exists (created directly in it).
 """
 
 from __future__ import annotations
@@ -632,3 +640,76 @@ def register(mcp, client: ItopClient) -> None:
             output_fields=ensure_ref_field(obj_class, effective_output),
         )
         return format_and_cache(apply_result)
+
+    # ------------------------------------------------------------------ #
+    #  TOOL 3: Check_object_previous_lifecycle_state                       #
+    # ------------------------------------------------------------------ #
+
+    @mcp.tool(name="Check_object_previous_lifecycle_state")
+    async def check_object_previous_lifecycle_state(
+        obj_class: str,
+        obj_id: int,
+        lifecycle_state: str,
+    ) -> dict:
+        """Check whether an iTop object has ever been in a specific lifecycle state.
+
+        Returns {code, message, result: {was_in_state: true/false}}.
+        Also returns true when the object is currently in the requested state.
+        obj_id must be a confirmed integer database ID; use Resolve_object first
+        if you only have a ref. Use enumerate_transitions or describe_class to
+        discover valid lifecycle state codes for the class.
+        """
+        schema = await get_transition_map(obj_class, client)
+        fields_def = schema.get("fields", {})
+        transitions = schema.get("transitions", {})
+
+        try:
+            lifecycle_attribute = find_lifecycle_state_attribute(fields_def)
+        except ValueError as exc:
+            return {"code": 1, "message": "Error: " + str(exc)}
+
+        if lifecycle_attribute is None:
+            return {
+                "code": 1,
+                "message": (
+                    "Error: class '" + obj_class
+                    + "' has no lifecycle state machine."
+                ),
+            }
+
+        known_states = list(transitions.keys())
+        if lifecycle_state not in transitions:
+            return {
+                "code": 1,
+                "message": (
+                    "Error: lifecycle_state '" + lifecycle_state
+                    + "' is not a known state for class '" + obj_class + "'.\n"
+                    "Known states: " + ", ".join(known_states)
+                ),
+            }
+
+        # Check current state first -- covers objects created directly in it.
+        current_result = await client.get(
+            obj_class, obj_id, fields=lifecycle_attribute
+        )
+        current_state = _get_current_lifecycle_state(current_result, lifecycle_attribute)
+        if current_state is None:
+            return {
+                "code": 1,
+                "message": (
+                    "Error: object " + str(obj_id)
+                    + " not found or lifecycle state field '"
+                    + lifecycle_attribute + "' unavailable."
+                ),
+            }
+
+        if current_state == lifecycle_state:
+            return {"code": 0, "message": "", "result": {"was_in_state": True}}
+
+        # Query audit history for a recorded transition into the requested state.
+        history = await client.get_object_lifecycle_history(
+            obj_class, obj_id, lifecycle_attribute
+        )
+        was_in_state = lifecycle_state in history
+
+        return {"code": 0, "message": "", "result": {"was_in_state": was_in_state}}
