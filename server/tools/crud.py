@@ -25,6 +25,8 @@ is never blocked by a failed mention lookup.
 
 from __future__ import annotations
 
+import logging
+
 from client import ItopClient
 from helpers import (
     ensure_ref_field,
@@ -41,6 +43,7 @@ from helpers.mentions import resolve_mentions_in_text, is_caselog_attribute
 from config import DEFAULT_COMMENT
 from cache import get_class_schema, find_lifecycle_state_attribute
 
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Type taxonomy helpers
@@ -220,12 +223,67 @@ def register(mcp, client: ItopClient):
         obj_class: str,
         key_or_ref: str,
     ) -> str:
-        """Resolve a ticket reference, user-supplied number, OQL query, or other identifier to a confirmed iTop class and numeric database ID. Use obj_class=Ticket when the concrete ticket class is unknown.
+        """Resolve a ticket reference, user-supplied number, OQL query, or other
+        identifier to a confirmed iTop class and numeric database ID.
+        Also returns the lifecycle state attribute name and current value when
+        the class has a state machine. Use obj_class=Ticket when the concrete
+        ticket class is unknown.
         """
         resolved_class, resolved_key = await resolve_key(obj_class, key_or_ref)
-        fields = ensure_ref_field(resolved_class, "id, friendlyname")
-        result = await client.get(resolved_class, resolved_key, fields=fields)
-        return format_and_cache(result, requested_class=obj_class)
+
+        # -- Step 1: fetch the class schema (cached after first call per class).
+        # Discover the lifecycle state attribute name, if any.
+        lifecycle_attr: "str | None" = None
+        try:
+            schema = await get_class_schema(resolved_class, client)
+            lifecycle_attr = find_lifecycle_state_attribute(schema)
+        except ValueError as exc:
+            # Multiple lifecycle fields -- broken class definition, log and skip.
+            logger.warning(
+                "[Resolve_object] find_lifecycle_state_attribute failed for "
+                "cls=%r: %s", resolved_class, exc
+            )
+        except Exception as exc:
+            # Schema fetch failed (e.g. describe_class not available).
+            logger.debug(
+                "[Resolve_object] schema unavailable for cls=%r: %s",
+                resolved_class, exc
+            )
+
+        # -- Step 2: build output_fields and run core/get.
+        # Always include id and friendlyname; append the lifecycle field when known.
+        base_fields = "id, friendlyname"
+        if lifecycle_attr:
+            output_fields = ensure_ref_field(
+                resolved_class, base_fields + ", " + lifecycle_attr
+            )
+        else:
+            output_fields = ensure_ref_field(resolved_class, base_fields)
+
+        result = await client.get(resolved_class, resolved_key, fields=output_fields)
+
+        # -- Step 3: annotate the formatted output with lifecycle metadata.
+        # Extract the lifecycle state value from the first returned object so
+        # callers get both the attribute name and the current code in one call.
+        lifecycle_annotation: "str | None" = None
+        if lifecycle_attr:
+            objects = result.get("objects") or {}
+            for obj_data in objects.values():
+                obj_fields = obj_data.get("fields") if isinstance(obj_data, dict) else None
+                if isinstance(obj_fields, dict) and lifecycle_attr in obj_fields:
+                    lifecycle_value = obj_fields[lifecycle_attr]
+                    lifecycle_annotation = (
+                        "lifecycle_state_attribute: " + lifecycle_attr + "\n"
+                        "lifecycle_state: " + str(lifecycle_value)
+                    )
+                break
+
+        formatted = format_and_cache(result, requested_class=obj_class)
+
+        if lifecycle_annotation:
+            formatted = formatted + "\n" + lifecycle_annotation
+
+        return formatted
 
     @mcp.tool(name="Load_object")
     async def itop_get(
