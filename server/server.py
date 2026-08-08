@@ -6,6 +6,7 @@ Provides AI assistants (Claude Desktop, opencode, etc.) with tools to:
   - Analyse SLA compliance, agent workload, service quality
   - Query and update tickets, CI, KB articles via iTop REST API
   - Apply lifecycle transitions (assign, resolve, close)
+  - Check whether an object previously passed through a lifecycle state
 
 Module layout:
   config.py             - env vars, logging, constants
@@ -23,7 +24,9 @@ Module layout:
     crud.py             - generic CRUD + impact tools
     comments.py         - ticket log read/write
     attachments.py      - image and file attachment tools + attachment resources
-    transitions.py      - state transition tools (Describe_state_change, Apply_stimulus_to_object)
+    transitions.py      - state transition tools (Describe_state_change,
+                          Apply_stimulus_to_object,
+                          Check_object_previous_lifecycle_state)
 
 Framework: fastmcp (PrefectHQ) >= 2.11.0
 
@@ -98,7 +101,8 @@ mcp = FastMCP(
     instructions=(
         "MCP server for iTop IT Service Management with analytics. "
         "Provides SLA reports, agent workload analysis, service quality checks, "
-        "ticket lifecycle, KB search, and CI impact analysis."
+        "ticket lifecycle, KB search, CI impact analysis, and lifecycle state "
+        "history checks (Check_object_previous_lifecycle_state)."
     ),
     auth=DebugTokenVerifier(validate=_validate_itop_token),
 )
