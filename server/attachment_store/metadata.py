@@ -8,6 +8,11 @@ Non-images are never cached here; they are downloaded live on resource call.
 
 Schema registered at module import time via db.register_schema() so that
 db.init() creates the table without any explicit init_db() call from callers.
+
+The 'selected' column stores the prepared state: selected=1 means the agent
+has explicitly requested this attachment via prepare_object_attachments().
+get_object_attachments only serves rows with selected=1. Multiple rows can
+be selected simultaneously (one per requested attachment id).
 """
 
 from __future__ import annotations
@@ -223,12 +228,16 @@ def get_single_attachment_metadata(
     return _row_to_dict(rows[0]) if rows else None
 
 
-def get_selected_attachment_metadata(
+def get_prepared_attachment_metadata(
     token: str,
     obj_class: str,
     obj_id: int,
-) -> dict | None:
-    """Return the non-expired record with selected=1, or None."""
+) -> list[dict]:
+    """Return all non-expired records with selected=1 for (token, obj_class, obj_id).
+
+    These are the attachments explicitly queued by prepare_object_attachments().
+    Multiple rows can be prepared simultaneously.
+    """
     now = time.time()
     rows = db.execute(
         "SELECT " + _SELECT_COLS + " FROM attachment_metadata "
@@ -236,7 +245,55 @@ def get_selected_attachment_metadata(
         "AND selected = 1 AND expires_at >= ?",
         (token, obj_class, obj_id, now),
     )
-    return _row_to_dict(rows[0]) if rows else None
+    return [_row_to_dict(r) for r in rows]
+
+
+# Keep the old single-result accessor for any internal callers that still
+# rely on it (e.g. attachment_sync.py cache reads). Not part of public API.
+def get_selected_attachment_metadata(
+    token: str,
+    obj_class: str,
+    obj_id: int,
+) -> dict | None:
+    """Return the first non-expired record with selected=1, or None.
+
+    Deprecated: use get_prepared_attachment_metadata() for multi-select.
+    Retained for internal use by attachment_sync.py cache reads.
+    """
+    results = get_prepared_attachment_metadata(token, obj_class, obj_id)
+    return results[0] if results else None
+
+
+def set_prepared(
+    token: str,
+    obj_class: str,
+    obj_id: int,
+    attachment_ids: list[str],
+) -> None:
+    """Mark the given attachment IDs as prepared (selected=1); clear all others.
+
+    Replaces set_selected(). Accepts one or more IDs. Atomically resets
+    selected=0 for all rows of the object, then sets selected=1 for each
+    ID in attachment_ids. IDs not found in the store are silently ignored.
+
+    Args:
+        token:          Raw bearer token from get_bearer_token().
+        obj_class:      iTop class name, e.g. 'UserRequest'.
+        obj_id:         Confirmed numeric iTop database ID.
+        attachment_ids: One or more attachment IDs to mark as prepared.
+    """
+    with db.transaction():
+        db.execute(
+            "UPDATE attachment_metadata SET selected = 0 "
+            "WHERE token = ? AND obj_class = ? AND obj_id = ?",
+            (token, obj_class, obj_id),
+        )
+        for att_id in attachment_ids:
+            db.execute(
+                "UPDATE attachment_metadata SET selected = 1 "
+                "WHERE token = ? AND obj_class = ? AND obj_id = ? AND id = ?",
+                (token, obj_class, obj_id, att_id),
+            )
 
 
 def set_selected(
@@ -245,18 +302,12 @@ def set_selected(
     obj_id: int,
     attachment_id: str,
 ) -> None:
-    """Set selected=1 for attachment_id, selected=0 for all other records of the object."""
-    with db.transaction():
-        db.execute(
-            "UPDATE attachment_metadata SET selected = 0 "
-            "WHERE token = ? AND obj_class = ? AND obj_id = ?",
-            (token, obj_class, obj_id),
-        )
-        db.execute(
-            "UPDATE attachment_metadata SET selected = 1 "
-            "WHERE token = ? AND obj_class = ? AND obj_id = ? AND id = ?",
-            (token, obj_class, obj_id, attachment_id),
-        )
+    """Set selected=1 for attachment_id, selected=0 for all other records.
+
+    Deprecated: use set_prepared() with a list. Retained for backwards
+    compatibility with any callers not yet updated.
+    """
+    set_prepared(token, obj_class, obj_id, [attachment_id])
 
 
 def set_served(
