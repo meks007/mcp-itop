@@ -365,22 +365,7 @@ def register(mcp, client: ItopClient):
         obj_class: str,
         obj_id: int,
     ) -> str:
-        """List attachments and inline images for an iTop object.
-
-        Use Resolve_object first for the confirmed obj_class and obj_id. Supports
-        UserRequest, Incident, Change, FAQ, FunctionalCI, and similar classes.
-        Records metadata without downloading binaries, then starts background image
-        download and normalisation. A running sync for this object is reused; changing
-        objects clears the previous cache and returns a warning.
-
-        Returns each attachment's id, filename, mimetype, and source. Image attachments
-        are always normalised to JPEG by the background sync task. The listing reports
-        image/jpeg and the .jpg filename immediately so the values match what will
-        actually be served via get_object_attachments.
-
-        After listing, call Prepare_object_attachments with the IDs you want:
-        pass all IDs to get every attachment, or a subset for specific files.
-        Then read get_object_attachments to retrieve the binaries.
+        """List file attachments and inline images for an iTop object using its confirmed class and numeric ID. Returns each attachment's ID, filename, MIME type, and source, then starts background image preparation. Images are served as JPEG. Next call Prepare_object_attachments with all or a subset of the returned IDs.
         """
         token = get_bearer_token()
         token_preview = (token[:8] + "...") if token and len(token) > 8 else (token or "(empty)")
@@ -537,20 +522,7 @@ def register(mcp, client: ItopClient):
         obj_id: int,
         ids: list[str],
     ) -> str:
-        """Mark one or more attachments for retrieval via get_object_attachments.
-
-        Call List_object_attachments first to populate the store and obtain
-        the attachment IDs from the listing. Then pass the IDs you want:
-          - Pass all listed IDs to retrieve every attachment.
-          - Pass a subset to retrieve only specific files.
-
-        A subsequent read of get_object_attachments serves exactly the
-        prepared IDs and nothing else. Call this tool again to change the
-        selection before re-reading.
-
-        obj_class: iTop class of the parent object (e.g. UserRequest).
-        obj_id:    Integer database ID of the parent object.
-        ids:       One or more attachment IDs from List_object_attachments.
+        """Select attachments for retrieval. Call List_object_attachments first, then pass one or more returned IDs. The next read of itop://attachment/get_object_attachments returns exactly this selection; call this tool again to replace it.
         """
         token = get_bearer_token()
         obj_id_str = str(obj_id)
@@ -614,25 +586,16 @@ def register(mcp, client: ItopClient):
         _RESOURCE_URI,
         name="Get prepared attachments",
         description=(
-            "Returns the attachments that were prepared by Prepare_object_attachments. "
-            "You MUST call List_object_attachments and then Prepare_object_attachments "
-            "before reading this resource. "
-            "Pass all listed IDs to Prepare_object_attachments to get every attachment; "
-            "pass a subset to get only specific files. "
-            "Each prepared attachment is returned as one entry in the contents array "
-            "with its own uri (itop://attachment/<filename>), mimeType, and blob. "
-            "Images are served as JPEG from the background-sync cache. "
-            "Non-image attachments are fetched live via the iTop REST API. "
-            "Only successfully returned attachments are marked as served; "
-            "failed entries remain prepared and can be retried by reading again."
+            "Return the files selected by Prepare_object_attachments. "
+            "First call List_object_attachments, then Prepare_object_attachments "
+            "with all desired IDs. "
+            "Each file is returned with its own URI, MIME type, and binary content. "
+            "Images are served as JPEG; other files are fetched from iTop. "
+            "Failed files remain selected for retry."
         ),
         mime_type="application/octet-stream",
     )
     async def get_object_attachments() -> list[dict]:
-        """Stub: keeps the resource visible in resources/list.
-
-        The actual multi-file response is produced by the low-level router
-        installed in server.py. This stub is never called for a resources/read
-        of itop://attachment/get_object_attachments because the router intercepts first.
+        """Expose the attachment resource in resources/list. Reads are handled by the low-level router, which returns the files selected by Prepare_object_attachments.
         """
         return []
