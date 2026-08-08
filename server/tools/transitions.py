@@ -420,15 +420,7 @@ def register(mcp, client: ItopClient) -> None:
         current_state: str = "",
         path_mode: str = "usual",
     ) -> str:
-        """Show lifecycle paths that can transition an iTop object to target_state.
-
-        Without obj_id: searches from current_state or all states (schema mode).
-        With obj_id: reads the object's current state as fixed start point.
-        obj_id must be a confirmed numeric ID; use Resolve_object first for a ref.
-
-        Apply_stimulus_to_object performs only one direct transition per call.
-        System-driven edges are marked [internal].
-        path_mode: "usual" (default, up to 10 paths) or "all".
+        """Show lifecycle paths to target_state. With obj_id, use the object's current state; otherwise start from current_state or all states. obj_id must be a confirmed numeric ID. Internal transitions are marked and cannot be applied manually. path_mode is usual (up to 10 representative paths) or all. Apply_stimulus_to_object executes one direct transition per call.
         """
         if path_mode not in {"usual", "all"}:
             return "Error: path_mode must be \"usual\" or \"all\"."
@@ -525,14 +517,7 @@ def register(mcp, client: ItopClient) -> None:
         field_lines: str = "",
         output_fields: str = "id, friendlyname",
     ) -> str:
-        """Apply one direct lifecycle transition to an iTop object.
-
-        obj_id must be a confirmed numeric ID; use Resolve_object first for a ref.
-        The tool determines the required user-action stimulus from the object's
-        current state. Internal transitions cannot be applied manually.
-
-        Use Describe_state_change first to identify valid target states and
-        required fields. field_lines accepts key=value or key: value entries.
+        """Apply one direct user-action lifecycle transition to an iTop object by confirmed numeric ID. Use Describe_state_change to find valid target states and required fields. Provide fields as key=value or key: value lines. Internal transitions cannot be applied manually.
         """
         schema = await get_transition_map(obj_class, client)
         transitions = schema.get("transitions", {})
