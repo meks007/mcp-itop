@@ -16,6 +16,7 @@ Module layout:
   db/                   - backend-agnostic database layer (db.init, db.execute)
   attachment_store/     - SQLite store for image URIs and inline image refs
   background_tasks.py   - central housekeeping asyncio loop
+  low_level_resource_types.py - shared LowLevelResourceHandler type alias
   tools/
     analytics.py        - SLA, workload, idle agents, service/caller quality
     kb.py               - knowledge base search and retrieval
@@ -34,6 +35,28 @@ Startup sequence
        a. housekeeping task created
        b. uvicorn starts, binds, MCP session manager starts
        c. Server ready and accepting connections
+
+Low-level resource routing
+--------------------------
+FastMCP serialises every resource return value through its own normalisation
+layer, which overwrites individual content URIs with the resource's registered
+URI. For the itop://attachment/get_attachments resource this loses the per-file
+URIs that identify each attachment.
+
+To work around this, server.py installs a URI-based router directly on the
+low-level MCP server after all modules have been registered. Tool modules that
+need multi-file responses with individual URIs export a factory:
+
+    get_low_level_resource_handlers(client) -> dict[str, LowLevelResourceHandler]
+
+server.py calls each factory, merges the dicts, and installs one central
+ReadResourceRequest handler that:
+  - dispatches to the low-level handler for known URIs, and
+  - delegates every other URI to the original FastMCP handler.
+
+This relies on the internal attribute mcp._mcp_server, which is stable for
+the pinned FastMCP 3.4.6 / MCP SDK 1.9.4 combination. Revisit on every
+dependency upgrade (see upgrade rule in the implementation plan).
 """
 
 from __future__ import annotations
@@ -42,6 +65,7 @@ import asyncio
 import os
 import sys
 
+import mcp.types as types
 import uvicorn
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.debug import DebugTokenVerifier
@@ -49,6 +73,7 @@ from fastmcp.server.auth.providers.debug import DebugTokenVerifier
 from auth import ItopMiddleware, _validate_itop_token
 from client import ItopClient
 from config import MCP_DEBUG, MCP_DEBUG_HEADERS, logger
+from low_level_resource_types import LowLevelResourceHandler
 
 import tools.analytics as _analytics
 import tools.attachments as _attachments
@@ -97,6 +122,65 @@ _kb.register(mcp, client)
 _crud.register(mcp, client)
 _comments.register(mcp, client)
 _transitions.register(mcp, client)
+
+# ---------------------------------------------------------------------------
+# Low-level resource router
+# ---------------------------------------------------------------------------
+
+# Collect handler tables from every tool module that requires direct
+# MCP-level control over ReadResourceResult serialisation.
+# Each module's factory returns {uri: handler} and is responsible for
+# producing a complete types.ServerResult with individual content URIs.
+# server.py merges the dicts and installs exactly one global router.
+_LOW_LEVEL_RESOURCE_HANDLERS: dict[str, LowLevelResourceHandler] = {
+    **_attachments.get_low_level_resource_handlers(client),
+}
+
+
+def _install_low_level_resource_router(
+    fmcp: FastMCP,
+    handlers: dict[str, LowLevelResourceHandler],
+) -> None:
+    """Wrap the FastMCP ReadResourceRequest handler with a URI-based router.
+
+    For URIs listed in handlers the request is forwarded directly to the
+    corresponding low-level handler, bypassing FastMCP serialisation.
+    All other URIs are delegated to the original FastMCP handler so that
+    normal resources continue to work without any change.
+
+    Must be called after all modules have been registered so that the
+    original FastMCP handler is fully initialised before it is captured.
+    """
+    lowlevel_server = fmcp._mcp_server
+    previous_handler = lowlevel_server.request_handlers.get(
+        types.ReadResourceRequest
+    )
+
+    if previous_handler is None:
+        raise RuntimeError(
+            "FastMCP did not register a ReadResourceRequest handler. "
+            "Verify the pinned FastMCP and MCP SDK versions."
+        )
+
+    async def _read_resource_router(
+        request: types.ReadResourceRequest,
+    ) -> types.ServerResult:
+        handler = handlers.get(str(request.params.uri))
+        if handler is not None:
+            return await handler()
+        return await previous_handler(request)
+
+    lowlevel_server.request_handlers[types.ReadResourceRequest] = (
+        _read_resource_router
+    )
+    logger.debug(
+        "[server] low-level resource router installed for %d URI(s): %s",
+        len(handlers),
+        list(handlers.keys()),
+    )
+
+
+_install_low_level_resource_router(mcp, _LOW_LEVEL_RESOURCE_HANDLERS)
 
 # ---------------------------------------------------------------------------
 # ASGI app
