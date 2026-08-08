@@ -53,19 +53,7 @@ def register(mcp, client: ItopClient):
         text: str,
         log_field: Literal["public_log", "private_log", "private_log_ai"] = "public_log",
     ) -> str:
-        """Add an HTML log entry to an iTop ticket.
-
-        obj_id must be the confirmed integer database ID. Use Resolve_object
-        first if you only have a ref.
-
-        log_field: "public_log" (portal-visible, default) or "private_log"
-        (internal note).
-
-        Mention tokens are resolved automatically:
-          @<id>  Person by numeric id (resolve first)
-          ?<id>  FAQ article by numeric id (resolve first)
-          R-<ref>, I-<ref>, C-<ref>  ticket references (auto-resolved)
-        Call Describe_mentions for the authoritative tag list.
+        """Add an HTML entry to a ticket log using a confirmed numeric object ID. log_field may be public_log, private_log, or private_log_ai. Mention tokens are resolved automatically: @<id> for a Person, ?<id> for an FAQ article, and R-/I-/C- references for tickets. Resolve Person and FAQ IDs first; call Describe_mentions for configured tags.
         """
         if log_field not in _VALID_LOG_FIELDS:
             return "Error: log_field must be one of " + ", ".join(sorted(_VALID_LOG_FIELDS)) + "."
@@ -92,15 +80,7 @@ def register(mcp, client: ItopClient):
 
     @mcp.tool(name="Describe_mentions")
     async def itop_describe_mentions() -> str:
-        """Show configured mention tags and their iTop target classes.
-
-        Call before writing Person or FAQ mentions, or when mention settings
-        may have changed. Returns tag characters, target classes, and lookup
-        attributes.
-
-        For lookup_attribute="id", resolve the object first and use its
-        numeric ID. For "ref", use the complete ticket reference token such
-        as R-000084.
+        """Return configured mention tags, target classes, and lookup attributes. Resolve objects before using ID-based tags; for reference-based tags, use the complete ticket reference such as R-000084.
         """
         config = await get_mention_config(client)
         if not config:
