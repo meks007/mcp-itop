@@ -191,21 +191,14 @@ def register(mcp, client: ItopClient):
     ) -> str:
         """Search titles and body text in the configured knowledge-base article class.
 
-        Build a concise query from the most distinctive concepts in the user's
-        request. Do not submit a full sentence or a collection of generic words.
-        Select the matching mode intentionally:
+        Use the most specific suitable query with all_terms first. Do not use any_term
+        unless that search returns no useful result.
 
-        - all_terms (default): requires every query term to occur in an article
-          title or body; terms do not need to be adjacent. Use this for normal,
-          precise KB searches.
-        - exact_phrase: requires the complete query text to occur consecutively.
-          Use only when exact wording is important.
-        - any_term: returns articles matching at least one query term. Use only
-          to broaden a search after a more precise mode returns no useful result.
+        - all_terms (default): all query terms must appear in an article's title or body.
+        - exact_phrase: the complete query must appear consecutively.
+        - any_term: one or more query terms may match; use only as a fallback.
 
-        If no results are found, refine the concepts or relax the mode step by
-        step. Results include confirmed numeric IDs that can be passed directly
-        to Get_KB_article or Load_object. Results may have any status.
+        Results include confirmed numeric IDs for direct use with Get_KB_article or Load_object.
         """
         text_field = await _kb_text_field()
 
