@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import logging
 import re
+from typing import Literal
 
 from client import ItopClient
 from cache import get_class_schema
@@ -95,6 +96,43 @@ def _kb_list_fields(text_field: str) -> str:
     return "id,title," + text_field + ",category_name,status"
 
 
+def _build_oql_clauses(
+    safe_terms: list[str],
+    text_field: str,
+    match_mode: str,
+) -> str:
+    """Build the WHERE clause portion of an OQL query.
+
+    all_terms:    every term must appear in title or body (AND across terms,
+                  OR across fields per term).
+    exact_phrase: the full query is treated as one literal phrase that must
+                  appear consecutively in title or body.
+    any_term:     any single term is sufficient (OR across all terms and
+                  fields). Broad -- use only as a fallback.
+    """
+    if match_mode == "exact_phrase":
+        # safe_terms already escaped; rejoin as the original phrase.
+        phrase = " ".join(safe_terms)
+        return (
+            "title LIKE '%" + phrase + "%'"
+            + " OR " + text_field + " LIKE '%" + phrase + "%'"
+        )
+
+    if match_mode == "all_terms":
+        # Each term produces one (title OR body) sub-clause; all must match.
+        per_term = [
+            "(title LIKE '%" + t + "%' OR " + text_field + " LIKE '%" + t + "%')"
+            for t in safe_terms
+        ]
+        return " AND ".join(per_term)
+
+    # any_term: union of all field/term combinations.
+    return " OR ".join(
+        "title LIKE '%" + t + "%' OR " + text_field + " LIKE '%" + t + "%'"
+        for t in safe_terms
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tool registration
 # ---------------------------------------------------------------------------
@@ -147,24 +185,41 @@ def register(mcp, client: ItopClient):
 
     @mcp.tool(name="Search_KB_articles")
     async def itop_search_kb(
-        keywords: str,
+        query: str,
+        match_mode: Literal["all_terms", "exact_phrase", "any_term"] = "all_terms",
         limit: int = 20,
     ) -> str:
-        """Search titles and body text in the configured knowledge-base article class. Words are OR-matched, so use specific words rather than sentences. Results may have any status and include confirmed numeric IDs for direct use with Get_KB_article or Load_object.
+        """Search titles and body text in the configured knowledge-base article class.
+
+        Build a concise query from the most distinctive concepts in the user's
+        request. Do not submit a full sentence or a collection of generic words.
+        Select the matching mode intentionally:
+
+        - all_terms (default): requires every query term to occur in an article
+          title or body; terms do not need to be adjacent. Use this for normal,
+          precise KB searches.
+        - exact_phrase: requires the complete query text to occur consecutively.
+          Use only when exact wording is important.
+        - any_term: returns articles matching at least one query term. Use only
+          to broaden a search after a more precise mode returns no useful result.
+
+        If no results are found, refine the concepts or relax the mode step by
+        step. Results include confirmed numeric IDs that can be passed directly
+        to Get_KB_article or Load_object. Results may have any status.
         """
         text_field = await _kb_text_field()
 
-        terms = [t.strip() for t in re.split(r"[\s,]+", keywords) if t.strip()]
+        terms = [t.strip() for t in re.split(r"[\s,]+", query) if t.strip()]
         if not terms:
-            terms = [keywords]
+            terms = [query]
         safe_terms = [_sanitise_like_term(t) for t in terms]
-        clauses = " OR ".join(
-            "title LIKE '%" + t + "%' OR " + text_field + " LIKE '%" + t + "%'"
-            for t in safe_terms
-        )
+
+        clauses = _build_oql_clauses(safe_terms, text_field, match_mode)
         effective_oql = "SELECT " + ITOP_KB_CLASS + " WHERE " + clauses
 
-        logger.debug("[kb] search_kb: oql=%r limit=%d", effective_oql, limit)
+        logger.debug(
+            "[kb] search_kb: mode=%r oql=%r limit=%d", match_mode, effective_oql, limit
+        )
 
         result = await client.get(
             ITOP_KB_CLASS,
@@ -182,9 +237,10 @@ def register(mcp, client: ItopClient):
         articles = extract_objects(result)
         if not articles:
             return (
-                "No KB articles found for keywords '" + keywords + "'.\n"
+                "No KB articles found for query '" + query + "' (mode=" + match_mode + ").\n"
                 "OQL used: " + effective_oql + "\n"
-                "Body field used: " + text_field + "."
+                "Body field used: " + text_field + ".\n"
+                "Consider refining the concepts or using a broader match_mode."
             )
 
         header = ["ID", "Title", "Category", "Status", "Summary"]
@@ -204,12 +260,16 @@ def register(mcp, client: ItopClient):
                 snippet,
             ])
 
-        out = ["**" + ITOP_KB_CLASS + " Articles** matching '" + keywords + "':", ""]
+        out = [
+            "**" + ITOP_KB_CLASS + " Articles** matching '"
+            + query + "' (mode=" + match_mode + "):",
+            "",
+        ]
         out.append(format_table(header, rows))
         if len(articles) >= limit:
             out.append(
                 "\nShowing " + str(limit) + " results. Use a higher limit or more specific "
-                "keywords to narrow results."
+                "query to narrow results."
             )
         return "\n".join(out)
 
