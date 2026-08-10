@@ -258,23 +258,26 @@ def register(mcp, client: ItopClient):
         obj_class: str,
         oql: str,
     ) -> str:
-        """Resolve an OQL query to a confirmed iTop class and numeric database ID.
+        """Resolve ONE specific iTop object to its confirmed class and numeric database ID.
 
-        The oql parameter MUST be a valid iTop OQL query starting with SELECT
-        and containing a WHERE clause. Names, email addresses, ticket numbers,
-        and other free-form strings are not accepted -- always formulate an OQL
-        query with a filter condition.
+        Use this tool only when you already know which object you need and what
+        you intend to do with it (load, update, apply a transition, etc.).
+        Do NOT use it to browse, search, or enumerate objects -- the OQL must
+        uniquely or narrowly identify a single target.
 
-        Valid examples:
+        The oql parameter MUST be a valid OQL query starting with SELECT with
+        a WHERE clause. Free-form strings are not accepted.
+
+        Examples:
           SELECT Person WHERE email = 'user@example.com'
           SELECT Organization WHERE name = 'Acme'
           SELECT UserRequest WHERE ref = 'R-000123'
-          SELECT UserRequest WHERE id = 42
+          SELECT NormalChange WHERE id = 42
 
         The class embedded in the OQL takes precedence over obj_class.
         Use obj_class=Ticket when the concrete ticket class is unknown.
-        Also returns the lifecycle state attribute name and current value when
-        the class has a state machine.
+        Also returns the lifecycle state attribute and current value when the
+        class has a state machine.
         """
         # Guard: reject anything that is not a well-formed OQL with WHERE.
         oql_err = _check_oql(oql)
