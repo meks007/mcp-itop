@@ -24,6 +24,7 @@ Module layout:
     crud.py             - generic CRUD + impact tools
     comments.py         - ticket log read/write
     attachments.py      - image and file attachment tools + attachment resources
+    search.py           - indexed search via company/indexedsearch REST op
     transitions.py      - state transition tools (Describe_state_change,
                           Apply_stimulus_to_object,
                           Check_object_previous_lifecycle_state)
@@ -83,6 +84,7 @@ import tools.attachments as _attachments
 import tools.comments as _comments
 import tools.crud as _crud
 import tools.kb as _kb
+import tools.search as _search
 import tools.transitions as _transitions
 
 # ---------------------------------------------------------------------------
@@ -126,6 +128,7 @@ _kb.register(mcp, client)
 _crud.register(mcp, client)
 _comments.register(mcp, client)
 _transitions.register(mcp, client)
+_search.register(mcp, client)
 
 # ---------------------------------------------------------------------------
 # Low-level resource router
@@ -298,20 +301,12 @@ def main() -> None:
     # 1. Database -- synchronous init before any async work starts.
     #    Tool modules imported above (tools.attachments -> attachment_store
     #    -> session.py / refs.py) have already called db.register_schema()
-    #    at import time, so all DDL is queued before this call runs it.
+    #    to declare their tables. db.init() creates them if absent.
     # ------------------------------------------------------------------
     import db
-    db.init()
-    logger.info("[server] db backend ready")
 
-    # ------------------------------------------------------------------
-    # 2. Start uvicorn. _serve() creates the housekeeping task first,
-    #    then hands control to uvicorn.
-    # ------------------------------------------------------------------
-    logger.info(
-        "Starting iTop MCP server on %s:%d (debug=%s)",
-        _MCP_HOST, _MCP_PORT, MCP_DEBUG,
-    )
+    db.init()
+
     asyncio.run(_serve())
 
 
