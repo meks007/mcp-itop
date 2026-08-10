@@ -7,8 +7,9 @@ Note: Apply_stimulus_to_object has been moved to tools/transitions.py.
 ID-only contract
 ----------------
 All tools except Resolve_object require a confirmed integer database ID
-(obj_id: int). Use Resolve_object first when you only have a ref, a bare
-number supplied by the user, or any other ambiguous identifier.
+(obj_id: int). Use Resolve_object first when the numeric ID is unknown.
+Resolve_object accepts only a valid OQL query with a WHERE clause --
+names, email addresses, or other free-form strings are not accepted.
 
 Mention resolution
 ------------------
@@ -56,22 +57,27 @@ _OQL_SELECT_RE = re.compile(r"^\s*SELECT\b", re.IGNORECASE)
 _OQL_WHERE_RE = re.compile(r"\bWHERE\b", re.IGNORECASE)
 
 
-def _check_oql_where(key_or_ref: str) -> "str | None":
-    """Return an error message when key_or_ref is an OQL SELECT without WHERE.
+def _check_oql(oql: str) -> "str | None":
+    """Return an error message when oql is not a valid OQL SELECT with WHERE.
 
-    Returns None when the input is not OQL or when it contains a WHERE clause.
+    Returns None when the query is well-formed (starts with SELECT, has WHERE).
     """
-    if not _OQL_SELECT_RE.match(key_or_ref):
-        return None
-    if _OQL_WHERE_RE.search(key_or_ref):
-        return None
-    return (
-        "Error: OQL queries passed to Resolve_object must include a WHERE clause. "
-        "A bare 'SELECT <class>' without a filter is not allowed -- "
-        "add at least one condition, e.g. "
-        "\"SELECT UserRequest WHERE id = 42\" or "
-        "\"SELECT UserRequest WHERE ref = 'R-000123'\"."
-    )
+    if not _OQL_SELECT_RE.match(oql):
+        return (
+            "Error: Resolve_object requires an OQL query starting with SELECT. "
+            "Names, email addresses, and other free-form strings are not accepted. "
+            "Example: \"SELECT Person WHERE email = 'user@example.com'\" or "
+            "\"SELECT Organization WHERE name = 'Acme'\"."
+        )
+    if not _OQL_WHERE_RE.search(oql):
+        return (
+            "Error: OQL queries must include a WHERE clause. "
+            "A bare 'SELECT <class>' without a filter is not allowed -- "
+            "add at least one condition, e.g. "
+            "\"SELECT Person WHERE email = 'user@example.com'\" or "
+            "\"SELECT UserRequest WHERE ref = 'R-000123'\"."
+        )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -250,22 +256,32 @@ def register(mcp, client: ItopClient):
     @mcp.tool(name="Resolve_object")
     async def itop_resolve(
         obj_class: str,
-        key_or_ref: str,
+        oql: str,
     ) -> str:
-        """Resolve a ticket reference, user-supplied number, OQL query, or other
-        identifier to a confirmed iTop class and numeric database ID.
+        """Resolve an OQL query to a confirmed iTop class and numeric database ID.
+
+        The oql parameter MUST be a valid iTop OQL query starting with SELECT
+        and containing a WHERE clause. Names, email addresses, ticket numbers,
+        and other free-form strings are not accepted -- always formulate an OQL
+        query with a filter condition.
+
+        Valid examples:
+          SELECT Person WHERE email = 'user@example.com'
+          SELECT Organization WHERE name = 'Acme'
+          SELECT UserRequest WHERE ref = 'R-000123'
+          SELECT UserRequest WHERE id = 42
+
+        The class embedded in the OQL takes precedence over obj_class.
+        Use obj_class=Ticket when the concrete ticket class is unknown.
         Also returns the lifecycle state attribute name and current value when
-        the class has a state machine. Use obj_class=Ticket when the concrete
-        ticket class is unknown.
-        OQL queries must include a WHERE clause; a bare 'SELECT <class>'
-        without a filter is not allowed.
+        the class has a state machine.
         """
-        # Guard: reject OQL without a WHERE clause.
-        oql_err = _check_oql_where(key_or_ref)
+        # Guard: reject anything that is not a well-formed OQL with WHERE.
+        oql_err = _check_oql(oql)
         if oql_err:
             return oql_err
 
-        resolved_class, resolved_key = await resolve_key(obj_class, key_or_ref)
+        resolved_class, resolved_key = await resolve_key(obj_class, oql)
 
         # -- Step 1: fetch the class schema (cached after first call per class).
         # Discover the lifecycle state attribute name, if any.
