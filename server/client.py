@@ -542,7 +542,7 @@ class ItopClient:
         """
         response = await self.request({
             "operation": "company/enumerate_transitions",
-            "class": cls,
+            "obj_class": cls,
         })
         if response.get("code", -1) != 0:
             raise ValueError(
