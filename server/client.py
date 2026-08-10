@@ -523,7 +523,7 @@ class ItopClient:
     # company/enumerate_transitions
     # ------------------------------------------------------------------
 
-    async def enumerate_transitions(self, cls: str) -> dict:
+    async def enumerate_transitions(self, cls: str, obj_id: int = 0) -> dict:
         """Fetch the full state machine and field map for an iTop class.
 
         Calls company/enumerate_transitions and returns the full iTop
@@ -531,8 +531,13 @@ class ItopClient:
         Callers are responsible for extracting the relevant payload from
         response["result"] and for caching.
 
+        The REST endpoint requires both obj_class and obj_id. When called
+        for schema discovery (no specific object), pass obj_id=0.
+
         Args:
-            cls: iTop class name, e.g. 'UserRequest'.
+            cls:    iTop class name, e.g. 'UserRequest'.
+            obj_id: Confirmed integer database ID of the object, or 0 for
+                    schema-only mode (returns all transitions for the class).
 
         Returns:
             Full iTop response dict (code, message, result).
@@ -543,6 +548,7 @@ class ItopClient:
         response = await self.request({
             "operation": "company/enumerate_transitions",
             "obj_class": cls,
+            "obj_id": obj_id,
         })
         if response.get("code", -1) != 0:
             raise ValueError(
