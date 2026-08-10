@@ -41,7 +41,7 @@ from helpers import (
 from helpers.stripping import _LEAN_STRIP
 from helpers.mentions import resolve_mentions_in_text, is_caselog_attribute
 from config import DEFAULT_COMMENT
-from cache import get_class_schema, find_lifecycle_state_attribute
+from cache import get_class_schema, find_lifecycle_state_attribute, get_class_hierarchy
 
 logger = logging.getLogger(__name__)
 
@@ -357,16 +357,39 @@ def register(mcp, client: ItopClient):
         output_fields: str = "id, friendlyname",
         comment: str = "",
     ) -> str:
-        """Create an iTop object from JSON fields. Use Describe_class when field names are unknown. Mention tokens in HTML fields and Case Log messages are resolved automatically: @<id>, ?<id>, and R-/I-/C- references. Unresolved tokens remain plain text.
-        """
-        parsed = parse_json_arg(fields, "fields")
-        if isinstance(parsed, str):
-            return parsed
+        """Create a concrete iTop object from JSON fields.
 
+        IMPORTANT: call Describe_class first if you have not already done so
+        for this class. The class may be abstract and cannot be instantiated;
+        Describe_class will tell you which concrete descendant to use instead.
+        Creation is blocked here when the class is known to be abstract.
+
+        Mention tokens in HTML fields and Case Log messages are resolved
+        automatically: @<id>, ?<id>, and R-/I-/C- references.
+        Unresolved tokens remain plain text.
+        """
+        # Fetch schema (cached). Also populates abstract_flag / descendant_classes.
         try:
             schema = await get_class_schema(obj_class, client)
         except Exception:
             schema = None
+
+        # Guard: refuse to create an instance of an abstract class.
+        abstract_flag, concrete_descendants = get_class_hierarchy(obj_class)
+        if abstract_flag is True:
+            msg = (
+                "Error: '" + obj_class + "' is ABSTRACT and cannot be instantiated. "
+                "Use Describe_class to see the available concrete descendants"
+            )
+            if concrete_descendants:
+                msg += ": " + ", ".join(concrete_descendants) + "."
+            else:
+                msg += "."
+            return msg
+
+        parsed = parse_json_arg(fields, "fields")
+        if isinstance(parsed, str):
+            return parsed
 
         parsed = await _resolve_mentions_in_fields(parsed, obj_class, schema, client)
 
@@ -483,7 +506,10 @@ def register(mcp, client: ItopClient):
 
     @mcp.tool(name="Describe_class")
     async def itop_describe_class(obj_class: str) -> str:
-        """Return an iTop class's field schema, including types, text/HTML formats, enum values, references, and lifecycle-state metadata. Works for classes with no instances; results are cached for the server process.
+        """Return an iTop class schema: abstract/concrete status, concrete
+        descendants (when abstract), field types, enum values, references,
+        and lifecycle-state metadata. Always call this before Create_object
+        to verify the class is concrete. Results are cached for the process.
         """
         try:
             schema = await get_class_schema(obj_class, client)
@@ -498,6 +524,30 @@ def register(mcp, client: ItopClient):
 
         if not schema:
             return "Class '" + obj_class + "' returned an empty schema."
+
+        # -- Hierarchy header --
+        abstract_flag, concrete_descendants = get_class_hierarchy(obj_class)
+        lines = []
+        if abstract_flag is True:
+            lines.append("This class is ABSTRACT and cannot be instantiated.")
+            if concrete_descendants:
+                lines.append("Concrete descendants you can create instead:")
+                for cls_name in concrete_descendants:
+                    lines.append("  " + cls_name)
+            else:
+                lines.append("No concrete descendants found.")
+        elif abstract_flag is False:
+            lines.append("This class is concrete and can be instantiated directly.")
+            if concrete_descendants:
+                lines.append("Concrete descendants also available:")
+                for cls_name in concrete_descendants:
+                    lines.append("  " + cls_name)
+        # abstract_flag is None: hierarchy info not available -- omit the block.
+
+        lines.append(
+            "\nClass " + obj_class + " -- " + str(len(schema)) + " fields"
+            + " (" + str(len(_LEAN_STRIP & schema.keys())) + " private, hidden)",
+        )
 
         enums = {}
         refs = {}
@@ -522,11 +572,6 @@ def register(mcp, client: ItopClient):
                 derived[name] = meta
             else:
                 plain[name] = meta
-
-        lines = [
-            "Class " + obj_class + " -- " + str(len(schema)) + " fields"
-            + " (" + str(len(_LEAN_STRIP & schema.keys())) + " private, hidden)",
-        ]
 
         def _section(title: str, fields: dict) -> None:
             if not fields:
