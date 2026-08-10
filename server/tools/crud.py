@@ -263,7 +263,8 @@ def register(mcp, client: ItopClient):
         Use this tool only when you already know which object you need and what
         you intend to do with it (load, update, apply a transition, etc.).
         Do NOT use it to browse, search, or enumerate objects -- the OQL must
-        uniquely or narrowly identify a single target.
+        uniquely or narrowly identify a single target. Do not query for mere "catalog" purposes or to find one object out of many.
+        The resultset is limit to 10 hits.
 
         The oql parameter MUST be a valid OQL query starting with SELECT with
         a WHERE clause. Free-form strings are not accepted.
