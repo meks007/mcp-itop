@@ -41,6 +41,9 @@ await get_transition_map(obj_class, client)       -> dict
 # Class schema (company/describe_class result, lifetime of process)
 await get_class_schema(obj_class, client)         -> dict
 
+# Class hierarchy (abstract flag + concrete descendant list)
+get_class_hierarchy(obj_class)                    -> tuple[bool | None, list | None]
+
 # Lifecycle state attribute discovery
 find_lifecycle_state_attribute(fields)            -> str | None
 
@@ -237,8 +240,12 @@ class TTLCache(Cache[K, V]):
 class ClassEntry:
     exists: bool | None = None       # None = not yet probed
     fields: frozenset = field(default_factory=frozenset)
-    schema: dict = field(default_factory=dict)  # raw describe_class payload
+    schema: dict = field(default_factory=dict)  # raw describe_class fields payload
     meta: dict = field(default_factory=dict)
+    # Set from the describe_class response envelope (not inside 'fields').
+    # None means the REST response has not been fetched yet for this class.
+    abstract_flag: bool | None = None
+    descendant_classes: list | None = None  # flat list of concrete descendant class names
 
 
 class ClassMetadataCache(Cache[str, ClassEntry]):
@@ -709,11 +716,41 @@ async def get_transition_map(obj_class: str, client) -> dict:
 # No TTL: iTop class definitions do not change at runtime without a restart.
 # A per-class asyncio.Lock prevents duplicate REST calls on parallel access.
 #
+# The describe_class REST response envelope is expected to contain:
+#   result.fields            -- dict of field metadata (always present)
+#   result.abstract          -- bool, True when the class cannot be instantiated
+#   result.descendant_classes -- list of {class, abstract, descendant_classes}
+#                                nodes (new schema extension)
+#
+# abstract_flag and descendant_classes (flattened to concrete leaf names) are
+# stored on ClassEntry and exposed via get_class_hierarchy().
+#
 # Key:   obj_class string, e.g. "UserRequest"
-# Value: raw fields dict from the describe_class REST response
+# Value: fields dict from the describe_class REST response
 
 _schema_locks: dict[str, asyncio.Lock] = {}
 _schema_lock_guard = asyncio.Lock()
+
+
+def _collect_concrete_descendants(nodes: list) -> list:
+    """Recursively collect class names of all non-abstract descendants.
+
+    Args:
+        nodes: list of descendant node dicts, each with keys
+               'class' (str), 'abstract' (bool), 'descendant_classes' (list).
+
+    Returns:
+        Flat list of concrete (non-abstract) class name strings.
+    """
+    result = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        if not node.get("abstract", True):
+            result.append(node["class"])
+        children = node.get("descendant_classes") or []
+        result.extend(_collect_concrete_descendants(children))
+    return result
 
 
 async def get_class_schema(obj_class: str, client) -> dict:
@@ -722,6 +759,10 @@ async def get_class_schema(obj_class: str, client) -> dict:
     On cache hit, returns the stored schema dict immediately.
     On cache miss, acquires a per-class lock, calls company/describe_class,
     validates the response, seeds the cache, and returns the schema.
+
+    Also extracts and caches abstract_flag and descendant_classes (concrete
+    leaf names only) from the response envelope onto ClassEntry. Retrieve
+    them via get_class_hierarchy(obj_class).
 
     The schema dict maps field name to a metadata dict containing at least
     'type', and optionally 'allowed_values', 'values_limited', and
@@ -769,9 +810,43 @@ async def get_class_schema(obj_class: str, client) -> dict:
                 + " -- response: " + repr(response)
             )
 
+        # Extract abstract flag and descendant hierarchy (new schema extension).
+        # Both keys are optional to stay backward-compatible with older iTop versions.
+        entry = class_cache.probe_entry(obj_class)
+        if isinstance(payload, dict):
+            raw_abstract = payload.get("abstract")
+            if isinstance(raw_abstract, bool):
+                entry.abstract_flag = raw_abstract
+            raw_descendants = payload.get("descendant_classes")
+            if isinstance(raw_descendants, list):
+                entry.descendant_classes = _collect_concrete_descendants(raw_descendants)
+
         class_cache.seed_schema(obj_class, schema)
         logger.debug(
-            "[class_schema] cached schema cls=%r fields=%d",
-            obj_class, len(schema),
+            "[class_schema] cached schema cls=%r fields=%d abstract=%s concrete_descendants=%d",
+            obj_class,
+            len(schema),
+            entry.abstract_flag,
+            len(entry.descendant_classes) if entry.descendant_classes is not None else -1,
         )
         return schema
+
+
+def get_class_hierarchy(obj_class: str) -> "tuple[bool | None, list | None]":
+    """Return (abstract_flag, concrete_descendants) for obj_class from cache.
+
+    Both values are None when get_class_schema() has not yet been called for
+    this class or when the REST response did not include the hierarchy extension.
+
+    Args:
+        obj_class: iTop class name.
+
+    Returns:
+        Tuple of (abstract_flag, concrete_descendants).
+        abstract_flag:        True/False/None.
+        concrete_descendants: flat list of concrete class name strings, or None.
+    """
+    entry = class_cache._store.get(obj_class)
+    if entry is None:
+        return (None, None)
+    return (entry.abstract_flag, entry.descendant_classes)
