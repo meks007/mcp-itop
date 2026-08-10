@@ -315,7 +315,23 @@ def register(mcp, client: ItopClient):
         else:
             output_fields = ensure_ref_field(resolved_class, base_fields)
 
-        result = await client.get(resolved_class, resolved_key, fields=output_fields)
+        # Fetch at most 11 objects: if more than 10 are returned the OQL is
+        # too broad for Resolve_object and the LLM should narrow its query.
+        _RESOLVE_LIMIT = 10
+        result = await client.get(resolved_class, resolved_key, fields=output_fields, limit=_RESOLVE_LIMIT + 1)
+
+        # -- Hit-count guard: refuse to process over-broad queries.
+        _result_objects = result.get("objects") or {}
+        if len(_result_objects) > _RESOLVE_LIMIT:
+            return (
+                "Error: Resolve_object returned more than "
+                + str(_RESOLVE_LIMIT)
+                + " hits for the supplied OQL. "
+                "Resolve_object is designed to identify a single, specific object. "
+                "Please refine the query with additional WHERE conditions (e.g. add "
+                "an exact field match such as 'ref', 'name', or 'id') so that it "
+                "matches at most one object, then call Resolve_object again."
+            )
 
         # -- Step 3: annotate the formatted output with lifecycle metadata.
         # Extract the lifecycle state value from the first returned object so
