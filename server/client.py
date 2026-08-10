@@ -21,6 +21,8 @@ ItopClient.get_class_fields -- field name set for a class; derived from describe
 ItopClient.describe_class   -- full field schema from company/describe_class.
 ItopClient.state_history    -- call company/state_history and return the raw iTop
                                response dict unchanged.
+ItopClient.indexed_search   -- call company/indexedsearch and return the raw iTop
+                               response dict unchanged.
 
 Use get_raw when you need the unfiltered response (e.g. internal resolvers,
 attachment queries). Use get everywhere else so that privacy-sensitive fields
@@ -583,6 +585,41 @@ class ItopClient:
             "operation": "company/state_history",
             "obj_class": obj_class,
             "obj_id": obj_id,
+        })
+
+    # ------------------------------------------------------------------
+    # company/indexedsearch
+    # ------------------------------------------------------------------
+
+    async def indexed_search(
+        self,
+        query: str,
+        obj_class: str = "",
+        limit: int = 10,
+    ) -> dict:
+        """Search Typesense-indexed iTop objects through company/indexedsearch.
+
+        Returns the full iTop REST response dict unchanged. Callers must
+        inspect response["code"] before reading response["result"].
+
+        The Typesense connection, API key, collection, and query configuration
+        are owned by the iTop extension. This method only forwards the request.
+
+        Args:
+            query:     Search text. Must not be blank.
+            obj_class: Optional iTop class filter (e.g. 'FAQ'). Empty string
+                       means no filter -- all indexed classes are searched.
+            limit:     Maximum number of hits to return. Clamped server-side
+                       to 1..10 by the iTop extension.
+
+        Returns:
+            Full iTop response dict (code, message, result).
+        """
+        return await self.request({
+            "operation": "company/indexedsearch",
+            "query": query,
+            "class": obj_class,
+            "limit": limit,
         })
 
     # ------------------------------------------------------------------
