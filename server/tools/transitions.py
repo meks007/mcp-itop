@@ -429,7 +429,10 @@ def register(mcp, client: ItopClient) -> None:
         current_state: str = "",
         path_mode: str = "usual",
     ) -> str:
-        """Show lifecycle paths to target_state. With obj_id, use the object's current state; otherwise start from current_state or all states. obj_id must be a confirmed numeric ID. Internal transitions are marked and cannot be applied manually. path_mode is usual (up to 10 representative paths) or all. Apply_stimulus_to_object executes one direct transition per call.
+        """Show lifecycle paths to target_state. With obj_id, use the object's current state; 
+        otherwise start from current_state or all states. obj_id must be a confirmed numeric ID. 
+        Internal transitions are marked and cannot be applied manually. path_mode is usual (up to 10 representative paths) or all. 
+        Apply_stimulus_to_object executes one direct transition per call.
         """
         if path_mode not in {"usual", "all"}:
             return "Error: path_mode must be \"usual\" or \"all\"."
