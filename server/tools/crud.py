@@ -26,6 +26,7 @@ is never blocked by a failed mention lookup.
 from __future__ import annotations
 
 import logging
+import re
 
 from client import ItopClient
 from helpers import (
@@ -44,6 +45,34 @@ from config import DEFAULT_COMMENT
 from cache import get_class_schema, find_lifecycle_state_attribute, get_class_hierarchy
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# OQL guard
+# ---------------------------------------------------------------------------
+
+# Matches strings that start with SELECT (ignoring leading whitespace and case).
+_OQL_SELECT_RE = re.compile(r"^\s*SELECT\b", re.IGNORECASE)
+# Matches a WHERE keyword anywhere in the string (word boundary, case-insensitive).
+_OQL_WHERE_RE = re.compile(r"\bWHERE\b", re.IGNORECASE)
+
+
+def _check_oql_where(key_or_ref: str) -> "str | None":
+    """Return an error message when key_or_ref is an OQL SELECT without WHERE.
+
+    Returns None when the input is not OQL or when it contains a WHERE clause.
+    """
+    if not _OQL_SELECT_RE.match(key_or_ref):
+        return None
+    if _OQL_WHERE_RE.search(key_or_ref):
+        return None
+    return (
+        "Error: OQL queries passed to Resolve_object must include a WHERE clause. "
+        "A bare 'SELECT <class>' without a filter is not allowed -- "
+        "add at least one condition, e.g. "
+        "\"SELECT UserRequest WHERE id = 42\" or "
+        "\"SELECT UserRequest WHERE ref = 'R-000123'\"."
+    )
+
 
 # ---------------------------------------------------------------------------
 # Type taxonomy helpers
@@ -228,7 +257,14 @@ def register(mcp, client: ItopClient):
         Also returns the lifecycle state attribute name and current value when
         the class has a state machine. Use obj_class=Ticket when the concrete
         ticket class is unknown.
+        OQL queries must include a WHERE clause; a bare 'SELECT <class>'
+        without a filter is not allowed.
         """
+        # Guard: reject OQL without a WHERE clause.
+        oql_err = _check_oql_where(key_or_ref)
+        if oql_err:
+            return oql_err
+
         resolved_class, resolved_key = await resolve_key(obj_class, key_or_ref)
 
         # -- Step 1: fetch the class schema (cached after first call per class).
@@ -359,12 +395,10 @@ def register(mcp, client: ItopClient):
     ) -> str:
         """Create a concrete iTop object from JSON fields.
 
-        Before calling this tool you MUST have already called:
-          1. Describe_class -- to confirm the class is concrete and learn its
-             fields. Abstract classes cannot be instantiated; creation is
-             blocked here when the class is known to be abstract.
-          2. Describe_state_change -- to understand the initial lifecycle state
-             and any required fields for the opening transition.
+        IMPORTANT: call Describe_class first if you have not already done so
+        for this class. The class may be abstract and cannot be instantiated;
+        Describe_class will tell you which concrete descendant to use instead.
+        Creation is blocked here when the class is known to be abstract.
 
         Mention tokens in HTML fields and Case Log messages are resolved
         automatically: @<id>, ?<id>, and R-/I-/C- references.
