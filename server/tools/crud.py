@@ -414,9 +414,11 @@ def register(mcp, client: ItopClient):
     ) -> str:
         """Create a concrete iTop object from JSON fields.
 
-        IMPORTANT: call Describe_class first if you have not already done so
-        for this class. The class may be abstract and cannot be instantiated;
+        Call Describe_class AND Describe_state_change first if you have not already done so. 
+        The class may be abstract and cannot be instantiated; there are specific fields needed
+        for the creation to work. 
         Describe_class will tell you which concrete descendant to use instead.
+        Describe_state_change will tell you which attributes you need to submit.
         Creation is blocked here when the class is known to be abstract.
 
         Mention tokens in HTML fields and Case Log messages are resolved
