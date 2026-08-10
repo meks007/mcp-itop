@@ -412,7 +412,7 @@ def register(mcp, client: ItopClient):
         output_fields: str = "id, friendlyname",
         comment: str = "",
     ) -> str:
-        """Create a concrete iTop object from JSON fields.
+        """Create a concrete iTop object from JSON fields. Supply fields as valid JSON!
 
         Call Describe_class AND Describe_state_change first if you have not already done so. 
         The class may be abstract and cannot be instantiated; there are specific fields needed
