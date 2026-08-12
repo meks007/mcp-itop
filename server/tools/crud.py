@@ -154,7 +154,12 @@ def _format_field_entry(name: str, meta: dict) -> str:
         lines.append("    format: text")
 
     if meta.get("is_lifecycle_state") is True:
-        lines.append("    lifecycle state: yes -- use Apply_stimulus_to_object")
+        lines.append("    lifecycle state: yes -- do not set this field directly")
+        lines.append(
+            "    Before Create_object or Apply_stimulus_to_object, call"
+            " Describe_state_change to determine the required fields for"
+            " the initial state or the target state."
+        )
 
     return "\n".join(lines)
 
