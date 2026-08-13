@@ -644,6 +644,7 @@ def register(mcp, client: ItopClient):
         html_text = {}
         derived = {}
         plain = {}
+        logs = {}
 
         for name, meta in schema.items():
             if name in _LEAN_STRIP:
@@ -655,6 +656,8 @@ def register(mcp, client: ItopClient):
                 refs[name] = meta
             elif kind == "link":
                 links[name] = meta
+            elif kind == "log":
+                logs[name] = meta
             elif kind in ("html", "text"):
                 html_text[name] = meta
             elif kind == "derived":
@@ -672,6 +675,7 @@ def register(mcp, client: ItopClient):
         _section("Enum fields", enums)
         _section("Object reference fields (ExternalKey)", refs)
         _section("Relation / link-set fields", links)
+        _section("Log fields", logs)
         _section("HTML and text fields", html_text)
         _section("Simple value fields", plain)
         _section("Derived, system and read-only fields", derived)
