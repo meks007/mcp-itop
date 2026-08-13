@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 # Fields stripped from every core/get response when full=False.
 # Add field names here to hide them from callers by default.
-_LEAN_STRIP: frozenset[str] = frozenset({"private_log"})
+_LEAN_STRIP: frozenset[str] = frozenset({})
 
 
 def apply_field_strip(result: dict, strip: frozenset[str]) -> dict:
