@@ -156,7 +156,9 @@ async def _sync_task(
     """Download and normalize image binaries for all image entries.
 
     Signals per-id Event after each entry (success or failure).
-    Signals done_event when all entries have been processed.
+    Signals done_event when all entries have been processed, guaranteed
+    via try/finally so that waiters in wait_for_all() are always unblocked
+    even when the task is cancelled mid-run.
     """
     token_preview = token[:8] + "..." if len(token) > 8 else token
     logger.debug(
@@ -164,74 +166,77 @@ async def _sync_task(
         token_preview, obj_class, obj_id, len(entries),
     )
 
-    async with httpx.AsyncClient(
-        verify=ITOP_VERIFY_SSL,
-        timeout=ITOP_TIMEOUT,
-    ) as http_client:
-        for entry in entries:
-            entry_id = entry["id"]
-            source = entry.get("source", "")
-            mimetype = entry.get("mimetype", "")
-            is_image = (
-                source == "InlineImage"
-                or mimetype.startswith("image/")
-            )
+    try:
+        async with httpx.AsyncClient(
+            verify=ITOP_VERIFY_SSL,
+            timeout=ITOP_TIMEOUT,
+        ) as http_client:
+            for entry in entries:
+                entry_id = entry["id"]
+                source = entry.get("source", "")
+                mimetype = entry.get("mimetype", "")
+                is_image = (
+                    source == "InlineImage"
+                    or mimetype.startswith("image/")
+                )
 
-            if not is_image:
-                # Signal event immediately so wait_for_image() never blocks
-                state = _sync_state.get(token)
-                if state and entry_id in state.events:
-                    state.events[entry_id].set()
-                continue
+                if not is_image:
+                    # Signal event immediately so wait_for_image() never blocks.
+                    state = _sync_state.get(token)
+                    if state and entry_id in state.events:
+                        state.events[entry_id].set()
+                    continue
 
-            try:
-                if source == "InlineImage":
-                    secret = entry.get("inline_secret") or ""
-                    binary, dl_mimetype = await _download_inline_image(
-                        entry_id, secret, token, http_client,
+                try:
+                    if source == "InlineImage":
+                        secret = entry.get("inline_secret") or ""
+                        binary, dl_mimetype = await _download_inline_image(
+                            entry_id, secret, token, http_client,
+                        )
+                    else:
+                        binary, dl_mimetype = await _fetch_image_attachment(
+                            entry_id, token, http_client, mimetype,
+                        )
+
+                    used_mime = dl_mimetype if dl_mimetype else mimetype
+                    filename = entry.get("filename", "attachment")
+
+                    normalized, norm_mime, norm_filename = _normalize_image(
+                        binary, used_mime, filename
                     )
-                else:
-                    binary, dl_mimetype = await _fetch_image_attachment(
-                        entry_id, token, http_client, mimetype,
+                    # Pass norm_filename so the DB filename column is updated to
+                    # the .jpg name. build_prepared_attachment_payloads() reads it
+                    # back via get_single_attachment_metadata() to build the URI,
+                    # ensuring uri and mimeType are consistent (both .jpg / jpeg).
+                    store_image_content(
+                        token, obj_class, obj_id, entry_id,
+                        normalized, norm_mime, norm_filename,
+                    )
+                    logger.debug(
+                        "[attachment_sync] _sync_task: stored id=%s"
+                        " mime=%s filename=%s bytes=%d",
+                        entry_id, norm_mime, norm_filename, len(normalized),
                     )
 
-                used_mime = dl_mimetype if dl_mimetype else mimetype
-                filename = entry.get("filename", "attachment")
+                except asyncio.CancelledError:
+                    raise
 
-                normalized, norm_mime, norm_filename = _normalize_image(
-                    binary, used_mime, filename
-                )
-                # Pass norm_filename so the DB filename column is updated to
-                # the .jpg name. build_prepared_attachment_payloads() reads it
-                # back via get_single_attachment_metadata() to build the URI,
-                # ensuring uri and mimeType are consistent (both .jpg / jpeg).
-                store_image_content(
-                    token, obj_class, obj_id, entry_id,
-                    normalized, norm_mime, norm_filename,
-                )
-                logger.debug(
-                    "[attachment_sync] _sync_task: stored id=%s"
-                    " mime=%s filename=%s bytes=%d",
-                    entry_id, norm_mime, norm_filename, len(normalized),
-                )
+                except Exception as exc:
+                    logger.warning(
+                        "[attachment_sync] _sync_task: failed id=%s: %s",
+                        entry_id, exc,
+                    )
 
-            except asyncio.CancelledError:
-                raise
+                finally:
+                    state = _sync_state.get(token)
+                    if state and entry_id in state.events:
+                        state.events[entry_id].set()
 
-            except Exception as exc:
-                logger.warning(
-                    "[attachment_sync] _sync_task: failed id=%s: %s",
-                    entry_id, exc,
-                )
-
-            finally:
-                state = _sync_state.get(token)
-                if state and entry_id in state.events:
-                    state.events[entry_id].set()
-
-    state = _sync_state.get(token)
-    if state:
-        state.done_event.set()
+    finally:
+        # Always unblock waiters regardless of cancellation or error.
+        state = _sync_state.get(token)
+        if state:
+            state.done_event.set()
 
     logger.debug(
         "[attachment_sync] _sync_task: done token=%s cls=%s id=%d",
@@ -281,6 +286,15 @@ async def start_sync(
 
     Creates one asyncio.Event per entry. Non-image entry events are set
     immediately by the task so wait_for_image() never blocks on them.
+
+    Race-condition note
+    -------------------
+    The old task's done callback (_on_done) may fire and remove
+    _sync_state[token] while we are awaiting asyncio.shield(existing.task).
+    The removal is therefore performed with an identity-checked pop:
+    the entry is only deleted when it still belongs to the old _SyncState
+    instance, preventing a KeyError and avoiding accidental removal of a
+    state that was already replaced by another coroutine.
     """
     token_preview = token[:8] + "..." if len(token) > 8 else token
     existing = _sync_state.get(token)
@@ -294,7 +308,7 @@ async def start_sync(
             )
             return None
 
-        # Different object - cancel old task and clear old metadata
+        # Different object -- cancel old task and clear old metadata.
         old_class = existing.obj_class
         old_id = existing.obj_id
         logger.debug(
@@ -307,14 +321,23 @@ async def start_sync(
             await asyncio.shield(existing.task)
         except (asyncio.CancelledError, Exception):
             pass
-        del _sync_state[token]
+
+        # Identity-checked removal: the done callback may have already removed
+        # the entry while we were awaiting the cancelled task above. Only pop
+        # when the slot still holds the same _SyncState we started with.
+        if _sync_state.get(token) is existing:
+            _sync_state.pop(token, None)
+            logger.debug(
+                "[attachment_sync] start_sync: state removed token=%s", token_preview
+            )
+
         clear_attachment_metadata(token, old_class, old_id)
         warning = (
             "Cache for " + old_class + " obj_id " + str(old_id)
             + " cleared. Now preparing " + obj_class + " obj_id " + str(obj_id) + "."
         )
 
-    # Build per-entry events
+    # Build per-entry events.
     events: dict[str, asyncio.Event] = {e["id"]: asyncio.Event() for e in entries}
     done_event = asyncio.Event()
 
@@ -331,7 +354,7 @@ async def start_sync(
         done_event=done_event,
     )
 
-    # Clean up state dict when task finishes
+    # Clean up state dict when task finishes.
     def _on_done(t: asyncio.Task) -> None:
         state = _sync_state.get(token)
         if state and state.task is t:
