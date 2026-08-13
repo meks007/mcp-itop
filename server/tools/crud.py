@@ -158,8 +158,8 @@ def _format_field_entry(name: str, meta: dict) -> str:
         lines.append("    lifecycle state: yes -- do not set this field directly")
         lines.append(
             "    Before Create_object or Apply_stimulus_to_object, call"
-            " Describe_state_change to determine the required fields for"
-            " the initial state or the target state."
+            "To determine the required fields for the initial state or the target state, "
+            "call describe_state_change if you have not already done so."
         )
 
     return "\n".join(lines)
@@ -445,8 +445,8 @@ def register(mcp, client: ItopClient):
         Creation is blocked here when the class is known to be abstract.
 
         Mention tokens in HTML fields and Case Log messages are resolved
-        automatically: @<id>, ?<id>, and R-/I-/C- references.
-        Unresolved tokens remain plain text.
+        automatically if they are A-Z. Non-character symbols (like @ for Person, ? for FAQ) need
+        to be resolved first. Use describe_mentions to get mention tokens.
         """
         # Fetch schema (cached). Also populates abstract_flag / descendant_classes.
         try:
@@ -497,8 +497,8 @@ def register(mcp, client: ItopClient):
         Describe_state_change will tell you which attributes are required for the target state.
 
         Mention tokens in HTML fields and Case Log messages are resolved
-        automatically: @<id>, ?<id>, and R-/I-/C- references.
-        Unresolved tokens remain plain text.
+        automatically if they are A-Z. Non-character symbols (like @ for Person, ? for FAQ) need
+        to be resolved first. Use describe_mentions to get mention tokens.
         """
         parsed = parse_json_arg(fields, "fields")
         if isinstance(parsed, str):
