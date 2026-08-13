@@ -436,9 +436,9 @@ def register(mcp, client: ItopClient):
     ) -> str:
         """Create a concrete iTop object from JSON fields. Supply fields as valid JSON!
 
-        Call Describe_class AND Describe_state_change first if you have not already done so. 
+        Call Describe_class AND Describe_state_change first if you have not already done so.
         The class may be abstract and cannot be instantiated; there are specific fields needed
-        for the creation to work. 
+        for the creation to work.
         Describe_class will tell you which concrete descendant to use instead.
         Describe_state_change will tell you which attributes you need to submit.
         Creation is blocked here when the class is known to be abstract.
@@ -488,7 +488,16 @@ def register(mcp, client: ItopClient):
         output_fields: str = "id, friendlyname",
         comment: str = "",
     ) -> str:
-        """Update an iTop object by confirmed numeric ID. Resolve references first. Do not set its lifecycle-state field directly; use Apply_stimulus_to_object. Mention tokens in HTML fields and Case Log messages are resolved automatically: @<id>, ?<id>, and R-/I-/C- references.
+        """Update an iTop object by confirmed numeric ID. Supply fields as valid JSON!
+
+        Call Describe_class AND Describe_state_change first if you have not already done so.
+        Do not set the lifecycle-state field directly; use Apply_stimulus_to_object instead.
+        Describe_class will tell you the field types and which fields are lifecycle-controlled.
+        Describe_state_change will tell you which attributes are required for the target state.
+
+        Mention tokens in HTML fields and Case Log messages are resolved
+        automatically: @<id>, ?<id>, and R-/I-/C- references.
+        Unresolved tokens remain plain text.
         """
         parsed = parse_json_arg(fields, "fields")
         if isinstance(parsed, str):
