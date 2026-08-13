@@ -688,6 +688,15 @@ async def get_transition_map(obj_class: str, client) -> dict:
         raise ValueError(
             "enumerate_transitions returned no valid result for " + obj_class
         )
+
+    # PHP json_encode serializes an empty associative array as [].
+    # For this endpoint an empty list means the class has no lifecycle states.
+    # Normalize to {} so downstream validation and callers see a consistent map.
+    raw_transitions = schema.get("transitions")
+    if raw_transitions == []:
+        schema = dict(schema)
+        schema["transitions"] = {}
+
     if not isinstance(schema.get("transitions"), dict):
         raise ValueError(
             "enumerate_transitions result missing transitions map for " + obj_class
