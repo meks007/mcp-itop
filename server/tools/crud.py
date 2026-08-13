@@ -275,12 +275,6 @@ def register(mcp, client: ItopClient):
         The oql parameter MUST be a valid OQL query starting with SELECT with
         a WHERE clause. Free-form strings are not accepted.
 
-        Examples:
-          SELECT Person WHERE email = 'user@example.com'
-          SELECT Organization WHERE name = 'Acme'
-          SELECT UserRequest WHERE ref = 'R-000123'
-          SELECT NormalChange WHERE id = 42
-
         The class embedded in the OQL takes precedence over obj_class.
         Use obj_class=Ticket when the concrete ticket class is unknown.
         Also returns the lifecycle state attribute and current value when the
@@ -431,7 +425,7 @@ def register(mcp, client: ItopClient):
     @mcp.tool(name="Create_object")
     async def itop_create(
         obj_class: str,
-        fields: str,
+        fields_json: str,
         output_fields: str = "id, friendlyname",
         comment: str = "",
     ) -> str:
@@ -467,7 +461,7 @@ def register(mcp, client: ItopClient):
                 msg += "."
             return msg
 
-        parsed = parse_json_arg(fields, "fields")
+        parsed = parse_json_arg(fields_json, "fields_json")
         if isinstance(parsed, str):
             return parsed
 
@@ -485,7 +479,7 @@ def register(mcp, client: ItopClient):
     async def itop_update(
         obj_class: str,
         obj_id: int,
-        fields: str,
+        fields_json: str,
         output_fields: str = "id, friendlyname",
         comment: str = "",
     ) -> str:
@@ -493,14 +487,15 @@ def register(mcp, client: ItopClient):
 
         Call Describe_class AND Describe_state_change first if you have not already done so.
         Do not set the lifecycle-state field directly; use Apply_stimulus_to_object instead.
-        Describe_class will tell you the field types and which fields are lifecycle-controlled.
+        The lifecycle-state field is not necessarily called 'status'.
+        Describe_class will tell you the lifecycle-state field, the field types and which fields are lifecycle-controlled.
         Describe_state_change will tell you which attributes are required for the target state.
 
         Mention tokens in HTML fields and Case Log messages are resolved
         automatically if they are A-Z. Non-character symbols (like @ for Person, ? for FAQ) need
         to be resolved first. Use describe_mentions to get mention tokens.
         """
-        parsed = parse_json_arg(fields, "fields")
+        parsed = parse_json_arg(fields_json, "fields_json")
         if isinstance(parsed, str):
             return parsed
 

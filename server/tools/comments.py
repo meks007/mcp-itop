@@ -53,7 +53,12 @@ def register(mcp, client: ItopClient):
         text: str,
         log_field: Literal["public_log", "private_log", "private_log_ai"] = "public_log",
     ) -> str:
-        """Add an HTML entry to a ticket log using a confirmed numeric object ID. log_field may be public_log, private_log, or private_log_ai. Mention tokens are resolved automatically: @<id> for a Person, ?<id> for an FAQ article, and R-/I-/C- references for tickets. Resolve Person and FAQ IDs first; call Describe_mentions for configured tags.
+        """Add an HTML entry to a ticket log using a confirmed numeric object ID. 
+        Use describe_class to get possible log fields for a class. 
+        
+        Mention tokens in HTML fields and Case Log messages are resolved
+        automatically if they are A-Z. Non-character symbols (like @ for Person, ? for FAQ) need
+        to be resolved first. Use describe_mentions to get mention tokens.
         """
         if log_field not in _VALID_LOG_FIELDS:
             return "Error: log_field must be one of " + ", ".join(sorted(_VALID_LOG_FIELDS)) + "."
@@ -80,7 +85,9 @@ def register(mcp, client: ItopClient):
 
     @mcp.tool(name="Describe_mentions")
     async def itop_describe_mentions() -> str:
-        """Return configured mention tags, target classes, and lookup attributes. Resolve objects before using ID-based tags; for reference-based tags, use the complete ticket reference such as R-000084.
+        """Return configured mention tags, target classes, and lookup attributes. 
+        Resolve objects before using ID-based tags; for reference-based tags, 
+        use the complete ticket reference such as R-000084.
         """
         config = await get_mention_config(client)
         if not config:
