@@ -107,7 +107,7 @@ def _field_kind(type_str: str) -> str:
         return "enum"
     if type_str.startswith("Class:"):
         return "ref"
-    if type_str.startswith("Class:"):
+    if type_str.startswith("Log:"):
         return "log"
     if type_str.startswith("Link:"):
         return "link"
