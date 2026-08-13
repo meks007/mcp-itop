@@ -529,7 +529,9 @@ def register(mcp, client: ItopClient) -> None:
         field_lines: str = "",
         output_fields: str = "id, friendlyname",
     ) -> str:
-        """Apply one direct user-action lifecycle transition to an iTop object by confirmed numeric ID. Use Describe_state_change to find valid target states and required fields. Provide fields as key=value or key: value lines. Internal transitions cannot be applied manually.
+        """Apply one direct user-action lifecycle transition to an iTop object by confirmed numeric ID. 
+        If you haven't done so, use describe_state_change to find valid target states and required fields. 
+        Provide fields as key=value or key: value lines. Internal transitions cannot be applied manually.
         """
         schema = await get_transition_map(obj_class, client)
         transitions = schema.get("transitions", {})
