@@ -90,7 +90,6 @@ _DERIVED_TYPE_PREFIXES = (
     "AttributeFinalClass",
     "AttributeSubItem",
     "AttributeStopWatch",
-    "AttributeCaseLog",
     "AttributeCustomFields",
 )
 
@@ -108,6 +107,8 @@ def _field_kind(type_str: str) -> str:
         return "enum"
     if type_str.startswith("Class:"):
         return "ref"
+    if type_str.startswith("Class:"):
+        return "log"
     if type_str.startswith("Link:"):
         return "link"
     if type_str == "Value:HTML":
