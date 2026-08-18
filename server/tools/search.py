@@ -121,13 +121,11 @@ def register(mcp, client: ItopClient) -> None:
         obj_class: str = "",
         limit: int = 10,
     ) -> str:
-        """Search Typesense-indexed iTop objects (FAQ, user requests, incidents,
-        normal changes). Returns class and numeric ID for use with Load_object.
+        """Search iTop objects of all kinds. Returns class and numeric ID for use with other tools.
 
-        Results come from the Typesense index maintained by the iTop extension.
+        Results come from the Typesense index maintained by iTop.
         The index may lag behind live iTop data by a short synchronisation window.
-        Always load the full, authoritative object with Load_object after selecting
-        a result.
+        Load the full object with Load_object or Resolve_object if you need further details.
 
         When search is unavailable, use Resolve_object with a known reference or
         OQL query and then Load_object with the returned class and ID.
